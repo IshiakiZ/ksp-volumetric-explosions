@@ -1,0 +1,31 @@
+Volumetric Explosions @VERSION@
+for Kerbal Space Program 1.12.x
+
+The game's explosions as a simulation of fire, smoke and dust, drawn as a true volume.
+It needs no other mod.
+
+INSTALL
+  Copy the folder GameData/VolumetricExplosions from this download into your KSP's
+  GameData folder, and start the game. To remove the mod, delete that folder.
+
+ON A MAC, ONE MORE STEP (if a browser downloaded this)
+  The mod has a small library of its own that does its heaviest sums. macOS marks
+  everything a browser downloads and will not let a game load a marked library, so the
+  mod leaves it alone and does those sums the slow way: the picture is the same, the
+  frame rate while there is smoke about is lower. To have the library used, take the
+  mark off that one file, in Terminal:
+
+    xattr -d com.apple.quarantine "<your KSP folder>/GameData/VolumetricExplosions/PluginData/vfxgrid.dylib"
+
+  Only do this for a copy of the mod you trust: that mark is how macOS knows a file
+  came from the internet.
+
+WHERE IT WORKS
+  Made and tested on a Mac. On Linux it should work the same; nobody has run it there.
+  On Windows the smoke is drawn as soft sprites, not as a volume, unless the game is
+  started with -force-glcore; nobody has run it there either.
+
+SETTINGS
+  GameData/VolumetricExplosions/settings.cfg
+
+Everything else: https://github.com/IshiakiZ/ksp-volumetric-explosions
