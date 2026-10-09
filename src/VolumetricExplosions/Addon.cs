@@ -96,7 +96,14 @@ namespace VolumetricExplosions
         }
     }
 
-    /// <summary>What the player can change in GameData/VolumetricExplosions/settings.cfg.</summary>
+    /// <summary>
+    /// What the player can change in GameData/VolumetricExplosions/PluginData/settings.cfg.
+    ///
+    /// It is in PluginData because the game reads every .cfg file anywhere else under GameData as one of its own configs, and
+    /// after any change to one of those the game's next start is a slow one (ModuleManager works every config out again, and
+    /// the game measures every part's drag again). The game does not look into a PluginData folder. Until version 0.3.2 the
+    /// file was beside the library: one found there is moved, once, with whatever the player had set in it.
+    /// </summary>
     public static class Settings
     {
         public static bool Enabled = true, Light = true, Debris = true, Shockwave = true, Shake = true, Scorch = true, Push = true, Collide = true, Volume = true, Half = true, Native = true, Log = false;
@@ -118,7 +125,18 @@ namespace VolumetricExplosions
         {
             try
             {
-                string path = Folder + "settings.cfg";
+                string path = Folder + "PluginData/settings.cfg", was = Folder + "settings.cfg";
+                if (File.Exists(was))
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(Folder + "PluginData");
+                        File.Copy(was, path, true);
+                        File.Delete(was);
+                        Addon.Log("settings.cfg is now kept in the PluginData folder, where changing it does not slow the game's next start: yours was moved there");
+                    }
+                    catch (Exception ex) { path = was; Addon.Log("settings.cfg could not be moved into PluginData (" + ex.Message + "): read where it is"); }
+                }
                 if (!File.Exists(path)) return;
                 ConfigNode file = ConfigNode.Load(path);
                 ConfigNode node = file != null ? file.GetNode("VOLUMETRIC_EXPLOSIONS") : null;

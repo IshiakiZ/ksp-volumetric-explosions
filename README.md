@@ -41,7 +41,7 @@ see [Installing](docs/Installing.md).
 
 ## Settings
 
-In `GameData/VolumetricExplosions/settings.cfg`. The ones most worth knowing: `quality` (0.2 light to 3
+In `GameData/VolumetricExplosions/PluginData/settings.cfg`. The ones most worth knowing: `quality` (0.2 light to 3
 heavy), `size`, `smoke` (how long it hangs), `wind`, and `enabled = false` to have the stock explosions
 back. [All of them](docs/Settings.md).
 

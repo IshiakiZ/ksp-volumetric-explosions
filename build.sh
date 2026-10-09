@@ -23,11 +23,12 @@ OUT=GameData/VolumetricExplosions
 build() {
   mkdir -p "$OUT/PluginData"
   compile "$OUT/VolumetricExplosions.dll" "" "$SRC"
-  rm -f "$OUT/PluginData/"*
+  rm -f "$OUT/PluginData/"* "$OUT/settings.cfg"
   cp "$SRC"/Textures/*.png "$SRC"/Textures/*.bin "$SRC"/Shaders/*.bundle "$OUT/PluginData/"
   native "$OUT/PluginData"
   others "$OUT/PluginData"
-  cp "$SRC/settings.cfg" "$OUT/settings.cfg"
+  # (the settings are in PluginData, which the game does not read: a .cfg anywhere else is one of the game's configs, and changing it costs a slow start)
+  cp "$SRC/settings.cfg" "$OUT/PluginData/settings.cfg"
 }
 
 case "$MODE" in
@@ -46,11 +47,14 @@ case "$MODE" in
     FX="$KSP_DIR/GameData/VolumetricExplosions"
     mkdir -p "$FX/PluginData"
     cp "$OUT/VolumetricExplosions.dll" "$FX/"
-    rm -f "$FX/PluginData/"*
-    cp "$OUT"/PluginData/* "$FX/PluginData/"
+    # (everything of the mod's is put in afresh but the player's own settings, which are kept: in PluginData, or beside the library where they used to be, from where the mod moves them itself)
+    find "$FX/PluginData" -maxdepth 1 -type f ! -name settings.cfg -delete
+    for f in "$OUT"/PluginData/*; do
+      if [ "$(basename "$f")" = settings.cfg ] && { [ -f "$FX/PluginData/settings.cfg" ] || [ -f "$FX/settings.cfg" ]; }; then continue; fi
+      cp "$f" "$FX/PluginData/"
+    done
     # (the game here has no use for the other systems' libraries; they are for the copy that is given out)
     case "$(uname -s)" in Darwin) rm -f "$FX/PluginData/vfxgrid.dll" "$FX/PluginData/vfxgrid.so" ;; Linux) rm -f "$FX/PluginData/vfxgrid.dll" "$FX/PluginData/vfxgrid.dylib" ;; esac
-    [ -f "$FX/settings.cfg" ] || cp "$OUT/settings.cfg" "$FX/settings.cfg"     # keep the player's own settings
     echo "ok: Volumetric Explosions installed to $FX (restart KSP to load it)"
     ;;
   shaders)

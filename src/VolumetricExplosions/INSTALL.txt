@@ -26,6 +26,8 @@ WHERE IT WORKS
   started with -force-glcore; nobody has run it there either.
 
 SETTINGS
-  GameData/VolumetricExplosions/settings.cfg
+  GameData/VolumetricExplosions/PluginData/settings.cfg
+  (Until 0.3.1 it was beside the library, where every change to it made the game's next
+  start a slow one. A file found there is moved, with what you had set in it.)
 
 Everything else: https://github.com/IshiakiZ/ksp-volumetric-explosions

@@ -1,6 +1,11 @@
 # Settings
 
-`GameData/VolumetricExplosions/settings.cfg`:
+`GameData/VolumetricExplosions/PluginData/settings.cfg`:
+
+(Until 0.3.1 the file was beside the library. The game reads any `.cfg` there as one of its own configs,
+so every change to a setting made the game's next start a slow one: with ModuleManager installed, every
+config is worked out again and every part's drag measured again. The game does not look into
+`PluginData`. A file found in the old place is moved, once, with what was set in it.)
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

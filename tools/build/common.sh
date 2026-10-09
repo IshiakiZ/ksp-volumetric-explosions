@@ -30,7 +30,7 @@ CSC="$SDK_ROOT/$SDK_VERSION/Roslyn/bincore/csc.dll"
 [ -f "$CSC" ] || { echo "error: C# compiler not found at $CSC" >&2; exit 1; }
 
 REFS=()
-for dll in mscorlib System System.Core Assembly-CSharp Assembly-CSharp-firstpass; do REFS+=("-r:$MANAGED/$dll.dll"); done
+for dll in mscorlib System System.Core Assembly-CSharp Assembly-CSharp-firstpass KSPAssets; do REFS+=("-r:$MANAGED/$dll.dll"); done
 for dll in "$MANAGED"/UnityEngine*.dll; do REFS+=("-r:$dll"); done
 
 compile() {  # compile <out> <defines> <source dir> [more source dirs]   (WITH="a.dll:b.dll": more libraries to build against)
