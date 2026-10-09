@@ -20,7 +20,7 @@ Copy `GameData/VolumetricExplosions` into your KSP `GameData` folder and start t
 delete that folder. For KSP 1.12.x; it needs no other mod.
 
 On a Mac, a copy downloaded with a browser runs slower until you allow its library with one command:
-see [Installing](docs/Installing.md).
+see [Installing](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Installing).
 
 ## What you get
 
@@ -43,7 +43,7 @@ see [Installing](docs/Installing.md).
 
 In `GameData/VolumetricExplosions/PluginData/settings.cfg`. The ones most worth knowing: `quality` (0.2 light to 3
 heavy), `size`, `smoke` (how long it hangs), `wind`, and `enabled = false` to have the stock explosions
-back. [All of them](docs/Settings.md).
+back. [All of them](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Settings).
 
 ## Where it works
 
@@ -58,14 +58,14 @@ from 79 frames a second to 56 in its first seconds and 70 to 75 once it was smok
 
 ## More
 
-* [What decides how an explosion looks](docs/What-decides-how-an-explosion-looks.md)
-* [What the smoke does](docs/What-the-smoke-does.md)
-* [Shock fronts, debris and burn marks](docs/Shock-fronts-debris-and-burn-marks.md)
-* [How it is drawn, and where](docs/How-it-is-drawn.md)
-* [What it costs](docs/What-it-costs.md) and
-  [what was tested](docs/What-was-tested.md)
-* [Limits](docs/Limits.md)
-* [Building it yourself](docs/Building.md)
+* [What decides how an explosion looks](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/What-decides-how-an-explosion-looks)
+* [What the smoke does](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/What-the-smoke-does)
+* [Shock fronts, debris and burn marks](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Shock-fronts-debris-and-burn-marks)
+* [How it is drawn, and where](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/How-it-is-drawn)
+* [What it costs](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/What-it-costs) and
+  [what was tested](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/What-was-tested)
+* [Limits](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Limits)
+* [Building it yourself](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Building)
 
 `./build.sh` builds the mod and installs it; it needs the .NET SDK and a copy of the game.
 
