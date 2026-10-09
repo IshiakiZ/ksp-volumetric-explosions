@@ -101,7 +101,7 @@ namespace VolumetricExplosions
                 }
             if (pl.ground && hasGround && !pl.water && (pl.radius > 1f || pl.impact > 25f)) Air.Instance.Mark(pl, Mathf.Max(1.5f, pl.radius * 1.25f + pl.reach * 0.2f));
             waiting.Add(pl);
-            lastBlast = time;
+            lastBlast = time; blasted = true;
         }
 
         void Burst(Plan pl)
@@ -109,7 +109,7 @@ namespace VolumetricExplosions
             Vector3 c = pl.at, v0 = pl.going;
             float q = Settings.Quality * Air.Room();
             float R = pl.radius;
-            lastBlast = time;
+            lastBlast = time; blasted = true;
             if (R > scale || count < 50)
             {
                 scale = Mathf.Max(2f, Mathf.Max(R, pl.reach * 0.6f));
@@ -612,7 +612,14 @@ namespace VolumetricExplosions
             }
             // Real light on the ground and the wreck from the two strongest, and from no more than four in the whole scene.
             int first = brightest, second = -1;
-            for (int n = 0; n < lampCount; n++) if (n != first && (second < 0 || lamps[n].power > lamps[second].power)) second = n;
+            // (An engine's fire lights the smoke round it, here; the light it throws on the pad and the craft is not ours to
+            // make: it has one of its own from whoever draws its flame, or none.)
+            if (first >= 0 && lamps[first].quiet)
+            {
+                first = -1;
+                for (int n = 0; n < lampCount; n++) if (!lamps[n].quiet && (first < 0 || lamps[n].power > lamps[first].power)) first = n;
+            }
+            for (int n = 0; n < lampCount; n++) if (n != first && !lamps[n].quiet && (second < 0 || lamps[n].power > lamps[second].power)) second = n;
             for (int slot = 0; slot < lights.Length; slot++)
             {
                 int which = slot == 0 ? first : second;
@@ -816,6 +823,7 @@ namespace VolumetricExplosions
             int n = 0;
             for (int k = 0; k < lampCount && n < glows.Length; k++)
             {
+                if (lamps[k].quiet) continue;
                 int at = (lamps[k].tint * 6 + 3) * 3;
                 float v = Mathf.Min(1f, lamps[k].power * 0.3f) * 255f;
                 glows[n++] = Glow(lamps[k].x, lamps[k].y, lamps[k].z, lamps[k].r * 3.6f, Flames[at] * v, Flames[at + 1] * v, Flames[at + 2] * v);

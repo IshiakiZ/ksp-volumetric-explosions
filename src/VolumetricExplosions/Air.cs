@@ -218,21 +218,134 @@ namespace VolumetricExplosions
             }
         }
 
+        const int Most = 9;                 // patches of air at once: explosions' and engines' trails together
+
         Site SiteFor(Plan plan)
         {
             foreach (Site s in sites)
                 if (s.Takes(plan)) return s;
-            if (sites.Count >= 6)
-            {
-                // Make room by letting the emptiest one go.
-                Site least = sites[0];
-                foreach (Site s in sites) if (s.Count < least.Count) least = s;
-                least.Dispose();
-                sites.Remove(least);
-            }
+            if (Staying() >= Most) LetOneGo();
             var site = new Site(plan);
             sites.Add(site);
             return site;
+        }
+
+        /// <summary>
+        /// Make room for one more patch of air. Of the trails that engines have left and gone on from, the one left
+        /// longest ago is let thin away, which takes it a couple of seconds, and meanwhile it does not count. Where
+        /// there is no such trail, or more are thinning away already than there is any room for, the emptiest patch
+        /// of all goes at once.
+        /// </summary>
+        void LetOneGo()
+        {
+            int staying = 0, flames = 0;
+            Site oldest = null;
+            foreach (Site s in sites)
+            {
+                if (s.Riding) { flames++; continue; }               // (the flames of ships are counted by themselves: see MostFlames)
+                if (s.Leaving) continue;
+                staying++;
+                if (s.Vented && s.Unfed > 1f && (oldest == null || s.Unfed > oldest.Unfed)) oldest = s;
+            }
+            if (staying < Most) return;
+            if (oldest != null && sites.Count - flames < Most + 3) { oldest.Leave(); return; }
+            Site least = null;
+            foreach (Site s in sites)
+                if (!s.Riding && (least == null || s.Leaving && !least.Leaving || s.Leaving == least.Leaving && s.Count < least.Count)) least = s;
+            if (least == null) return;
+            least.Dispose();
+            sites.Remove(least);
+        }
+
+        /// <summary>How many patches of air there are that count against the most there may be: not those thinning away, nor the flames of ships.</summary>
+        int Staying()
+        {
+            int staying = 0;
+            foreach (Site s in sites) if (!s.Leaving && !s.Riding) staying++;
+            return staying;
+        }
+
+        float noAirUntil;
+
+        /// <summary>What an engine is putting out this frame: its flame into the patch of air that goes along with its ship, its smoke into one that stays where it is.</summary>
+        internal bool Take(in Exhaust exhaust)
+        {
+            if (Assets.Volume == null || !Settings.Volume) return false;
+            bool flame = exhaust.fire > 0.01f && exhaust.rides != null && TakeFlame(exhaust);
+            bool smoke = exhaust.amount > 0.001f && TakeSmoke(exhaust);
+            return flame || smoke;
+        }
+
+        const int MostFlames = 4;                      // ships at once whose engines' flames are drawn
+
+        /// <summary>An engine's flame: into the patch that goes along with its ship, begun if there is none. (In any air or none: a flame needs no air to be seen in.)</summary>
+        bool TakeFlame(in Exhaust exhaust)
+        {
+            CelestialBody body = FlightGlobals.currentMainBody;
+            if (body == null) return false;
+            Site site = null;
+            int riding = 0;
+            foreach (Site s in sites)
+            {
+                if (!s.Riding) continue;
+                riding++;
+                if (s.Rides == exhaust.rides && s.FlameFamily == Site.Family(exhaust.tint)) site = s;
+            }
+            if (site == null)
+            {
+                if (exhaust.running <= 0.02f || riding >= MostFlames) return false;
+                Plan plan = Plan.Where(exhaust.rim);
+                if (plan.underwater) return false;
+                try { site = new Site(plan, exhaust.rides); }
+                catch (Exception ex)
+                {
+                    if (!complained) Debug.LogError("[VolumetricExplosions] could not begin an engine's flame: " + ex);
+                    complained = true;
+                    return false;
+                }
+                sites.Add(site);
+            }
+            return site.Fed(exhaust);
+        }
+
+        /// <summary>An engine's smoke for this frame: into the newest patch of air that it belongs in, or a new one begun where it is.</summary>
+        bool TakeSmoke(in Exhaust exhaust)
+        {
+            CelestialBody body = FlightGlobals.currentMainBody;
+            if (body == null || !body.atmosphere) return false;
+            // The newest patch that will have it; but none older than the one it has been feeding. (An older one that
+            // reaches further would have it back, for a frame, and then not: its smoke went to and fro between them.)
+            Site site = null;
+            for (int n = sites.Count - 1; n >= 0 && site == null; n--)
+            {
+                if (sites[n].Feeds(body, exhaust.rim)) site = sites[n];
+                else if (sites[n].Has(exhaust.id)) break;
+            }
+            if (site == null)
+            {
+                if (exhaust.amount <= 0.001f || exhaust.running <= 0.02f) return false;
+                // (where there turned out to be no air, it is not asked again at every frame: finding out takes a look at the ground and the air)
+                if (Time.time < noAirUntil) return false;
+#if DEV
+                if (sites.Count > 0 && Settings.TestView == 8f) Debug.Log("[VolumetricExplosions] a new patch for engine " + exhaust.id + ": the newest would not have it: " + sites[sites.Count - 1].WhyNot(body, exhaust.rim));
+#endif
+                Plan plan = Plan.Where(exhaust.rim);
+                if (plan.vacuum || plan.space || plan.underwater) { noAirUntil = Time.time + 0.5f; return false; }              // no air to hold smoke
+                if (Staying() >= Most) LetOneGo();
+                try { site = new Site(plan); }
+                catch (Exception ex)
+                {
+                    if (!complained) Debug.LogError("[VolumetricExplosions] could not begin an engine's smoke: " + ex);
+                    complained = true;
+                    return false;
+                }
+                sites.Add(site);
+            }
+            if (!site.Fed(exhaust)) return false;
+            // (the patch it was feeding until a moment ago still has the head of its trail: see Passed)
+            for (int n = sites.Count - 1; n >= 0; n--)
+                if (sites[n] != site && sites[n].Vented) sites[n].Passed(exhaust);
+            return true;
         }
 
         public void Mark(Plan plan, float radius)
@@ -251,6 +364,7 @@ namespace VolumetricExplosions
             if (Cost[3] > 0) gridMs = Cost[3] * 1000f / System.Diagnostics.Stopwatch.Frequency;
             for (int n = 0; n < Cost.Length; n++) { shown[n] = Mathf.Lerp(shown[n], Cost[n] * 1000f / System.Diagnostics.Stopwatch.Frequency, 0.1f); Cost[n] = 0; }
             for (int n = 0; n < Part.Length; n++) { partShown[n] = Mathf.Lerp(partShown[n], Part[n] * 1000f / System.Diagnostics.Stopwatch.Frequency, 0.05f); Part[n] = 0; }
+            Sources.Ask();
             int alive = 0;
             for (int n = sites.Count - 1; n >= 0; n--)
             {
@@ -470,6 +584,24 @@ namespace VolumetricExplosions
         }
 
 #if DEV
+        /// <summary>(Whether the newest patch of air is drawn where it is reckoned to be: see Site.Handed.)</summary>
+        public static string Handed() => Instance == null || Instance.sites.Count == 0 ? "no patch of air" : Instance.sites[Instance.sites.Count - 1].Handed();
+        /// <summary>(Every patch that engines are feeding, and where its newest puffs are against the first running nozzle of the craft being flown.)</summary>
+        public static string Trail()
+        {
+            if (Instance == null || FlightGlobals.ActiveVessel == null) return "nothing";
+            Vector3d nozzle = (Vector3d)FlightGlobals.ActiveVessel.transform.position;
+            foreach (Part part in FlightGlobals.ActiveVessel.parts)
+            {
+                ModuleEngines e = part.FindModuleImplementing<ModuleEngines>();
+                if (e != null && e.finalThrust > 0f && e.thrustTransforms.Count > 0) { nozzle = (Vector3d)e.thrustTransforms[0].position; break; }
+            }
+            var say = new System.Text.StringBuilder();
+            for (int n = Instance.sites.Count - 1; n >= 0 && n >= Instance.sites.Count - 3; n--)
+                if (Instance.sites[n].Vented) say.Append("patch ").Append(n).Append(" (unfed ").Append(Instance.sites[n].Unfed.ToString("F2")).Append(" s): ").Append(Instance.sites[n].Trail(nozzle)).Append("\n");
+            return say.ToString();
+        }
+
         /// <summary>For the development build: how completely the smoke hid what was behind it in the last frame (see Site.Opacity).</summary>
         public static string Opacity()
         {
@@ -549,16 +681,50 @@ namespace VolumetricExplosions
         Vector3d originB, eastB, upB, northB;          // fixed to the body
         public Vector3d rel, velocity;                 // in space: offset from the ship being flown, and velocity, in the scene's axes
         public Vector3d origin, east, up, north;       // where all that is in the scene this frame
+        public Transform rides;                        // what it goes along with, if anything (see the second way of making one)
+        Vector3 ridesAt;                               // where on that its middle is, in that thing's own axes
+        bool rode;
+
+        /// <summary>
+        /// A frame that goes along with something: a ship. Its middle stays at the same place on the ship; its axes are
+        /// still east, up and north there, whichever way the ship is turned. (An engine's flame is worked out in such a
+        /// frame. In one that stays where it is, a rocket doing three hundred metres a second would leave its flame
+        /// behind between one frame and the next.)
+        /// </summary>
+        public Frame(CelestialBody body, Vector3d world, Transform rides) : this(body, world, false, Vector3d.zero)
+        {
+            this.rides = rides;
+            ridesAt = rides.InverseTransformPoint((Vector3)world);
+            rode = true;
+        }
+
+        /// <summary>Whether it goes along with something still: not if that has gone (a ship that broke up, or was put away), when the frame stays where it last was.</summary>
+        public bool Riding => rode && rides != null;
+
+        void Axes()
+        {
+            up = FlightGlobals.getUpAxis(body, origin);
+            east = Vector3d.Cross(up, body.transform.up);
+            east = east.sqrMagnitude < 1e-8 ? Vector3d.Cross(up, Vector3d.forward).normalized : east.normalized;
+            north = Vector3d.Cross(east, up);
+        }
 
         public Frame(CelestialBody body, Vector3d world, bool space, Vector3d orbitalVelocity)
         {
             this.body = body;
             this.space = space;
             up = FlightGlobals.getUpAxis(body, world);
-            // (Named east, but in Unity's left-handed axes this points west. Nothing here cares which: it is only the patch's own level axis.)
-            east = Vector3d.Cross(body.transform.up, up);
-            east = east.sqrMagnitude < 1e-8 ? Vector3d.Cross(Vector3d.forward, up).normalized : east.normalized;
-            north = Vector3d.Cross(up, east);
+            // East, up and north must be to one another as a Unity object's own right, up and forward are (right is up
+            // crossed with forward): the patch's root is turned to face north with up as its up (see Apply), everything
+            // drawn hangs from that root, and everything worked out is reckoned along these three. Until 0.4.0 "east"
+            // was the other way round, pointing west. The sums were all of a piece, and so was the drawing, but each
+            // was the other's mirror image: whatever lay east of the middle of a patch was drawn as far west of it.
+            // A blast is in the middle of its own patch, so it never showed there (though its smoke went round a
+            // building on the wrong side, and was lit from the wrong side when the sun was low in the east or west).
+            // A rocket's smoke, laid along a path leaning away from the patch's middle, was drawn leaning the other way.
+            east = Vector3d.Cross(up, body.transform.up);
+            east = east.sqrMagnitude < 1e-8 ? Vector3d.Cross(up, Vector3d.forward).normalized : east.normalized;
+            north = Vector3d.Cross(east, up);
             origin = world;
             if (space)
             {
@@ -578,6 +744,14 @@ namespace VolumetricExplosions
         /// <summary>Work out where the frame is in the scene now.</summary>
         public void Refresh()
         {
+            if (rode)
+            {
+                if (rides != null) { origin = (Vector3d)rides.TransformPoint(ridesAt); Axes(); return; }
+                // (what it went along with is gone: from here on it is fixed to the ground under where it last was)
+                rode = false; rides = null;
+                originB = body.GetRelSurfacePosition(origin);
+                eastB = body.GetRelSurfaceDirection(east); upB = body.GetRelSurfaceDirection(up); northB = body.GetRelSurfaceDirection(north);
+            }
             if (space)
             {
                 Vessel ship = FlightGlobals.ActiveVessel;

@@ -37,7 +37,8 @@ SHADERS = {
         "fragment": [("_WorldSpaceCameraPos", 3, False), ("_ProjectionParams", 4, False), ("_ZBufferParams", 4, False), ("_VolParams", 4, False), ("_VolStep", 4, False), ("_VolGrid", 4, False),
                      ("_VolSize", 4, False), ("_VolOffset", 4, False), ("_VolDetail", 4, False), ("_VolFlow", 4, False), ("_VolCamera", 4, False), ("_VolPeak", 4, False), ("_VolThin", 4, False), ("_VolSun", 4, False),
                      ("_VolSunDir", 4, False), ("_VolSunLocal", 4, False), ("_VolAmb", 4, False), ("_VolGlow", 4, False), ("_VolLampA", 4, False), ("_VolLampB", 4, False), ("_VolLampC", 4, False), ("_VolLamps", 4, False),
-                     ("_VolTint", 4, False), ("_VolHot1", 4, False), ("_VolHot2", 4, False), ("_VolHot3", 4, False), ("_VolHot4", 4, False), ("unity_WorldToObject", 4, True), ("unity_MatrixV", 4, True)],
+                     ("_VolTint", 4, False), ("_VolHot1", 4, False), ("_VolHot2", 4, False), ("_VolHot3", 4, False), ("_VolHot4", 4, False),
+                     ("_VolCutA", 4, False), ("_VolCutB", 4, False), ("_VolCutC", 4, False), ("_VolCutD", 4, False), ("_VolCutE", 4, False), ("_VolCutF", 4, False), ("unity_WorldToObject", 4, True), ("unity_MatrixV", 4, True)],
         "textures": [("_Volume", 3), ("_Amount", 3), ("_Detail", 3), ("_Around", 3), ("_Flow", 3), ("_RestA", 3), ("_RestB", 3), ("_RestC", 3), ("_RestD", 3), ("_RestE", 3), ("_Turns", 3), ("_Clear", 3), ("_CameraDepthTexture", 2)],
     },
     "mark": {

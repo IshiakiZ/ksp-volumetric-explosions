@@ -33,6 +33,7 @@ namespace VolumetricExplosions
             public float keepX0, keepX1, keepY0, keepY1, keepZ0, keepZ1, fadeX, fadeY, fadeZ;
             public float leastReach, thick, hold, goesX, goesY, goesZ, ahead;
             public float sunX, sunY, sunZ, repeat;
+            public float skyX, skyY, skyZ;
             public float thickest, thickestFlame, something, restFar, mostBefore, mostAbove;
             public float fastest;
             public IntPtr sunThrough, skyThrough;

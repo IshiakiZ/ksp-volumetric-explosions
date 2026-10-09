@@ -152,7 +152,7 @@ namespace VolumetricExplosions
         /// </summary>
         void Survey(float dt)
         {
-            if (space) return;
+            if (space || riding) return;
             if (soundOut && soundJob.IsCompleted)
             {
                 soundOut = false;

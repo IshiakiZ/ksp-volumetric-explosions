@@ -3,6 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
+#if !DEV
+[assembly: KSPAssembly("VolumetricExplosions", 0, 4)]
+#endif
+
 namespace VolumetricExplosions
 {
     /// <summary>
@@ -18,7 +22,7 @@ namespace VolumetricExplosions
     [KSPAddon(KSPAddon.Startup.Flight, false)]
     public sealed class Addon : MonoBehaviour
     {
-        public const string Version = "0.3.2";
+        public const string Version = "0.4.0";
 
         static GameObject[] ours;            // built once, reused for every flight
         static Transform shelf;              // an inactive parent that keeps the templates from playing

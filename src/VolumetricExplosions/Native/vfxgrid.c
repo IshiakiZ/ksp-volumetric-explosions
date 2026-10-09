@@ -53,6 +53,7 @@ typedef struct Grid
     float keepX0, keepX1, keepY0, keepY1, keepZ0, keepZ1, fadeX, fadeY, fadeZ;
     float leastReach, thick, hold, goesX, goesY, goesZ, ahead;
     float sunX, sunY, sunZ, repeat;
+    float skyX, skyY, skyZ;                              // which way is up, in the grid's own axes: as a rule its second, but the grid of an engine's trail is turned to lie along the trail
     float thickest, thickestFlame, something, restFar, mostBefore, mostAbove;
     float fastest;                                       // (comes back)
     float *sunThrough, *skyThrough;                      // G3 each
@@ -1046,7 +1047,7 @@ EXPORT int vfx_grid(void *work, Grid *g)
     if (g->sunUp) follow(w, g, g->sunX, g->sunY, g->sunZ, g->sunThrough, 0.45f);
     int64_t t2 = now_ns();
     g->nanoseconds[2] = t2 - t1;
-    follow(w, g, 0.0f, 1.0f, 0.0f, g->skyThrough, 0.55f);
+    follow(w, g, g->skyX, g->skyY, g->skyZ, g->skyThrough, 0.55f);
     int64_t t3 = now_ns();
     g->nanoseconds[3] = t3 - t2;
     // (what follows is all for the shader: where the smoke is drawn as sprites none of it is asked for)

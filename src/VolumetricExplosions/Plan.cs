@@ -45,8 +45,21 @@ namespace VolumetricExplosions
 
         public static Plan Make(Vector3d world, float strength)
         {
-            var p = new Plan { world = world };
+            Plan p = Where(world);
             Records.Take(world, parts);
+            CelestialBody body = p.body;
+            float below = p.height;
+            What(p, strength, body, below);
+            return p;
+        }
+
+        /// <summary>
+        /// The place alone: its air, the ground or the water under it, the light. What a blast is made of comes after
+        /// (see What); smoke that is no blast's, a running engine's, needs no more than this.
+        /// </summary>
+        public static Plan Where(Vector3d world)
+        {
+            var p = new Plan { world = world };
             p.body = FlightGlobals.currentMainBody ?? FlightGlobals.getMainBody(world);
             CelestialBody body = p.body;
             p.up = FlightGlobals.getUpAxis(body, world);
@@ -93,7 +106,13 @@ namespace VolumetricExplosions
 
             Vector3d sunward = (Planetarium.fetch.Sun.position - world).normalized;
             p.daylight = Mathf.Clamp01((float)Vector3d.Dot(p.up, sunward) * 5f + 0.4f);
+            return p;
+        }
 
+        /// <summary>What blew up there, and so what the blast is to be.</summary>
+        static void What(Plan p, float strength, CelestialBody body, float below)
+        {
+            Vector3d world = p.world;
             // ---- what blew up
             double fuel = 0, oxidizer = 0, solid = 0, mono = 0, gas = 0, ore = 0, charge = 0, vapour = 0, dry = 0, thrust = 0;
             bool hydrogen = false, any = parts.Count > 0;
@@ -188,7 +207,6 @@ namespace VolumetricExplosions
                 " kg, air " + p.air.ToString("F3") + (p.oxygen ? " with oxygen" : "") + (p.space ? ", space" : "") + (p.ground ? (p.water ? ", on water" : p.paved ? ", on paving" : ", on the ground") : p.height < 1e6f ? ", " + p.height.ToString("F0") + " m up" : ", nothing below") +
                 (p.underwater ? ", under water" : "") + ", " + body.bodyName;
             if (Settings.Log) Addon.Log("blast: " + p.label);
-            return p;
         }
 
         /// <summary>The loaded vessel closest to the blast: the wreck it came from, or what is left of it.</summary>

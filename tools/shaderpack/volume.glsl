@@ -78,7 +78,7 @@ uniform vec4 _VolSize;       // xyz: size of the box in metres
 uniform vec4 _VolOffset;     // xyz: the middle of the box, in metres from the site's origin
 uniform vec4 _VolDetail;     // xyz: how far the billows' pattern had been carried along with the smoke as a whole when the grid in use was made, in metres, w: repeats of the pattern per metre
 uniform vec4 _VolFlow;       // x: twice how far the fastest smoke on the grid has gone since the grid was made, in metres, yw: what turns a number read from the textures of where the smoke "was" into metres (times y, plus w), z: the farthest the smoke is carried on from where the grid has it, in metres
-uniform vec4 _VolPeak;       // x: 1 if this is drawn at half size, to be enlarged, z: (for testing) steps moved along by this part of a step, w: metres of the thickest smoke that count as thick
+uniform vec4 _VolPeak;       // x: 1 if this is drawn at half size, to be enlarged, y: how smooth the flame is (0: licked into tongues by the billows, as a fire in the open is; 1: not at all, as an engine's jet in a vacuum), z: (for testing) steps moved along by this part of a step, w: metres of the thickest smoke that count as thick
 uniform vec4 _VolThin;       // x: how much of what is behind it a ray's smoke may hide, at the very most, before any of it is drawn (nought: all of it is drawn), y: how long ago the grid in use was made, in seconds
 uniform vec4 _VolSun;        // rgb: sunlight, w: how much thin smoke in front of the sun shines
 uniform vec4 _VolSunDir;     // xyz: towards the sun
@@ -94,6 +94,12 @@ uniform vec4 _VolHot1;       // rgb: the colour of flame at a quarter of full he
 uniform vec4 _VolHot2;       // at half,
 uniform vec4 _VolHot3;       // at three quarters,
 uniform vec4 _VolHot4;       // and at full heat
+uniform vec4 _VolCutA;      // Where an engine's smoke may begin (see begun, below). xyz: a place on the line its newest smoke lies along, in metres from the site's origin, w: the square of how far out from that line this holds (nought: there is no such engine)
+uniform vec4 _VolCutB;      // xyz: which way along that line is back, the way the engine came, w: over how many metres from that place back the smoke comes on
+uniform vec4 _VolCutC;      // x: how far ahead of that place this holds, y: how much of the smoke there is taken away (0 to 1)
+uniform vec4 _VolCutD;      // and the same for a second engine, or cluster of them, in the same patch of air
+uniform vec4 _VolCutE;
+uniform vec4 _VolCutF;
 uniform sampler3D _Volume;   // rg: how much smoke lies towards the sun (sixteen bits in two bytes), b: how much towards the open sky, a: how hot the flame is
 uniform sampler3D _Amount;   // rg: how much smoke (sixteen bits in two bytes), ba: how much flame
 uniform sampler3D _Around;   // r: how much smoke there is round about, over a couple of metres (square root), g: more than nothing if there is any smoke or flame near, b: how light that smoke is (square root), a: how much of it is dust
@@ -136,6 +142,22 @@ void smallBillows(vec3 q, float level, float seen, inout float lump, inout vec3 
     vec4 fine_ = textureLod(_Detail, q, max(level, 0.0));
     lump += 0.45 * seen * (fine_.r - 0.45);
     slope += (fine_.gba - 0.5) * (2.0 * 10.72 * 0.7 * seen);
+}
+
+// How much of the smoke at a place is left where an engine is leaving a trail.
+// The grid is a moment old, and the engine that is laying the smoke may be doing hundreds of metres a second: the
+// head of its trail, as any one grid has it, is where the engine was when that grid was begun, and stays there
+// until the next grid, while the engine goes on. A trail drawn so began a rocket's length behind the rocket and
+// caught it up in jumps. So the mod lays the smoke a little way ahead of the engine, where it is about to be, and
+// says here every frame exactly where the engine now is: ahead of that, along the line it is flying, the smoke is
+// not drawn yet, and for a little way behind it comes on by degrees, as the engine's own smoke does along its flame.
+float begun(vec3 here, vec4 a, vec4 b, vec4 c)
+{
+    vec3 d = here - a.xyz;
+    float back = dot(d, b.xyz);
+    float beside = 1.0 - smoothstep(a.w, 2.25 * a.w, dot(d, d) - back * back);
+    float ahead = (1.0 - smoothstep(0.0, b.w, back)) * (1.0 - smoothstep(0.7 * c.x, c.x, -back));
+    return 1.0 - c.y * beside * ahead;
 }
 
 void main()
@@ -260,6 +282,8 @@ void main()
         }
         vec4 amount = textureLod(_Amount, at, 0.0);
         float smoke = amount.r * 0.99611 + amount.g * 0.0038911, flame = amount.b * 0.99611 + amount.a * 0.0038911;
+        if (_VolCutA.w > 0.0) smoke *= begun(here, _VolCutA, _VolCutB, _VolCutC);
+        if (_VolCutD.w > 0.0) smoke *= begun(here, _VolCutD, _VolCutE, _VolCutF);
         bool some = smoke + flame > 0.00001;
         if (some && passed < _VolThin.x)
         {
@@ -394,7 +418,7 @@ void main()
             float thin = exp(-sigma * _VolPeak.w);
 
             // Flame: licked into tongues by the same pattern, flickering, and coloured by how hot it is.
-            float burning = flame * _VolParams.w * clamp(2.5 * lump - 0.45, 0.0, 1.8);
+            float burning = flame * _VolParams.w * mix(clamp(2.5 * lump - 0.45, 0.0, 1.8), 0.7, _VolPeak.y);
             // (Flame is a glow, and can be stepped through twice as fast as smoke. A step where the billows have cut
             // everything away counts in full, though there was nothing to light: there are only so many steps to a
             // ray, and counted for less, as they once were, a ray that began in the thin skirts of a cloud spent them
@@ -407,7 +431,7 @@ void main()
                 continue;
             }
             vec4 air = textureLod(_Volume, at, 0.0);
-            float heat = air.a * 1.2 * (0.72 + 0.56 * lump);
+            float heat = air.a * 1.2 * (0.72 + 0.56 * mix(lump, 0.5, _VolPeak.y));
             vec3 hot = heat < 0.25 ? _VolHot1.rgb * (heat * 4.0) : heat < 0.5 ? mix(_VolHot1.rgb, _VolHot2.rgb, heat * 4.0 - 1.0) : heat < 0.75 ? mix(_VolHot2.rgb, _VolHot3.rgb, heat * 4.0 - 2.0) : mix(_VolHot3.rgb, _VolHot4.rgb, min(heat * 4.0 - 3.0, 1.0));
 
             // Smoke: its own colour, in the light that reaches it. Thinned out, dark smoke looks paler. And each puff
