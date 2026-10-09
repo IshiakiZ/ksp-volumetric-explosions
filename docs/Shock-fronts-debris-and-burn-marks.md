@@ -13,6 +13,15 @@ It travels at the real speed, so from 70 m it has passed in a fifth of a second;
 see it cross the ground towards you. `bend` in the settings makes it stronger or weaker, and `shake`
 turns off what it does to the camera.
 
+**The bang comes with it** (since 0.3.2). The game starts an explosion's sound on the instant, however far
+off it is. The mod holds it back for as long as sound takes to reach the camera in the air of the place:
+the flash at once, the bang a second later for every 340 metres at sea level on Kerbin, and later than
+that in thin air high up. Nearer than 20 metres it is left as the game has it, and so it is where there is
+no air: the game plays its bang in a vacuum, and that is not this mod's to take away. `sound_travels` in
+the settings turns it off. Measured on 2026-10-08: blasts 25, 311, 600 and 1727 metres from the camera had
+their sound started 0.08, 0.93, 1.77 and 5.12 seconds after the flash. What it sounds like has not been
+listened to: the Mac it was made on had its sound off.
+
 ## Pieces of the ship
 
 When a part is destroyed, pieces of that part may be thrown out: patches of its own skin, torn off

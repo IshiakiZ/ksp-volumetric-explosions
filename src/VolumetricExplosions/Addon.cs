@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
@@ -17,7 +18,7 @@ namespace VolumetricExplosions
     [KSPAddon(KSPAddon.Startup.Flight, false)]
     public sealed class Addon : MonoBehaviour
     {
-        public const string Version = "0.3.1";
+        public const string Version = "0.3.2";
 
         static GameObject[] ours;            // built once, reused for every flight
         static Transform shelf;              // an inactive parent that keeps the templates from playing
@@ -99,6 +100,8 @@ namespace VolumetricExplosions
     public static class Settings
     {
         public static bool Enabled = true, Light = true, Debris = true, Shockwave = true, Shake = true, Scorch = true, Push = true, Collide = true, Volume = true, Half = true, Native = true, Log = false;
+        public static bool SoundTravels = true;        // the bang is heard when its sound has had time to get to the camera, not on the instant
+        public static bool Built = false;              // use the shaders built in the Unity editor even where the hand-packed OpenGL ones would do (for comparing the two)
         public static float Quality = 1f, Smoke = 1f, Size = 1f, Wind = 1f, Detail = 0.6f, Thick = 1.6f, Bend = 1f;
         public static float Thin = 2f;                 // smoke too thin to see is not drawn: up to this many steps of an eight-bit picture's worth along any one line of sight (0: all of it is drawn)
         public static int MaxParticles = 30000, Threads = 0;
@@ -128,10 +131,12 @@ namespace VolumetricExplosions
                 node.TryGetValue("shake", ref Shake);
                 node.TryGetValue("push", ref Push);
                 node.TryGetValue("collide", ref Collide);
+                node.TryGetValue("sound_travels", ref SoundTravels);
                 node.TryGetValue("log", ref Log);
                 node.TryGetValue("volume", ref Volume);
                 node.TryGetValue("half", ref Half);
                 node.TryGetValue("native", ref Native);
+                node.TryGetValue("built", ref Built);
                 node.TryGetValue("detail", ref Detail);
                 node.TryGetValue("thick", ref Thick);
                 node.TryGetValue("thin", ref Thin);
@@ -228,24 +233,23 @@ namespace VolumetricExplosions
             volumeTried = true;
             if (!Settings.Volume) return;
             if (!SystemInfo.supports3DTextures) { Addon.Log("smoke is drawn as sprites: this graphics card has no 3D textures"); return; }
-            if (SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.OpenGLCore && Built() == null)
+            if (UseBuilt && BuiltPath() == null)
             {
-                Addon.Log("smoke is drawn as sprites: the volume shader that ships with the mod is for OpenGL and this is " + SystemInfo.graphicsDeviceType);
+                Addon.Log("smoke is drawn as sprites: the volume shader that ships with the mod is for OpenGL and this is " + SystemInfo.graphicsDeviceType + ", and there is no PluginData/shaders-" + BuiltFor + ".bundle");
                 return;
             }
             try
             {
-                string path = SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.OpenGLCore ? Settings.Folder + "PluginData/volume.bundle" : Built();
-                if (!File.Exists(path)) { Addon.Log("smoke is drawn as sprites: " + path + " is missing"); return; }
-                AssetBundle bundle = AssetBundle.LoadFromFile(path);
-                if (bundle == null) { Addon.Log("smoke is drawn as sprites: the shader bundle did not load"); return; }
-                Shader[] found = bundle.LoadAllAssets<Shader>();
-                bundle.Unload(false);
-                foreach (Shader shader in found)
+                if (UseBuilt) Volume = BuiltShader("Volume");
+                else
                 {
-                    if (shader == null || !shader.isSupported) continue;
-                    if (shader.name.EndsWith("/Mark", StringComparison.Ordinal)) { Mark = shader; markTried = true; }
-                    else Volume = shader;
+                    string path = Settings.Folder + "PluginData/volume.bundle";
+                    if (!File.Exists(path)) { Addon.Log("smoke is drawn as sprites: " + path + " is missing"); return; }
+                    AssetBundle bundle = AssetBundle.LoadFromFile(path);
+                    if (bundle == null) { Addon.Log("smoke is drawn as sprites: the shader bundle did not load"); return; }
+                    Shader[] found = bundle.LoadAllAssets<Shader>();
+                    bundle.Unload(false);
+                    foreach (Shader shader in found) if (shader != null && shader.isSupported) Volume = shader;
                 }
                 if (Volume == null) { Addon.Log("smoke is drawn as sprites: the volume shader is not supported here"); return; }
                 if (!SystemInfo.IsFormatSupported(UnityEngine.Experimental.Rendering.GraphicsFormat.R16G16B16A16_UNorm, UnityEngine.Experimental.Rendering.FormatUsage.Linear))
@@ -256,7 +260,7 @@ namespace VolumetricExplosions
                 Detail = LoadDetail();
                 if (Detail == null) { Volume = null; Addon.Log("smoke is drawn as sprites: PluginData/detail.bin is missing"); return; }
                 NeedCube();
-                Addon.Log("smoke is drawn as a volume");
+                Addon.Log("smoke is drawn as a volume" + (UseBuilt ? " (by the shaders built for " + SystemInfo.graphicsDeviceType + ", from shaders-" + BuiltFor + ".bundle)" : ""));
             }
             catch (Exception ex)
             {
@@ -266,19 +270,49 @@ namespace VolumetricExplosions
         }
 
         /// <summary>
-        /// Where the game does not run on OpenGL: the bundle of both shaders built for this kind of computer in
-        /// the Unity editor (see tools/unityshaders), if someone has put one in PluginData. None ships with the mod yet.
+        /// The mod's four shaders are OpenGL text, packed by hand. Where the game does not run on OpenGL (Direct3D, on
+        /// Windows) they come instead from a bundle built for that kind of computer in the Unity editor, from the same
+        /// text turned into HLSL (see tools/unityshaders). "built = true" in settings.cfg uses that bundle on OpenGL
+        /// too, which is how the two are compared.
         /// </summary>
-        static string Built()
+        static bool UseBuilt => SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.OpenGLCore || Settings.Built;
+
+        static string BuiltFor => Application.platform == RuntimePlatform.WindowsPlayer ? "windows" : Application.platform == RuntimePlatform.LinuxPlayer ? "linux" : "mac";
+
+        static string BuiltPath()
         {
-            string name = Application.platform == RuntimePlatform.WindowsPlayer ? "windows" : Application.platform == RuntimePlatform.LinuxPlayer ? "linux" : "mac";
-            string path = Settings.Folder + "PluginData/shaders-" + name + ".bundle";
+            string path = Settings.Folder + "PluginData/shaders-" + BuiltFor + ".bundle";
             return File.Exists(path) ? path : null;
         }
 
-        /// <summary>One of the mod's smaller shaders: OpenGL text in a bundle of its own (see tools/shaderpack). Null where the game does not run on OpenGL, or cannot use it.</summary>
+        static Dictionary<string, Shader> built;
+
+        /// <summary>One of the shaders from that bundle, by the last part of its name ("Volume", "Enlarge", "Mark", "Shock"). Null if it is not there or cannot be used here.</summary>
+        static Shader BuiltShader(string name)
+        {
+            if (built == null)
+            {
+                built = new Dictionary<string, Shader>();
+                string path = BuiltPath();
+                AssetBundle bundle = path != null ? AssetBundle.LoadFromFile(path) : null;
+                if (bundle != null)
+                {
+                    foreach (Shader shader in bundle.LoadAllAssets<Shader>())
+                    {
+                        if (shader == null) continue;
+                        if (!shader.isSupported) { Addon.Log("the built shader " + shader.name + " is not supported by this graphics card"); continue; }
+                        built[shader.name.Substring(shader.name.LastIndexOf('/') + 1)] = shader;
+                    }
+                    bundle.Unload(false);
+                }
+            }
+            return built.TryGetValue(name, out Shader one) ? one : null;
+        }
+
+        /// <summary>One of the mod's smaller shaders: OpenGL text in a bundle of its own (see tools/shaderpack), or the same from the built bundle (see UseBuilt). Null if it cannot be had.</summary>
         static Shader OpenGLShader(string file)
         {
+            if (UseBuilt) return BuiltShader(char.ToUpperInvariant(file[0]) + file.Substring(1, file.IndexOf('.') - 1));
             if (SystemInfo.graphicsDeviceType != UnityEngine.Rendering.GraphicsDeviceType.OpenGLCore) return null;
             string path = Settings.Folder + "PluginData/" + file;
             if (!File.Exists(path)) return null;

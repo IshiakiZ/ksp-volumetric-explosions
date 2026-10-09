@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Pack one of this project's shaders into a Unity asset bundle, without the Unity editor.
 
-    python3 tools/shaderpack/make_bundle.py <KSP folder> <output file> [volume|enlarge|mark|shock|lens]
+    python3 tools/shaderpack/make_bundle.py <KSP folder> <output file> [volume|enlarge|mark|shock|lens|shafts|clean]
 
 Volumetric Explosions': "volume" (the default) is the smoke, "enlarge" what puts the smoke on the screen
 when it has been drawn at half size, "mark" the burn mark thrown onto the ground, "shock" the shock front
 that bends the picture behind it. Keystone's: "lens", what a lens, a shutter and a film do to a picture.
+Natural Light's: "shafts", shafts of sunlight; "clean", which blacks out the pixels that are not numbers.
 
 A KSP mod's own shader normally has to be compiled in the Unity editor. On OpenGL (the Mac and Linux
 versions of the game) a compiled shader is only its GLSL text plus a list of what it reads, so this
@@ -73,6 +74,26 @@ SHADERS = {
         "cull": 0.0, "ztest": 8.0,
         "blend": (1.0, 0.0),             # what it draws takes the place of what was there
         "given": 2,                      # its last two textures are the game's own (how far each pixel has moved, and how far off it is)
+    },
+    "shafts": {
+        "name": "NaturalLight/Shafts", "path": "assets/naturallight/shafts.shader", "id": 7307199000000000006, "program": 1987650006,
+        "bundle": "nlshafts", "file": "CAB-6e6c7368616674730000000000000000", "code": "shafts.glsl",
+        "fragment": [("_ZBufferParams", 4, False), ("_ShaftStage", 4, False), ("_ShaftSun", 4, False), ("_ShaftLook", 4, False), ("_ShaftTint", 4, False)],
+        "textures": [("_ShaftRays", 2), ("_ShaftScene", 2), ("_CameraDepthTexture", 2)],
+        "vertex": [("_ShaftSheet", 4, False)],
+        "cull": 0.0, "ztest": 8.0,
+        "blend": (1.0, 1.0),             # what it draws is added to what was there (its own pictures are wiped first)
+        "given": 2,                      # (the picture so far and how far off each pixel is: both the game's own, handed over as they are)
+    },
+    "clean": {
+        "name": "NaturalLight/Clean", "path": "assets/naturallight/clean.shader", "id": 7307199000000000007, "program": 1987650007,
+        "bundle": "nlclean", "file": "CAB-6e6c636c65616e000000000000000000", "code": "clean.glsl",
+        "fragment": [("_CleanMark", 4, False)],
+        "textures": [("_CleanScene", 2)],
+        "vertex": [("_CleanSheet", 4, False)],
+        "cull": 0.0, "ztest": 8.0,
+        "blend": (1.0, 0.0),             # what it draws takes the place of what was there (and it draws only where it has to)
+        "given": 1,                      # (the half-size picture is handed to it as it is made, not kept by the material)
     },
 }
 

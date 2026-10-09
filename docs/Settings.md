@@ -20,6 +20,7 @@
 | `shockwave` | `true` | the shock front of a blast, in air |
 | `bend` | `1.0` | how strongly a shock front bends the picture and jolts the camera, 0 to 2 |
 | `shake` | `true` | `false`: a shock front reaching the camera leaves the camera alone |
+| `sound_travels` | `true` | the bang is heard when its sound gets to the camera (a second for every 340 metres at sea level on Kerbin), as the shock front does. `false`: on the instant, as the game has it |
 | `scorch` | `true` | burn marks |
 | `push` | `true` | ships and engine exhaust push smoke about |
 | `collide` | `true` | smoke does not pass through the ground, buildings or ships |

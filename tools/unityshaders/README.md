@@ -1,46 +1,54 @@
 # Building the shaders in the Unity editor
 
-Volumetric Explosions has two shaders of its own: the smoke (a ray walked through a volume) and the burn
-mark (thrown onto the ground). On the Mac and Linux versions of the game, which run on OpenGL, they are
-packed by hand from GLSL text (`tools/shaderpack`), and that is what the mod ships. The Windows version
-runs on Direct3D 11, which wants compiled bytecode that only the Unity editor can make. This folder is a
-Unity project that makes it.
+The seven shaders of these mods (the explosions' smoke, the enlarging of it, the burn mark and the shock
+front, Keystone's lens, and Natural Light's shafts of sunlight and its blacking out of pixels that are not
+numbers) are OpenGL text, packed into bundles by hand (`tools/shaderpack`). That is what
+the Mac and Linux versions of the game run. The Windows version runs on Direct3D 11, which wants compiled
+bytecode that only the Unity editor can make. This folder is a Unity project that makes it.
 
-**State: not yet built or run.** The shaders here were written without a Unity editor to hand, and a
-Direct3D build cannot be tested on a Mac at all. Expect to fix compile errors the first time.
+## State (2026-10-08): written, never compiled
 
-## What is needed
+* `port.py` turns each GLSL file into a `.shader` file of HLSL by rule (`Assets/VolumetricExplosions/*.shader`,
+  `Assets/Keystone/Lens.shader`, `Assets/NaturalLight/*.shader`). Edit the GLSL and run it again; do not edit the `.shader` files. The few
+  lines that depend on which way up Direct3D keeps a picture are replaced one by one (`SPECIAL` in that
+  file, which says why).
+* `Assets/Editor/BuildShaderBundles.cs` builds three bundles for each system: `shaders-<system>.bundle` (the
+  explosions' four), `lens-<system>.bundle` and `light-<system>.bundle` (Natural Light's two).
+* The mods look for them: Volumetric Explosions for `PluginData/shaders-windows.bundle` (all four shaders by
+  name) wherever the game is not on OpenGL, Keystone for `PluginData/lens-windows.bundle`, Natural Light for
+  `PluginData/light-windows.bundle` (both shaders by name). With
+  `built = true` in the explosions' `settings.cfg` the built bundle is used on OpenGL too
+  (`shaders-mac.bundle`), which is how the HLSL can be checked against the GLSL on a Mac.
+* **The editor cannot be made to run.** Unity 2019.4.18f1 (the game's version, unpacked at
+  `~/.ksp-ai-bridge/unity/2019.4.18f1` with Windows build support) starts in batch mode, but cannot get a
+  licence, and this is on Unity's side:
+  * its own licensing helper (1.6.0, of January 2021) cannot read the licence file Unity now issues
+    (`The 'IssueDate' attribute is not declared`), and a Personal licence cannot be had in the older form
+    (`Unity_lic.ulf`) at all;
+  * it will not use the Unity Hub's helper, nor Unity's current one (1.18.3) put in place of its own as
+    [Unity's article](https://support.unity.com/hc/en-us/articles/52670753024404) describes for newer
+    editors: it checks who signed the helper, and Unity has changed who signs since. Tried on 2026-10-08
+    and undone.
+  * [Others have the same](https://discussions.unity.com/t/unity-hub-doesnt-run-2019/1737741) (September
+    2026, unresolved; Unity's staff had asked their licensing team).
 
-* Unity **2019.4.18f1** exactly (the game's version; bundles from other versions do not load), with
-  "Windows Build Support (Mono)" added. On an Apple-silicon Mac the editor runs under Rosetta.
-* A Unity licence activated on the machine (the free Personal one will do). Activating it means signing
-  in to a Unity account.
+  So: wait for Unity, or make the Direct3D bytecode without Unity (an open-source HLSL compiler and a packer
+  like `tools/shaderpack`'s, which nobody has written).
 
-## Building
+In a repository of one mod (they are made from a workspace that holds all of them) only that mod's shaders
+are here; `port.py` and the build pass over the others.
 
-    python3 tools/unityshaders/port.py        # only after changing tools/shaderpack/volume.glsl
-    "/Applications/Unity/Unity.app/Contents/MacOS/Unity" -batchmode -nographics -quit \
+## Building, once the editor runs
+
+    python3 tools/unityshaders/port.py
+    ~/.ksp-ai-bridge/unity/2019.4.18f1/Unity.app/Contents/MacOS/Unity -batchmode -nographics -quit \
         -projectPath tools/unityshaders -executeMethod BuildShaderBundles.All -logFile -
 
-That writes `tools/unityshaders/Bundles/shaders-windows.bundle` (and `-linux`, `-mac` where the editor
-has those build supports). Copy `shaders-windows.bundle` to
-`GameData/VolumetricExplosions/PluginData/`: on Direct3D the mod looks for it there and, finding it,
-draws smoke as a volume and throws burn marks onto the ground, as on the Mac. Without it, it falls back
-to sprites and flat sheets as before.
+That writes `tools/unityshaders/Bundles/shaders-windows.bundle`, `lens-windows.bundle` and `light-windows.bundle` (and `-mac`,
+`-linux` where the editor has those build supports). Expect compile errors the first time: nothing here
+has been through a compiler. Then, before anything goes to Windows, put `shaders-mac.bundle` in the game's
+`GameData/VolumetricExplosions/PluginData`, set `built = true`, and compare the picture with the hand-packed
+shaders'.
 
-`Volume.shader` is generated from the GLSL by `port.py`; `Mark.shader` is short and kept in step by hand.
-
-## Behind
-
-Since 2026-10-06 the mod has four shaders, not two, and the smoke's has changed: it is drawn at half
-size (reading single pixels of the camera's depth picture), carried on between grids, and reads six more
-textures of where the smoke "was". This project still has the smoke and the burn mark as they were before
-that, and nothing for the enlarging shader (`tools/shaderpack/enlarge.glsl`) or the shock front
-(`shock.glsl`). `port.py` needs teaching the new things before it can make `Volume.shader` again, and the
-two new shaders need writing here. The mod does not look for either of them in a built bundle yet. The changes of 2026-10-07
-(steps no longer than half a cell, billows read more coarsely where steps are lengthened, the enlargement's
-allowance for sloping surfaces) are not here either; nor are that afternoon's: three sets of billows to a
-size read from five textures of where the smoke "was" (`_RestA` to `_RestE`, with `_VolRest` and
-`_VolRest2` for what each set counts for), the map of clear air the walk leaps by (`_Clear`, read cell by
-cell with no smoothing between cells), and `_VolDrawn` in the enlarging shader, by which a cloud is left
-out for a camera it does not reach into.
+The editor needs `/Library/Application Support/Unity` to exist and be writable (it does, since 2026-10-08):
+without it, even a batch-mode start puts up a Mac password prompt.
