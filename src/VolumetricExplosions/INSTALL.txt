@@ -5,7 +5,7 @@ The game's explosions as a simulation of fire, smoke and dust, drawn as a true v
 It needs no other mod.
 
 INSTALL
-  Copy the folder GameData/VolumetricExplosions from this download into your KSP's
+  Copy the folder VolumetricExplosions from this download into your KSP's
   GameData folder, and start the game. To remove the mod, delete that folder.
 
 ON A MAC, ONE MORE STEP (if a browser downloaded this)

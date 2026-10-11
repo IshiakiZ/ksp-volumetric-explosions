@@ -16,7 +16,7 @@ needs no other mod and changes nothing but the look.
 
 ## Install
 
-Copy `GameData/VolumetricExplosions` into your KSP `GameData` folder and start the game. To remove it,
+Copy the `VolumetricExplosions` folder from the download into your KSP `GameData` folder and start the game. To remove it,
 delete that folder. For KSP 1.12.x; it needs no other mod.
 
 On a Mac, a copy downloaded with a browser runs slower until you allow its library with one command:
