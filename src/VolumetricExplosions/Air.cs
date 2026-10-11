@@ -52,16 +52,35 @@ namespace VolumetricExplosions
             StartCoroutine(AfterEachFrame());
         }
 
+        void Start()
+        {
+            // (the launch pads of this scene, for what of an engine's jet goes down a pad's grate: see Pads)
+            try { Pads.Look(); }
+            catch (Exception ex) { Debug.LogError("[VolumetricExplosions] the launch pads could not be looked at: " + ex); }
+        }
+
         static readonly int cameraNote = Shader.PropertyToID("_VolCamera");
 
-        /// <summary>Tell the volume shader whether the camera about to draw has a depth picture of the scene to stop the smoke at, and what angle one of its pixels covers.</summary>
+        /// <summary>
+        /// Tell the volume shader whether the camera about to draw has a depth picture of the scene to stop the smoke at, what
+        /// angle one of its pixels covers, and what the depths the smoke keeps for being put in order are multiplied by (see
+        /// Layers: kept in sixteen bits, which go to 65,504; the far camera's in sixty-fourths, to some four thousand km).
+        /// </summary>
         void ForCamera(Camera camera)
         {
             int which = camera == depthCamera[0] ? 0 : camera == depthCamera[1] ? 1 : -1;
             bool small = halfOn && which >= 0;
             if (small) Half(which, camera);
-            Shader.SetGlobalVector(cameraNote, new Vector4((camera.depthTextureMode & DepthTextureMode.Depth) != 0 ? 1f : 0f, 2f * Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad) / Mathf.Max(1, camera.pixelHeight), small ? 1f : 0f, 0f));
+            if (Layered && which >= 0) layers.ForCamera(which, camera);
+            else layers.NotFor();
+            Shader.SetGlobalVector(cameraNote, new Vector4((camera.depthTextureMode & DepthTextureMode.Depth) != 0 ? 1f : 0f, 2f * Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad) / Mathf.Max(1, camera.pixelHeight), small ? 1f : 0f,
+                                                             which == 1 ? 1f / 64f : 1f));
         }
+
+        readonly Layers layers = new Layers();
+
+        /// <summary>Whether every patch's smoke is put on the screen together, in depth order (see Layers), as it is wherever its shader can be had. (For testing: TestLayers 2 puts each patch on the screen by its own box, as before.)</summary>
+        public static bool Layered => Instance != null && Settings.TestLayers != 2f && Layers.Possible;
 
         readonly CommandBuffer[] halfCommands = new CommandBuffer[2];
         bool halfOn;
@@ -171,6 +190,10 @@ namespace VolumetricExplosions
                 if (halfCommands[which] != null) halfCommands[which].Release();
             }
             halfOn = false;
+            layers.Dispose();
+#if DEV
+            if (moverBall != null) Destroy(moverBall);
+#endif
             NoShocks();
             if (shockCommands != null) shockCommands.Release();
             if (shockMaterial != null) Destroy(shockMaterial);
@@ -267,13 +290,161 @@ namespace VolumetricExplosions
 
         float noAirUntil;
 
-        /// <summary>What an engine is putting out this frame: its flame into the patch of air that goes along with its ship, its smoke into one that stays where it is.</summary>
+        /// <summary>
+        /// What an engine is putting out this frame. Its flame goes into the patch of air that goes along with its ship;
+        /// so does its smoke, where its owner says what ship it is on (see Exhaust.rides), while it is young (see
+        /// SiteYoung), and otherwise straight into one that stays where it is. What of its jet goes down a launch pad's
+        /// grate comes out at the ends of the pad's trench (see Pads, and Trenches).
+        /// </summary>
         internal bool Take(in Exhaust exhaust)
         {
             if (Assets.Volume == null || !Settings.Volume) return false;
+            float trench = 0f;
+            if (exhaust.amount > 0.001f && exhaust.running > 0.02f && Pads.All.Count > 0 && Settings.TestYoung < 2f)
+            {
+                trench = Pads.Into(exhaust, out Pad pad);
+                if (pad != null && trench > 0.01f) pad.Feed(exhaust, trench, Site.SmokeMade(exhaust, (float)exhaust.going.magnitude, SmokeQuality, out _, out _));
+                else trench = 0f;
+            }
             bool flame = exhaust.fire > 0.01f && exhaust.rides != null && TakeFlame(exhaust);
-            bool smoke = exhaust.amount > 0.001f && TakeSmoke(exhaust);
+            bool smoke = false;
+            if (exhaust.amount > 0.001f)
+            {
+                // (young smoke that goes down the grate goes there of itself, and is let go: see the mover)
+                // (Only an engine's jet: what its owner says is something burning, dust or a spray goes straight into a patch that
+                // stays where it is, where it is made as such (see Site.Vents), whatever ship it is on; its flame still goes along
+                // with the ship.)
+                bool jet = exhaust.kind == ExhaustKind.Engine || exhaust.kind == ExhaustKind.Unset;
+                if (exhaust.rides != null && jet && Settings.TestYoung < 1f) smoke = TakeYoung(exhaust);
+                if (!smoke)
+                {
+                    Exhaust rest = exhaust;
+                    rest.amount *= 1f - trench;
+                    smoke = rest.amount > 0.001f && TakeSmoke(rest) || trench > 0.01f;
+                }
+            }
             return flame || smoke;
+        }
+
+        /// <summary>How many puffs smoke is made in, against the usual: fewer as the air fills up (see Site.Vents).</summary>
+        public static float SmokeQuality => Mathf.Clamp(Settings.Quality * Room(), 0.15f, 1.5f);
+
+        /// <summary>
+        /// An engine's smoke while it is young: into the patch of air that goes along with its ship, with the ship's
+        /// flames if it has any (begun if there is none, as for a flame). Where there is no air to hold smoke, nothing,
+        /// and so too where as many ships have such patches as there may be (it then goes straight into a patch that
+        /// stays where it is, as it did before there were these).
+        /// </summary>
+        bool TakeYoung(in Exhaust exhaust)
+        {
+            CelestialBody body = FlightGlobals.currentMainBody;
+            if (body == null || !body.atmosphere) return false;
+            Site site = null;
+            int riding = 0;
+            int family = Site.Family(exhaust.tint);
+            foreach (Site s in sites)
+            {
+                if (!s.Riding) continue;
+                riding++;
+                if (s.Rides == exhaust.rides && (site == null || s.FlameFamily == family)) site = s;
+            }
+            if (site == null)
+            {
+                if (exhaust.running <= 0.02f || riding >= MostFlames || Time.time < noAirUntil) return false;
+                Plan plan = Plan.Where(exhaust.rim);
+                if (plan.vacuum || plan.space || plan.underwater) { noAirUntil = Time.time + 0.5f; return false; }
+                try { site = new Site(plan, exhaust.rides); }
+                catch (Exception ex)
+                {
+                    if (!complained) Debug.LogError("[VolumetricExplosions] could not begin an engine's young smoke: " + ex);
+                    complained = true;
+                    return false;
+                }
+                sites.Add(site);
+            }
+            if (site.Airless) return false;
+            return site.Fed(exhaust);
+        }
+
+        /// <summary>
+        /// (After every patch has stepped.) The young smoke each ship's patch has handed on, to the patch that holds its
+        /// trail: the one it gave to last while that will still have it, or the newest that will, or one begun there.
+        /// </summary>
+        void Deliver()
+        {
+            CelestialBody body = FlightGlobals.currentMainBody;
+            if (body == null) return;
+            for (int n = 0; n < sites.Count; n++)
+            {
+                Site s = sites[n];
+                if (!s.Riding || s.Handing.Count == 0) continue;
+                Site.Handoff first = s.Handing[0];
+                Vector3d at = body.position + body.BodyFrame.LocalToWorld(first.at.xzy).xzy;
+                Site to = s.TrailSite;
+                if (to == null || to.Leaving || !sites.Contains(to) || !to.Keeps(body, at))
+                {
+                    to = null;
+                    for (int m = sites.Count - 1; m >= 0 && to == null; m--)
+                        if (!sites[m].Riding && sites[m].Keeps(body, at)) to = sites[m];
+                    if (to == null)
+                    {
+                        Plan plan = Plan.Where(at);
+                        if (plan.vacuum || plan.space || plan.underwater) { s.Handing.Clear(); continue; }       // (no air there to hold it: it is let go)
+                        if (Staying() >= Most) LetOneGo();
+                        try { to = new Site(plan); }
+                        catch (Exception ex)
+                        {
+                            if (!complained) Debug.LogError("[VolumetricExplosions] could not begin an engine's trail: " + ex);
+                            complained = true;
+                            s.Handing.Clear();
+                            continue;
+                        }
+                        sites.Add(to);
+                    }
+                    s.TrailSite = to;
+                }
+                to.Adopt(s.Handing, s.HandNozzle, s.ShipGoing);
+                s.Handing.Clear();
+            }
+        }
+
+        /// <summary>
+        /// (After the engines have said what they are putting out.) Each launch pad whose trench is being fed, or is still
+        /// emptying, gives its smoke to the patch of air over the pad: the one it gave to last, or one that will have it,
+        /// or one begun there.
+        /// </summary>
+        void Trenches(float dt)
+        {
+            CelestialBody body = FlightGlobals.currentMainBody;
+            if (body == null) return;
+            foreach (Pad pad in Pads.All)
+            {
+                pad.End(dt);
+                if (pad.fill <= 0f || pad.made <= 0f) continue;
+                Site s = pad.site;
+                if (s == null || s.Leaving || !sites.Contains(s) || s.Riding)
+                {
+                    s = null;
+                    for (int m = sites.Count - 1; m >= 0 && s == null; m--)
+                        if (!sites[m].Riding && sites[m].Keeps(body, (Vector3d)pad.middle)) s = sites[m];
+                    if (s == null)
+                    {
+                        Plan plan = Plan.Where((Vector3d)pad.middle);
+                        if (plan.vacuum || plan.underwater) continue;
+                        if (Staying() >= Most) LetOneGo();
+                        try { s = new Site(plan); }
+                        catch (Exception ex)
+                        {
+                            if (!complained) Debug.LogError("[VolumetricExplosions] could not begin a pad's smoke: " + ex);
+                            complained = true;
+                            continue;
+                        }
+                        sites.Add(s);
+                    }
+                    pad.site = s;
+                }
+                s.Trench(pad, pad.nozzle);
+            }
         }
 
         const int MostFlames = 4;                      // ships at once whose engines' flames are drawn
@@ -289,7 +460,8 @@ namespace VolumetricExplosions
             {
                 if (!s.Riding) continue;
                 riding++;
-                if (s.Rides == exhaust.rides && s.FlameFamily == Site.Family(exhaust.tint)) site = s;
+                // (or one that has only held its young smoke so far: see TakeYoung)
+                if (s.Rides == exhaust.rides && (s.FlameFamily == Site.Family(exhaust.tint) || !s.HasFlame)) site = s;
             }
             if (site == null)
             {
@@ -355,6 +527,36 @@ namespace VolumetricExplosions
             marks.Add(new Scorch(plan, radius));
         }
 
+        /// <summary>
+        /// The lamps of the scene that may light smoke at night (see Site.TuneScene): its point lights and spotlights,
+        /// but not those on ships (an engine's own light on its smoke is its fire's, see Site.VentLamp) and not ours.
+        /// Looked for twice a second while there is smoke.
+        /// </summary>
+        public static readonly List<Light> SceneLights = new List<Light>();
+        float lightsLooked = -10f;
+
+        void LookForLights()
+        {
+            if (Time.unscaledTime - lightsLooked < 0.5f) return;
+            lightsLooked = Time.unscaledTime;
+            SceneLights.Clear();
+            foreach (Light l in FindObjectsOfType<Light>())
+            {
+                if (l == null || !l.isActiveAndEnabled || !(l.intensity > 0.01f) || !(l.range > 0.5f) || l.range > 5000f || float.IsInfinity(l.intensity)) continue;
+                // (a lamp with a colour below nothing takes light away: some mods use such lamps for shade, which is not light to put on smoke)
+                Color c = l.color;
+                if (!(c.r >= 0f && c.g >= 0f && c.b >= 0f) || c.r + c.g + c.b <= 0.001f) continue;
+                if (l.type != LightType.Point && l.type != LightType.Spot) continue;
+                // (only lamps that light the world the smoke is in: the cabins drawn inside ships, and the planets seen from afar, have
+                // lamps of their own near the scene's origin, which is where the ship being flown is)
+                if ((l.cullingMask & ((1 << 15) | 1)) == 0) continue;
+                Transform top = l.transform.root;
+                if (top != null && top.name.StartsWith("VolumetricExplosions", StringComparison.Ordinal)) continue;
+                if (l.GetComponentInParent<Part>() != null) continue;
+                SceneLights.Add(l);
+            }
+        }
+
         void LateUpdate()
         {
             steppedFrame = Time.frameCount;
@@ -364,7 +566,14 @@ namespace VolumetricExplosions
             if (Cost[3] > 0) gridMs = Cost[3] * 1000f / System.Diagnostics.Stopwatch.Frequency;
             for (int n = 0; n < Cost.Length; n++) { shown[n] = Mathf.Lerp(shown[n], Cost[n] * 1000f / System.Diagnostics.Stopwatch.Frequency, 0.1f); Cost[n] = 0; }
             for (int n = 0; n < Part.Length; n++) { partShown[n] = Mathf.Lerp(partShown[n], Part[n] * 1000f / System.Diagnostics.Stopwatch.Frequency, 0.05f); Part[n] = 0; }
+            Pads.Frame();
+            if (sites.Count > 0) LookForLights();
+#if DEV
+            TestMover();
+            TestBurn();
+#endif
             Sources.Ask();
+            Trenches(dt);
             int alive = 0;
             for (int n = sites.Count - 1; n >= 0; n--)
             {
@@ -381,6 +590,7 @@ namespace VolumetricExplosions
                 alive += s.Count;
                 if (s.Finished) { s.Dispose(); sites.RemoveAt(n); }
             }
+            Deliver();
             Alive = alive;
             if (Assets.Volume != null || Assets.Mark != null || Assets.Shock != null)
             {
@@ -432,6 +642,8 @@ namespace VolumetricExplosions
             foreach (Site s in sites) s.Place();
             foreach (Scorch m in marks) m.Place();
             Halves();
+            if (Layered) layers.Frame(sites, depthCamera, depthCamera[0] != null ? depthCamera[0].transform.position : camera.transform.position);
+            else layers.Off();
             Shake();
             Shocks();
             Lap(14, ref lap);
@@ -584,6 +796,124 @@ namespace VolumetricExplosions
         }
 
 #if DEV
+        Site moverSite;
+        Vector3 moverFrom;
+        float moverStarted = -1f;
+        GameObject moverBall;
+
+        /// <summary>
+        /// (The wind a weather mod gives the air (Sources.Wind) over the ground under the craft being flown, every quarter of an hour
+        /// for the next six: at 2 m, 10 m and 20 m up, as it answers (its own way of holding the wind back near the ground in it), and
+        /// its gusts at 10 m.)
+        /// </summary>
+        public static string WindDay()
+        {
+            if (Sources.Wind == null) return "no weather wind: Sources.Wind is not set";
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) return "no craft";
+            Vector3d up = (v.CoMD - v.mainBody.position).normalized;
+            double above = v.heightFromTerrain > 0f ? v.heightFromTerrain : v.altitude - v.terrainAltitude;
+            Vector3d ground = v.CoMD - up * above;
+            double now = Planetarium.GetUniversalTime();
+            var say = new System.Text.StringBuilder("hours from now: the weather's wind at 2 m, 10 m, 20 m (gusts at 10 m), m/s\n");
+            for (int k = 0; k <= 24; k++)
+            {
+                double ut = now + k * 900.0;
+                say.Append((k * 0.25f).ToString("F2")).Append(" h:");
+                float gusts = 0f;
+                foreach (double h in new[] { 2.0, 10.0, 20.0 })
+                {
+                    Sources.Breeze b;
+                    try { b = Sources.Wind(ground + up * h, ut); }
+                    catch (Exception ex) { return say.Append(" failed: ").Append(ex.Message).ToString(); }
+                    Vector3d level = b.wind - up * Vector3d.Dot(b.wind, up);
+                    say.Append(" ").Append(level.magnitude.ToString("F1"));
+                    if (h == 10.0) gusts = b.gusts;
+                }
+                say.Append(" (").Append(gusts.ToString("F1")).Append(")\n");
+            }
+            return say.ToString();
+        }
+
+        /// <summary>
+        /// (For seeing a fire on a ship, Settings.TestBurn: a fire this wide, a radius in metres, burning on the side of the craft
+        /// being flown, half way up its root part, told to the air as another mod tells of a burning wreck: as an engine's jet
+        /// (TestBurnKind 1, which is what such a fire was taken for until 2026-10-10) or as something burning (2).)
+        /// </summary>
+        void TestBurn()
+        {
+            if (Settings.TestBurn <= 0f) return;
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null || v.rootPart == null) return;
+            Vector3d up = (v.CoMD - v.mainBody.position).normalized;
+            // (on the hull at the height of the craft's middle, on the side towards the camera, so that it can be seen where it
+            // stands: where a line from the camera's side to the middle first meets one of the craft's own parts)
+            Vector3d toCamera = FlightCamera.fetch != null ? (Vector3d)FlightCamera.fetch.mainCamera.transform.position - v.CoMD : (Vector3d)v.transform.right;
+            toCamera -= up * Vector3d.Dot(toCamera, up);
+            Vector3 side = (Vector3)toCamera.normalized;
+            Vector3d rim = v.CoMD + toCamera.normalized * 0.6;
+            foreach (RaycastHit hit in Physics.RaycastAll((Vector3)v.CoMD + side * 20f, -side, 20f, ~0, QueryTriggerInteraction.Ignore))
+            {
+                Part part = hit.collider != null ? hit.collider.GetComponentInParent<Part>() : null;
+                if (part != null && part.vessel == v && ((Vector3d)hit.point - v.CoMD).sqrMagnitude > (rim - v.CoMD).sqrMagnitude) rim = (Vector3d)hit.point;
+            }
+            var e = new Exhaust
+            {
+                id = 777001, rim = rim, along = up, going = (Vector3d)v.rb_velocityD + Krakensbane.GetFrameVelocity(), nozzle = Settings.TestBurn, flame = 4.5f * Settings.TestBurn,
+                running = 0.35f, amount = 0.6f, shade = 0.05f, warm = 0.3f, lasts = 16f, tint = 0, fire = 0.8f, rides = v.transform,
+                kind = Settings.TestBurnKind >= 2f ? ExhaustKind.Burning : ExhaustKind.Engine,
+            };
+            Take(e);
+        }
+
+        /// <summary>(Where the smoke of the newest patch that stays where it is lies on the whole: see Site.Middle.)</summary>
+        public static string Cloud()
+        {
+            if (Instance == null) return "no air";
+            for (int n = Instance.sites.Count - 1; n >= 0; n--)
+                if (!Instance.sites[n].Riding && Instance.sites[n].Count > 0) return "patch " + n + ": " + Instance.sites[n].MiddleNow();
+            return "no cloud";
+        }
+
+        /// <summary>
+        /// (For seeing wakes, Settings.TestMover.) A ball sent east at that speed through the middle of the newest cloud (where its
+        /// smoke is on the whole), from 70 m short of it to 70 m beyond, again and again, said to the air as another mod's piece of
+        /// wreckage is (see Movers), and drawn as a dark ball so it can be seen.
+        /// </summary>
+        void TestMover()
+        {
+            float speed = Settings.TestMover;
+            if (speed <= 0f)
+            {
+                if (moverBall != null) { Destroy(moverBall); moverBall = null; }
+                moverSite = null; moverStarted = -1f;
+                return;
+            }
+            if (moverSite == null || !sites.Contains(moverSite) || Time.time - moverStarted > 140f / speed)
+            {
+                moverSite = null;
+                for (int n = sites.Count - 1; n >= 0 && moverSite == null; n--)
+                    if (!sites[n].Riding && sites[n].Shown && sites[n].Count > 0) moverSite = sites[n];
+                if (moverSite == null) return;
+                moverFrom = moverSite.Middle(out Vector3 _) - new Vector3(70f, 0f, 0f);
+                moverStarted = Time.time;
+            }
+            Vector3 local = moverFrom + new Vector3(speed * (Time.time - moverStarted), 0f, 0f);
+            Vector3d at = moverSite.World(local);
+            Vector3d east = moverSite.World(local + Vector3.right) - at;
+            float size = Mathf.Max(0.05f, Settings.TestMoverSize);
+            Movers.Moving(at, east * speed, size);
+            if (moverBall == null)
+            {
+                moverBall = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                moverBall.name = "VolumetricExplosions test mover";
+                Destroy(moverBall.GetComponent<Collider>());
+                moverBall.GetComponent<Renderer>().material = new Material(Shader.Find("Unlit/Color")) { color = new Color(0.12f, 0.11f, 0.1f) };
+            }
+            moverBall.transform.position = (Vector3)at;
+            moverBall.transform.localScale = Vector3.one * (2f * size);
+        }
+
         /// <summary>(Whether the newest patch of air is drawn where it is reckoned to be: see Site.Handed.)</summary>
         public static string Handed() => Instance == null || Instance.sites.Count == 0 ? "no patch of air" : Instance.sites[Instance.sites.Count - 1].Handed();
         /// <summary>(Every patch that engines are feeding, and where its newest puffs are against the first running nozzle of the craft being flown.)</summary>
@@ -599,6 +929,45 @@ namespace VolumetricExplosions
             var say = new System.Text.StringBuilder();
             for (int n = Instance.sites.Count - 1; n >= 0 && n >= Instance.sites.Count - 3; n--)
                 if (Instance.sites[n].Vented) say.Append("patch ").Append(n).Append(" (unfed ").Append(Instance.sites[n].Unfed.ToString("F2")).Append(" s): ").Append(Instance.sites[n].Trail(nozzle)).Append("\n");
+            return say.ToString();
+        }
+
+        /// <summary>(The launch pads found, and what is going down each one's trench.)</summary>
+        public static string PadsNow()
+        {
+            var say = new System.Text.StringBuilder(Pads.All.Count + " pads");
+            foreach (Pad pad in Pads.All)
+                say.Append("\n").Append(pad.fx != null ? pad.fx.transform.parent.parent.name : "?").Append(": grate ").Append((2f * pad.halfA).ToString("F1")).Append(" x ").Append((2f * pad.halfB).ToString("F1"))
+                   .Append(" m, ").Append(pad.ends.Length).Append(" ends, made ").Append(pad.made.ToString("F1")).Append(", fill ").Append(pad.fill.ToString("F2")).Append(", strongest ").Append(pad.strongest.ToString("F2"))
+                   .Append(pad.site != null ? ", into a patch of " + pad.site.Count : "");
+            return say.ToString();
+        }
+
+        /// <summary>(The lamps of the scene that may light smoke, as last looked for.)</summary>
+        public static string LightsNow()
+        {
+            var say = new System.Text.StringBuilder(SceneLights.Count + " lamps");
+            foreach (Light l in SceneLights)
+                if (l != null) say.Append("\n").Append(l.name).Append(" (").Append(l.transform.root.name).Append("): ").Append(l.type).Append(", intensity ").Append(l.intensity.ToString("G4")).Append(", range ").Append(l.range.ToString("G4"))
+                                  .Append(", colour ").Append(l.color.ToString()).Append(l.type == LightType.Spot ? ", cone " + l.spotAngle.ToString("F0") : "").Append(", ").Append(l.renderMode);
+            return say.ToString();
+        }
+
+        /// <summary>(What has gone through the smoke of each patch: the things followed ahead, the puffs split, the wakes. See Wakes.cs.)</summary>
+        public static string Wakes()
+        {
+            if (Instance == null) return "no air";
+            var say = new System.Text.StringBuilder();
+            for (int n = 0; n < Instance.sites.Count; n++) say.Append("patch ").Append(n).Append(": ").Append(Instance.sites[n].WakesNow()).Append("\n");
+            return say.ToString();
+        }
+
+        /// <summary>(Each ship's patch: its young smoke and flame, and what it hands on.)</summary>
+        public static string Young()
+        {
+            if (Instance == null) return "no air";
+            var say = new System.Text.StringBuilder();
+            foreach (Site s in Instance.sites) say.Append(s.YoungNow()).Append("\n");
             return say.ToString();
         }
 

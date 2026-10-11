@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using UnityEngine;
 
@@ -61,6 +62,17 @@ namespace VolumetricExplosions
         [DllImport("kernel32", EntryPoint = "LoadLibraryW", CharSet = CharSet.Unicode, ExactSpelling = true)] static extern IntPtr WindowsOpen(string path);
         [DllImport("kernel32", EntryPoint = "GetProcAddress", CharSet = CharSet.Ansi, ExactSpelling = true, BestFitMapping = false)] static extern IntPtr WindowsFind(IntPtr library, string name);
 
+        // (Each system's calls in methods of their own, never inlined: the game's Mono looks for the library of every call in a
+        // method as it compiles it, and with all three in one, Windows' log took eighteen lines of "could not load library"
+        // for libSystem.dylib and libdl.so.2.)
+        [MethodImpl(MethodImplOptions.NoInlining)] static IntPtr OpenOnMac(string path) => MacOpen(path, 2 | 4);
+        [MethodImpl(MethodImplOptions.NoInlining)] static IntPtr OpenOnLinux(string path) => LinuxOpen(path, 2);
+        [MethodImpl(MethodImplOptions.NoInlining)] static IntPtr OpenOnWindows(string path) => WindowsOpen(path);
+        [MethodImpl(MethodImplOptions.NoInlining)] static IntPtr FindOnMac(IntPtr library, string name) => MacFind(library, name);
+        [MethodImpl(MethodImplOptions.NoInlining)] static IntPtr FindOnLinux(IntPtr library, string name) => LinuxFind(library, name);
+        [MethodImpl(MethodImplOptions.NoInlining)] static IntPtr FindOnWindows(IntPtr library, string name) => WindowsFind(library, name);
+        [MethodImpl(MethodImplOptions.NoInlining)] static bool Quarantined(string path) => MacNote(path, "com.apple.quarantine", IntPtr.Zero, UIntPtr.Zero, 0, 0).ToInt64() >= 0;
+
         static bool tried;
         static Begin begin;
         static End end;
@@ -97,15 +109,16 @@ namespace VolumetricExplosions
                 if (IntPtr.Size != 8) return;                    // (nor for a game that is not a 64-bit one)
                 string path = Find(mac ? ".dylib" : linux ? ".so" : ".dll");
                 if (path == null) return;                        // (a copy of the mod without one for this system: the mod's own code makes the grids)
+                if (windows) path = Path.GetFullPath(path).Replace('/', '\\');      // (the game's folder comes with forward slashes; Windows' loader asks for backslashes)
                 int system = mac ? 0 : linux ? 1 : 2;
                 // (-1: no such note on the file)
-                if (mac && MacNote(path, "com.apple.quarantine", IntPtr.Zero, UIntPtr.Zero, 0, 0).ToInt64() >= 0)
+                if (mac && Quarantined(path))
                 {
                     Addon.Log("grids are made by the mod's own code: macOS has " + Path.GetFileName(path) + " marked as downloaded from the internet and would not load it without asking. " +
                               "(The mod works the same without it, at a lower frame rate while there is smoke. See the README for how to let it be used.)");
                     return;
                 }
-                IntPtr library = mac ? MacOpen(path, 2 | 4) : linux ? LinuxOpen(path, 2) : WindowsOpen(path);       // (now, and for this mod alone)
+                IntPtr library = mac ? OpenOnMac(path) : linux ? OpenOnLinux(path) : OpenOnWindows(path);       // (now, and for this mod alone)
                 if (library == IntPtr.Zero) { Addon.Log("grids are made by the mod's own code: " + Path.GetFileName(path) + " would not load"); return; }
                 Number signature = Call<Number>(library, system, "vfx_signature"), sizeOfP = Call<Number>(library, system, "vfx_size_of_p"), sizeOfGrid = Call<Number>(library, system, "vfx_size_of_grid");
                 Begin first = Call<Begin>(library, system, "vfx_new");
@@ -149,7 +162,7 @@ namespace VolumetricExplosions
 
         static T Call<T>(IntPtr library, int system, string name) where T : class
         {
-            IntPtr at = system == 0 ? MacFind(library, name) : system == 1 ? LinuxFind(library, name) : WindowsFind(library, name);
+            IntPtr at = system == 0 ? FindOnMac(library, name) : system == 1 ? FindOnLinux(library, name) : FindOnWindows(library, name);
             return at == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer(at, typeof(T)) as T;
         }
 

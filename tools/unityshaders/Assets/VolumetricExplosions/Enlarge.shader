@@ -31,24 +31,29 @@ Shader "VolumetricExplosions/Enlarge"
             #define SampleFlat(S, uv) S.SampleLevel(sampler##S, uv, 0.0)
             #define Mod(x, y) ((x) - (y) * floor((x) / (y)))
             #define GreaterThan(a, b) ((a) > (b))
+            #define GreaterThanEqual(a, b) ((a) >= (b))
+            #define LessThan(a, b) ((a) < (b))
+            #define LessThanEqual(a, b) ((a) <= (b))
             float4 TexelFetch(Texture2D t, int2 p, int lod) { return t.Load(int3(p, lod)); }
             float4 TexelFetch(Texture3D t, int3 p, int lod) { return t.Load(int4(p, lod)); }
             int2 TextureSize(Texture2D t, int lod) { uint w, h; t.GetDimensions(w, h); return int2(w, h); }
             bool AllZero(float4 v) { return !any(v); }
+            // gl_FragCoord: which pixel is being drawn, its rows counted from the bottom, as every picture's are read here. Direct3D counts
+            // the rows of what it draws into from the top, and the game draws into its pictures upside down to make up for it (saying so with
+            // _ProjectionParams.x at -1): so where it is drawing straight to the screen, the row is turned over, or each picture read by pixel
+            // (the camera's depth, the smoke drawn small) would be read upside down.
+            float4 FragCoord(float4 pos)
+            {
+            #if UNITY_UV_STARTS_AT_TOP
+                if (_ProjectionParams.x > 0.0) pos.y = _ScreenParams.y - pos.y;
+            #endif
+                return pos;
+            }
 
             float4 _VolDrawn;     // x: 1 if this cloud's small picture was drawn for the camera drawing now (see Air.ForCamera)
             float4 _VolCamera;     // x: 1 if the camera drawing this has a depth picture of the scene, z: 1 if the small picture was drawn for this camera
             Texture2D _VolHalf; SamplerState sampler_VolHalf;     // the smoke, drawn small: its colour times how much it hides, and how much it hides
             Texture2D _CameraDepthTexture; SamplerState sampler_CameraDepthTexture;
-
-            float4 DepthFetch(int2 p, int lod)
-            {
-            #if UNITY_UV_STARTS_AT_TOP
-                if (_ProjectionParams.x > 0.0) { uint w, h; _CameraDepthTexture.GetDimensions(w, h); p.y = (int)h - 1 - p.y; }
-            #endif
-                return _CameraDepthTexture.Load(int3(p, lod));
-            }
-
 
             struct v2f
             {
@@ -91,7 +96,7 @@ Shader "VolumetricExplosions/Enlarge"
             // How far ahead the ray of one of the small picture's pixels stopped.
             float stopped(int2 cell, int2 most)
             {
-                float4 four = float4(DepthFetch(min(2 * cell, most), 0).x, DepthFetch(min(2 * cell + int2(1, 0), most), 0).x, DepthFetch(min(2 * cell + int2(0, 1), most), 0).x, DepthFetch(min(2 * cell + int2(1, 1), most), 0).x);
+                float4 four = float4(TexelFetch(_CameraDepthTexture, min(2 * cell, most), 0).x, TexelFetch(_CameraDepthTexture, min(2 * cell + int2(1, 0), most), 0).x, TexelFetch(_CameraDepthTexture, min(2 * cell + int2(0, 1), most), 0).x, TexelFetch(_CameraDepthTexture, min(2 * cell + int2(1, 1), most), 0).x);
                 four = 1.0 / (_ZBufferParams.z * four + _ZBufferParams.w);
                 return ((cell.x + cell.y) & 1) == 0 ? min(min(four.x, four.y), min(four.z, four.w)) : max(max(four.x, four.y), max(four.z, four.w));
             }
@@ -100,7 +105,7 @@ Shader "VolumetricExplosions/Enlarge"
             {
                 float4 result = float4(0.0, 0.0, 0.0, 0.0);
                 if (_VolCamera.z < 0.5) discard;
-                int2 pixel = ((int2)(IN.pos.xy)), last = TextureSize(_VolHalf, 0) - 1;
+                int2 pixel = ((int2)(FragCoord(IN.pos).xy)), last = TextureSize(_VolHalf, 0) - 1;
                 // The four small pixels round this one, and how much each counts for by nearness alone.
                 float2 at = (((float2)(pixel)) + 0.5) * 0.5 - 0.5;
                 int2 base = ((int2)(floor(at)));
@@ -114,11 +119,11 @@ Shader "VolumetricExplosions/Enlarge"
                 if (_VolCamera.x > 0.5)
                 {
                     int2 most = TextureSize(_CameraDepthTexture, 0) - 1;
-                    float here = 1.0 / (_ZBufferParams.z * DepthFetch(min(pixel, most), 0).x + _ZBufferParams.w);
+                    float here = 1.0 / (_ZBufferParams.z * TexelFetch(_CameraDepthTexture, min(pixel, most), 0).x + _ZBufferParams.w);
                     float4 apart = float4(stopped(c00, most), stopped(c10, most), stopped(c01, most), stopped(c11, most)) - here;
                     // How fast this pixel's own surface goes away from the camera, pixel to pixel: to either side and up and
                     // down, the smaller change of each pair (at the edge of something, the other is the jump to what is behind it).
-                    float4 beside = float4(DepthFetch(clamp(pixel - int2(1, 0), ((int2)(0)), most), 0).x, DepthFetch(clamp(pixel + int2(1, 0), ((int2)(0)), most), 0).x, DepthFetch(clamp(pixel - int2(0, 1), ((int2)(0)), most), 0).x, DepthFetch(clamp(pixel + int2(0, 1), ((int2)(0)), most), 0).x);
+                    float4 beside = float4(TexelFetch(_CameraDepthTexture, clamp(pixel - int2(1, 0), ((int2)(0)), most), 0).x, TexelFetch(_CameraDepthTexture, clamp(pixel + int2(1, 0), ((int2)(0)), most), 0).x, TexelFetch(_CameraDepthTexture, clamp(pixel - int2(0, 1), ((int2)(0)), most), 0).x, TexelFetch(_CameraDepthTexture, clamp(pixel + int2(0, 1), ((int2)(0)), most), 0).x);
                     beside = abs(1.0 / (_ZBufferParams.z * beside + _ZBufferParams.w) - here);
                     float slopes = min(beside.x, beside.y) + min(beside.z, beside.w);
                     // (the small pixels stopped at things up to two pixels and a bit from this one)

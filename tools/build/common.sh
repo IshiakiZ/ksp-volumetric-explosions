@@ -22,8 +22,13 @@ done
 [ -n "$MANAGED" ] || { echo "error: no KSP install found at: $KSP_DIR (set KSP_DIR)" >&2; exit 1; }
 
 export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
-command -v dotnet >/dev/null 2>&1 || { echo "error: the .NET SDK is needed to build (on a Mac: brew install dotnet)" >&2; exit 1; }
-SDK_LINE="$(dotnet --list-sdks | tail -1)"
+# (the dotnet on the path; or, where that one has no SDK, the one in DOTNET_ROOT: on Windows the SDK can be installed for one
+# user alone, beside a dotnet in Program Files that has only the runtime)
+DOTNET=dotnet
+if [ -z "$(dotnet --list-sdks 2>/dev/null)" ] && [ -n "${DOTNET_ROOT:-}" ] && [ -n "$("$DOTNET_ROOT/dotnet" --list-sdks 2>/dev/null)" ]; then DOTNET="$DOTNET_ROOT/dotnet"; fi
+command -v "$DOTNET" >/dev/null 2>&1 || { echo "error: the .NET SDK is needed to build (on a Mac: brew install dotnet)" >&2; exit 1; }
+# (Windows ends each line it prints with a CR as well)
+SDK_LINE="$("$DOTNET" --list-sdks | tr -d '\r' | tail -1)"
 SDK_VERSION="${SDK_LINE%% *}"
 SDK_ROOT="${SDK_LINE#*[}"; SDK_ROOT="${SDK_ROOT%]}"
 CSC="$SDK_ROOT/$SDK_VERSION/Roslyn/bincore/csc.dll"
@@ -38,7 +43,7 @@ compile() {  # compile <out> <defines> <source dir> [more source dirs]   (WITH="
   local sources=() more=() dll
   while IFS= read -r -d '' f; do sources+=("$f"); done < <(find "$@" -name '*.cs' -print0 | sort -z)
   while IFS= read -r -d ':' dll; do [ -n "$dll" ] && more+=("-r:$dll"); done <<< "${WITH:-}:"
-  dotnet "$CSC" -nologo -noconfig -nostdlib -target:library -optimize+ -debug- -langversion:9.0 \
+  "$DOTNET" "$CSC" -nologo -noconfig -nostdlib -target:library -optimize+ -debug- -langversion:9.0 \
     -nowarn:CS1701,CS1702,CS0649 ${defines:+-define:$defines} "${REFS[@]}" ${more[@]+"${more[@]}"} "-out:$out" "${sources[@]}"
 }
 

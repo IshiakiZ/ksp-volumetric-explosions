@@ -34,6 +34,12 @@ see [Installing](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Inst
   buildings and ships, and is pushed about by craft and their exhaust.
 * **Shock fronts** that bend the picture as they pass, **pieces** of the destroyed parts, and **burn marks**
   thrown onto whatever surface is there.
+* **Shadows and lamps** (0.5.0). Smoke throws its shadow on the ground, buildings and ships under it in
+  sunlight, and at night is lit by the lamps round about as well as by its own fire.
+* **Wakes and depth** (0.5.0). What flies through smoke leaves a ragged tunnel that churns and fills in behind
+  it, a plane's wing tips roll the smoke up and its downwash carries it down; smoke in front always hides smoke
+  behind, whichever patch of air each is in; a fireball turns to smoke from the outside in, and burning wreckage
+  sends up plumes.
 * **Its air takes more than explosions** (since 0.4.0). Another mod can feed it the smoke and the flames of
   rocket engines: see [engines' smoke and flames](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Engines-smoke-and-flames).
   By itself the mod does nothing with engines.
@@ -54,7 +60,7 @@ back. [All of them](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/S
 | --- | --- |
 | Mac | Made and tested here (KSP 1.12.5, OpenGL). |
 | Linux | The game runs on OpenGL there too, so it should work the same. **Never run.** |
-| Windows | On the game's default Direct3D the smoke is drawn as soft sprites, not as a volume, until the shaders are built for it. Starting the game with `-force-glcore` should give the full picture. **Never run.** |
+| Windows | Tried on Windows 11 (KSP 1.12.5 on its own Direct3D 11): the smoke is drawn as a volume there too, by the same shaders compiled for Direct3D (`PluginData/shaders-windows.bundle`). A rocket crashed by the pad drew its fire and smoke as a volume, the right way up, burn marks on the ground and the shock front's bending; two fires side by side drew their smoke mingled, with no seam; engines' flames and smoke (Engine Flames, Rocket Smoke) drew into it; the mod's library made the grids the same as the C# to the last place, both the one built on Windows (`vfxgrid.dll`, Microsoft's compiler) and the one a Mac makes with Zig; at night the fire lit what stood round it and the pad's floodlights lit the smoke. 165 frames a second without smoke, 141 with a 4-tonne fuel fire in view (an NVIDIA GeForce RTX 4080 SUPER at 1280 x 720). Started with `-force-glcore` (OpenGL) the volume is drawn too. Then the smoke's own shadow on the ground (there with shadows on, gone with them off), and other worlds: the Mun (no smoke: a ball of fire flying apart, the dust ringing out and dropping back, a burn mark), Duna (a wide, thin cloud with red dust; fuel alone only a cold white cloud), Eve (a tight fireball, a column of smoke and a fire burning on), Laythe, and in orbit (a ball of fire that swells and thins away in seconds). |
 
 What it costs: on an Apple M5 Pro at 1280 x 720, a 4-tonne fuel fire filling half the view took the game
 from 79 frames a second to 56 in its first seconds and 70 to 75 once it was smoke.

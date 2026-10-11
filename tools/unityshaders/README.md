@@ -1,5 +1,11 @@
 # Building the shaders in the Unity editor
 
+**Since 2026-10-09 the Direct3D bundles are made without the editor**, on Windows, by `windows.py` in this
+folder (route A of [WITHOUT-UNITY.md](WITHOUT-UNITY.md)): `python3 tools/unityshaders/windows.py "<KSP
+folder>"` turns every shader into its Direct3D 11 bundle in one go, with Windows' own compiler. Those bundles
+were tried in the game on Windows. What follows is the editor's way, kept for if it ever runs again; the
+`.shader` files `port.py` writes come from the same HLSL that `windows.py` compiles.
+
 The seven shaders of these mods (the explosions' smoke, the enlarging of it, the burn mark and the shock
 front, Keystone's lens, and Natural Light's shafts of sunlight and its blacking out of pixels that are not
 numbers) are OpenGL text, packed into bundles by hand (`tools/shaderpack`). That is what

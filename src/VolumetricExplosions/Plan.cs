@@ -224,7 +224,7 @@ namespace VolumetricExplosions
         }
 
         /// <summary>The colour of the dust a blast would raise here.</summary>
-        static Color Ground(CelestialBody body, Vector3d world, bool paved)
+        internal static Color Ground(CelestialBody body, Vector3d world, bool paved)
         {
             if (paved) return new Color(0.30f, 0.29f, 0.27f);
             string biome = "";

@@ -110,6 +110,7 @@ namespace VolumetricExplosions
             float q = Settings.Quality * Air.Room();
             float R = pl.radius;
             lastBlast = time; blasted = true;
+            if (time - fireballAt > 3f || R > fireballR) { fireballR = R; fireballAt = time; }
             if (R > scale || count < 50)
             {
                 scale = Mathf.Max(2f, Mathf.Max(R, pl.reach * 0.6f));
@@ -196,6 +197,17 @@ namespace VolumetricExplosions
             }
             // Something that hit at speed throws its fire on ahead of it.
             float carried = Mathf.Clamp01(v0.magnitude / 120f);
+            // Where the soot shows first. A fuel fireball is luminous through and through to begin with: its soot glows (that is what
+            // makes the flame yellow). The soot goes dark where the burning stops, which is where cold air gets in: all round the
+            // outside, and soonest on the rising cap and in the rolls of its surface, so that a black skin closes round the fire
+            // with the flame bursting through it, and the luminous core shrinks until the whole is a black cloud. So the dark comes
+            // in sheets and patches, never dot by dot: how fast each bit cools follows a smooth pattern over the ball (a few broad
+            // patches, fixed for the blast), not a throw of the dice for each bit. (Until 2026-10-09 it was the dice, and a tenth of
+            // the smoky bits were dark from the first moment: the fireball came up speckled with black balls.)
+            var patchWay = new Vector3[6];
+            var patchOf = new float[6];
+            for (int m = 0; m < patchWay.Length; m++) { patchWay[m] = Random.onUnitSphere; patchOf[m] = Random.Range(-1f, 1f); }
+            bool speckled = Settings.TestSoot >= 1f;                                   // (for testing: as it was)
 
             for (int k = 0; k < n; k++)
             {
@@ -237,10 +249,20 @@ namespace VolumetricExplosions
                     o.turb = 0.5f + 0.1f * speed;
                     o.rise = 0.5f * Mathf.Sqrt(R);
                 }
-                // The middle is hottest and stays hot longest; the outside cools at once into smoke.
-                o.heat = 1.12f - 0.42f * rho + 0.12f * (gain - 1f) + Random.Range(-0.08f, 0.08f);
+                // The middle is hottest and stays hot longest; the outside cools first into smoke, the top and the patches of the
+                // pattern above soonest (see patchWay).
+                float patch = speckled ? 0f : Patch(way, patchWay, patchOf);
+                float cap = speckled ? 0f : Mathf.Max(0f, Vector3.Dot(way, blastUp));
+                // (The outside not at once: filmed frame by frame, a large fuel fireball is luminous all through for its first second, a
+                // bright yellow-white edge, and only in its second does soot build up, a tenth of its surface dark by the end of it, as
+                // its colour goes over to red (Crawley 1982, an 80-tonne fireball). So here the outside goes dark from about 0.8 s on
+                // where the pattern has it cool first, 1.2 s on the whole, and later where it stays hot. Until 2026-10-09 the outermost
+                // bits were dark within a quarter of a second.)
+                o.heat = speckled ? 1.12f - 0.42f * rho + 0.12f * (gain - 1f) + Random.Range(-0.08f, 0.08f)
+                                  : 1.12f - 0.26f * rho + 0.12f * (gain - 1f) + 0.05f * patch + Random.Range(-0.02f, 0.02f);
                 // In air the fire cools into smoke. With no air it stays bright and simply thins away as it flies apart.
-                o.cool = vacuum ? 0.7f / burns : (1.3f + 2.2f * rho * rho) / burns * Random.Range(0.8f, 1.25f);
+                o.cool = vacuum ? 0.7f / burns : speckled ? (1.3f + 2.2f * rho * rho) / burns * Random.Range(0.8f, 1.25f)
+                                                          : (1.3f + 1.6f * rho * rho) / burns * (1f - 0.2f * patch + 0.2f * cap * rho) * Random.Range(0.95f, 1.05f);
                 o.flame = Random.Range(0.75f, 1.15f);
                 o.tint = (byte)pl.tint;
                 o.tile = Lumpy();
@@ -249,8 +271,18 @@ namespace VolumetricExplosions
                     float later = o.r * 2.2f;                                               // about the size it has grown to when the smoke shows
                     o.mass = Random.Range(0.6f, 2.2f) * Mathf.Pow(Mathf.Max(0.05f, pl.soot), 0.7f) * later * later;
                     o.life = smokeLasts * Random.Range(0.45f, 1.15f);
-                    // Some of it is soot from the first moment: the dark blotches that roll about in a fuel fire.
-                    if (Random.value < 0.08f * pl.soot) { o.heat *= 0.42f; o.cool *= 0.6f; }
+                    if (!speckled)
+                    {
+                        // (The same soot spread wider: half as wide again, so a third as thick, and each bit's smoke runs into its
+                        // neighbours'. As wide as it was, each bit that went dark was a dense ball with clear air or flame between it
+                        // and the next: a fireball spotted with dark balls, where real soot comes as a sheet. Its flame no brighter
+                        // for being wider.)
+                        o.r *= 1.5f;
+                        o.flame *= 0.67f;
+                    }
+                    // (Until 2026-10-09 some of it was soot from the first moment, meant for the dark blotches that roll about in a
+                    // fuel fire: each was a black ball on the fireball from its first frame. The blotches come from the pattern now.)
+                    if (speckled && Random.value < 0.08f * pl.soot) { o.heat *= 0.42f; o.cool *= 0.6f; }
                     float tone = shade * Random.Range(0.7f, 1.5f);
                     o.ar = tone; o.ag = tone * 0.97f; o.ab = tone * 0.93f;
                 }
@@ -258,8 +290,12 @@ namespace VolumetricExplosions
                 Born(i);
             }
 
-            // Cooler smoke round the outside from the start: the dark rind a fuel fire has.
-            int rind = smoky > 0f ? (int)(n * 0.3f * pl.soot) : 0;
+            // The dark rind a fuel fire has: smoke round the outside. (It used to be there from the first moment, cool, coming into
+            // view at once: a shell of separate dark balls, a tenth seen a quarter of a second in, all over the fire. Now it is hot gas
+            // at first, its soot glowing unseen, which turns to smoke as it cools (see Deposit): from about a third of the way through
+            // the burning, soonest on top and where the pattern has the fire cool first, and over as long again; so it closes round
+            // the fire as a skin. More of it, and smaller, for that.)
+            int rind = smoky > 0f ? (int)(n * (speckled ? 0.3f : 0.42f) * pl.soot) : 0;
             for (int k = 0; k < rind; k++)
             {
                 int i = Add();
@@ -274,19 +310,44 @@ namespace VolumetricExplosions
                 o.vx = v0.x * kept; o.vy = v0.y * kept; o.vz = v0.z * kept;
                 o.kloss = 1f / spreads;
                 o.drag = 3.5f;
-                o.r = rp * Random.Range(1.2f, 2.2f);
+                o.r = rp * (speckled ? Random.Range(1.2f, 2.2f) : Random.Range(0.9f, 1.5f));
                 o.swell = Swell(way, speed, o.kloss, o.r);
                 o.grow = mixes;
                 o.turb = 0.5f + 0.1f * speed;
                 o.rise = 0.3f * Mathf.Sqrt(R);
                 o.mass = Random.Range(0.8f, 2.2f) * pl.soot * o.r * o.r * 2.5f;
                 o.life = smokeLasts * Random.Range(0.4f, 1.1f);
-                o.fadeIn = burns * Random.Range(0.45f, 0.9f);
+                if (speckled) o.fadeIn = burns * Random.Range(0.45f, 0.9f);
+                else
+                {
+                    // (from hot to the start of smoke, a third of the burning or so, and as long again to full smoke: cooling as it does,
+                    // by a share of its heat a second, that is heat 1.46 and 3.6 / burns a second, whatever the moment)
+                    float shows = burns * Mathf.Clamp(0.32f + 0.12f * Patch(way, patchWay, patchOf) - 0.1f * Mathf.Max(0f, Vector3.Dot(way, blastUp)) + Random.Range(-0.03f, 0.03f), 0.12f, 0.55f);
+                    o.cool = 3.6f / burns;
+                    o.heat = 0.5f * Mathf.Exp(o.cool * shows);
+                    o.fadeIn = 0.1f;
+                }
                 float tone = shade * Random.Range(0.8f, 1.5f);
                 o.ar = tone; o.ag = tone * 0.97f; o.ab = tone * 0.93f;
                 o.tile = Lumpy();
                 Born(i);
             }
+        }
+
+        /// <summary>
+        /// A smooth pattern over the fireball, -1 to 1 (about), by direction from its middle: a few broad patches, each a third of
+        /// the way round or so. Neighbouring bits of the fire get much the same, so what follows from it (when the soot shows)
+        /// comes in patches.
+        /// </summary>
+        static float Patch(Vector3 way, Vector3[] at, float[] of)
+        {
+            float sum = 0f, weight = 0f;
+            for (int m = 0; m < at.Length; m++)
+            {
+                float near = Mathf.Exp(3.2f * (Vector3.Dot(way, at[m]) - 1f));
+                sum += of[m] * near; weight += near;
+            }
+            return weight > 1e-4f ? Mathf.Clamp(1.6f * sum / weight, -1f, 1f) : 0f;
         }
 
         /// <summary>Something that does not burn here: fuel with no oxygen to burn in, spilled oxidiser, a burst gas tank. A cold white cloud.</summary>
@@ -381,6 +442,15 @@ namespace VolumetricExplosions
                     o.turb = 0.5f + 0.08f * speed;
                     o.rise = -Random.Range(0.1f, 0.7f);                                     // it settles
                     o.mass = Random.Range(0.5f, 1.5f) * o.r * o.r * 4f;
+                    if (Settings.TestSoot < 1f)
+                    {
+                        // (The same dust spread half as wide again, so a third as thick, and raised over a moment rather than there at
+                        // once: each bit of it was a dense dark ball two metres across, and those thrown up flew out in front of the fire,
+                        // with clear air between them: the rest of the "blobs" on a fireball in its first second. It runs together into
+                        // a skirt of dust now.)
+                        o.r *= 1.5f;
+                        o.fadeIn = Random.Range(0.12f, 0.3f);
+                    }
                     o.swell = Swell(way, speed, o.kloss, o.r);
                     o.life = Random.Range(6f, 18f) * Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.5f, 1f, Mathf.Clamp01(air));
                     o.tile = Random.value < 0.25f ? Wispy() : Lumpy();
@@ -663,7 +733,16 @@ namespace VolumetricExplosions
                 x = c.x, y = floor + 0.2f, z = c.z, r = Mathf.Max(0.6f, R * 0.4f), left = pl.burn, total = pl.burn,
                 rate = q * Mathf.Clamp(18f + 9f * R, 20f, 220f), soot = pl.soot, shade = pl.smokeShade, scale = Mathf.Clamp(0.25f + 0.05f * R, 0.3f, 1f), tint = (byte)pl.tint,
             };
-            f.lamp = AddLamp(f.x, f.y + f.r * 0.5f, f.z, f.r * 1.6f, 2.2f, pl.burn, f.tint, true, 0f, 0f);
+            // How tall its flames stand and how fast they rise: a pool of kerosene burns some 1.5 MW to the square metre, its visible
+            // flame reaches 0.235 Q^(2/5) - 1.02 D on the whole (Q in kW, D its width in metres: Heskestad 1983), a few times its
+            // width for a small pool and one and a half times for a big one, and the gas in its flames goes up at about
+            // 1.9 Q^(1/5) metres a second (McCaffrey 1979), of which the flames' puffs here take a third, the rest being the
+            // turmoil the shader draws. (Until 2026-10-10 its flames rose at a couple of metres a second and cooled within half a
+            // second: a fire some eight metres across stood a metre or two high, a low warm glow on the ground.)
+            float power = 1500f * Mathf.PI * f.r * f.r;
+            f.tall = Mathf.Max(0.235f * Mathf.Pow(power, 0.4f) - 2.04f * f.r, 1.2f * f.r);
+            f.lick = Mathf.Clamp(0.33f * 1.93f * Mathf.Pow(power, 0.2f), 1.5f, 9f);
+            f.lamp = AddLamp(f.x, f.y + Mathf.Max(f.r * 0.5f, 0.3f * f.tall), f.z, f.r * 1.6f, 2.2f, pl.burn, f.tint, true, 0f, 0f);
             fires[fireCount++] = f;
         }
 
@@ -711,6 +790,16 @@ namespace VolumetricExplosions
                     o.grow = 0.1f;
                     o.turb = 1.4f;
                     o.tile = Lumpy();
+                    // Up at the speed of the fire's own gas, hot until it has risen as high as the fire's flames stand (see AddFire):
+                    // the flame, and the smoke that comes of it where the flames end, at their tips, not at their foot.
+                    bool tall = Settings.TestFire < 1f && !vacuum;
+                    if (tall)
+                    {
+                        float lick = f.lick * Random.Range(0.7f, 1.1f) * (0.6f + 0.4f * strength);
+                        o.ky = lick; o.kloss = 1.2f;
+                        o.rise = 0.8f * lick;
+                        o.cool = 1.2f * lick / Mathf.Max(f.tall * (0.6f + 0.4f * strength), 0.5f) * Random.Range(0.85f, 1.2f);
+                    }
                     if (Random.value < 0.45f * Mathf.Lerp(0.5f, 1f, f.soot))
                     {
                         float later = o.r * 2.2f;
@@ -718,6 +807,15 @@ namespace VolumetricExplosions
                         o.life = Random.Range(10f, 26f) * lasts;
                         float tone = f.shade * Random.Range(0.8f, 1.4f);
                         o.ar = tone; o.ag = tone * 0.97f; o.ab = tone * 0.93f;
+                    }
+                    else if (tall)
+                    {
+                        // (flame only: bigger and thicker than the bits that become smoke, so that, spread up the height of the
+                        // flames, it still burns as one fire: spread up it as thinly as before, the flames were patchy, and the
+                        // fire's own smoke hid them)
+                        o.r *= 1.4f;
+                        o.flame = 1.8f;
+                        o.life = 2.6f / o.cool;
                     }
                     else o.life = 4.2f / o.cool;
                     Born(i);
@@ -774,12 +872,21 @@ namespace VolumetricExplosions
                     }
                 }
                 f.due -= dt;
+                // (A piece in flight leaves its puffs by the way it has come, close enough together to run into a streak: at 38 a second,
+                // as it was, one going thirty metres a second left a string of beads a metre apart. No more than 55 a second.)
+                float laid = every;
+                if (!f.down && Settings.TestSoot < 1f)
+                {
+                    float speed = Mathf.Sqrt(f.vx * f.vx + f.vy * f.vy + f.vz * f.vz);
+                    laid = 1f / (Mathf.Clamp(speed / (0.55f * f.size), 30f, 55f) * Mathf.Clamp(Settings.Quality * Air.Room(), 0.15f, 1.5f));
+                }
                 while (f.due <= 0f)
                 {
-                    f.due += f.down ? every * 2.5f : every;
+                    f.due += f.down ? every * 2.5f : laid;
                     if (!Trail(f.x, f.y, f.z, f.vx, f.vy, f.vz, f.size, f.tint, f.white, lasts)) break;
                 }
             }
+            TakeTrails(dt);                 // (and the trails other mods say are in it: see Trails)
         }
 
         /// <summary>One puff of the trail a burning thing leaves: flame that turns to smoke where it was.</summary>
@@ -802,6 +909,26 @@ namespace VolumetricExplosions
                 o.grow = 1.5f;
                 o.life = 0.8f;
             }
+            else if (Settings.TestSoot < 1f && vx * vx + vy * vy + vz * vz < 0.01f)
+            {
+                // A piece that has come down and burns where it lies: its smoke goes up as a plume, a thin wisp leaning on the wind,
+                // narrow at the fire and widening as it climbs (see Smoulder). (It was a puff rising at 0.6 m/s every sixth of a
+                // second: they gathered into a black ball sitting over the piece.)
+                o.flame = 0.6f;
+                o.drag = 4f; o.kloss = 2f;
+                o.ky = Random.Range(0.8f, 1.6f);
+                o.r = size * Random.Range(0.55f, 0.9f);
+                o.grow = 0.15f;
+                o.turb = Random.Range(0.8f, 1.4f);
+                o.rise = Random.Range(2.2f, 3.2f);
+                o.heat = Random.Range(0.42f, 0.55f);
+                o.cool = Random.Range(1.4f, 2f);
+                o.mass = Random.Range(0.6f, 1.3f) * o.r * o.r * 2.2f;
+                o.life = Random.Range(3f, 6f) * lasts;
+                o.fadeIn = 0.15f;
+                float tone = white ? Random.Range(0.45f, 0.7f) : Random.Range(0.03f, 0.07f);
+                o.ar = tone; o.ag = tone; o.ab = tone;
+            }
             else
             {
                 o.drag = 5f; o.kloss = 4f;
@@ -812,6 +939,17 @@ namespace VolumetricExplosions
                 o.life = Random.Range(2.5f, 6f) * lasts;
                 float tone = white ? Random.Range(0.45f, 0.7f) : Random.Range(0.03f, 0.07f);
                 o.ar = tone; o.ag = tone; o.ab = tone;
+                if (Settings.TestSoot < 1f)
+                {
+                    // A burning piece trails flame first and smoke further back: its trail stays fire for the first half second
+                    // or so, by which time the piece is out of the fireball it was thrown from. (It went dark within a fifth of a
+                    // second, still inside the fire: each piece's trail was a string of black beads on the fireball, which was the
+                    // most of the "blobs" on a fireball in its first second.) Thinner, as so many more puffs make it.
+                    o.r = size * Random.Range(0.7f, 1.1f);
+                    o.heat = Random.Range(0.85f, 1f);
+                    o.cool = Random.Range(1.3f, 1.8f);
+                    o.mass = Random.Range(0.6f, 1.3f) * o.r * o.r * 2.2f;
+                }
             }
             Born(i);
             return true;
@@ -854,8 +992,9 @@ namespace VolumetricExplosions
         /// </summary>
         void Wash()
         {
-            ballCount = jetCount = 0;
+            ballCount = jetCount = bodyCount = 0;
             if (!Settings.Push || count == 0 || vacuum || space) return;
+            bool wakes = Settings.Predict || Settings.Wakes || Settings.Vortices;
             float mx = (bx0 + bx1) * 0.5f, my = (by0 + by1) * 0.5f, mz = (bz0 + bz1) * 0.5f;
             float reach = 0.5f * Mathf.Sqrt((bx1 - bx0) * (bx1 - bx0) + (by1 - by0) * (by1 - by0) + (bz1 - bz0) * (bz1 - bz0)) + 12f;
             List<Vessel> loaded = FlightGlobals.VesselsLoaded;
@@ -870,6 +1009,9 @@ namespace VolumetricExplosions
                 Vector3 going = frame.DirToLocal(v.srf_velocity);
                 float speed = going.magnitude;
                 bool moving = speed > 0.4f && dx * dx + dy * dy + dz * dz < (reach + size) * (reach + size);
+                // (and the craft as a whole, for its wake, from as far off as it will come in the time it is looked ahead for: see Wakes.cs)
+                float coming = reach + size + speed * LookAheadFor;
+                if (wakes && speed > 2f && dx * dx + dy * dy + dz * dz < coming * coming) Craft(v, at, going, speed);
                 int every = Mathf.Max(1, v.parts.Count / 24);
                 float wider = Mathf.Pow(every, 0.33f);
                 for (int k = 0; k < v.parts.Count; k++)
@@ -897,6 +1039,7 @@ namespace VolumetricExplosions
                     balls[ballCount++] = new Ball { x = where.x, y = where.y, z = where.z, vx = going.x, vy = going.y, vz = going.z, r = radius * wider, speed = speed };
                 }
             }
+            TakeMovers();                   // (and what other mods say is moving through the air: see Movers)
         }
     }
 }

@@ -20,6 +20,7 @@ void main()
 #endif
 #ifdef FRAGMENT
 #version 150
+#extension GL_ARB_explicit_attrib_location : require
 // Smoke and fire as a volume, the way Counter-Strike 2 draws its smoke grenades. The box this is drawn
 // on holds grids made by the mod from its particles: how much smoke and flame there is at each place,
 // how much light reaches it (from the sun, the open sky and the fire) and how hot the flame is, and (more
@@ -89,6 +90,23 @@ uniform vec4 _VolLampA;      // xyz: where the strongest fire is, in metres from
 uniform vec4 _VolLampB;      // the second
 uniform vec4 _VolLampC;      // and the third
 uniform vec4 _VolLamps;      // xyz: how bright each of the three is
+uniform vec4 _VolSceneA;     // The lamps of the scene round about (floodlights, the pad's own lights, buildings' lamps), four of them: xyz where, in the grid's axes, w its reach squared (nought: none)
+uniform vec4 _VolSceneB;
+uniform vec4 _VolSceneC;
+uniform vec4 _VolSceneD;
+uniform vec4 _VolSceneTintA; // rgb: its light, as an amount of light; a: the cosine of half a spotlight's cone (below -1.5: it shines every way)
+uniform vec4 _VolSceneTintB;
+uniform vec4 _VolSceneTintC;
+uniform vec4 _VolSceneTintD;
+uniform vec4 _VolSceneDirA;  // xyz: which way a spotlight points, in the grid's axes
+uniform vec4 _VolSceneDirB;
+uniform vec4 _VolSceneDirC;
+uniform vec4 _VolSceneDirD;
+uniform vec4 _VolJet;        // A ship's patch (its engines' flames): xyz which way the jets go, in the grid's axes, one long; w how far the flame's pattern has been carried down them, metres
+uniform vec4 _VolJetFrom;    // xyz: the mouth of the strongest nozzle, in the grid's axes; w: its radius, metres
+uniform vec4 _VolJetLook;    // x: how far the flame's edge is torn into tongues (0 to 1); y: how sooty it is; z: how strong its shock diamonds are; w: the size of its pattern, metres (nought: not a ship's patch)
+uniform vec4 _VolJetBody;    // x: how much flame makes the flame's body whole (a clear, faint flame is whole where there is any of it); y: how many shock diamonds there are
+uniform vec4 _VolFire;       // A fire in the open (not an engine's): x how far its flames' pattern has risen through the burning gas, metres; y one over the size of its tongues, per metre; z how far thin flame is torn into tongues (0 to 1); w 1 to draw it so (0: as a glow, as until 2026-10-10)
 uniform vec4 _VolTint;       // rgb: the hue of the dust here
 uniform vec4 _VolHot1;       // rgb: the colour of flame at a quarter of full heat,
 uniform vec4 _VolHot2;       // at half,
@@ -100,7 +118,35 @@ uniform vec4 _VolCutC;      // x: how far ahead of that place this holds, y: how
 uniform vec4 _VolCutD;      // and the same for a second engine, or cluster of them, in the same patch of air
 uniform vec4 _VolCutE;
 uniform vec4 _VolCutF;
-uniform sampler3D _Volume;   // rg: how much smoke lies towards the sun (sixteen bits in two bytes), b: how much towards the open sky, a: how hot the flame is
+uniform vec4 _VolSlot;       // xy: where in the picture it is drawn into this patch's own part of it begins, in pixels (see layers.glsl: the patches drawn at half size share one picture, each in a slot of its own)
+uniform vec4 _VolWakes;      // what is left where something has gone through the smoke (see carve, and Wakes.cs): x how many wakes, y seconds for a wake to fill in, z seconds the air in one goes on turning, w how much of the smoke a fresh one has pushed out of its way (0 to 1)
+uniform vec4 _VolWakeLo;     // xyz: a corner of a box round every wake, in the grid's axes (nothing outside it is looked at)
+uniform vec4 _VolWakeHi;     // xyz: the opposite corner
+uniform vec4 _VolWakeA0;     // a wake: xyz its older end, in the grid's axes, w how long ago the thing that made it was there, seconds
+uniform vec4 _VolWakeB0;     // xyz its newer end, w how long ago that was (nought while the thing is still making it)
+uniform vec4 _VolWakeC0;     // x how wide it is (the thing's radius), y how far the turning air winds the smoke round it at its edge once wound, radians, z how far along it the turning goes one way and back (nought: always one way), w which way, and how much (nought: no wake)
+uniform vec4 _VolWakeA1;
+uniform vec4 _VolWakeB1;
+uniform vec4 _VolWakeC1;
+uniform vec4 _VolWakeA2;
+uniform vec4 _VolWakeB2;
+uniform vec4 _VolWakeC2;
+uniform vec4 _VolWakeA3;
+uniform vec4 _VolWakeB3;
+uniform vec4 _VolWakeC3;
+uniform vec4 _VolWakeA4;
+uniform vec4 _VolWakeB4;
+uniform vec4 _VolWakeC4;
+uniform vec4 _VolWakeA5;
+uniform vec4 _VolWakeB5;
+uniform vec4 _VolWakeC5;
+uniform vec4 _VolWakeA6;
+uniform vec4 _VolWakeB6;
+uniform vec4 _VolWakeC6;
+uniform vec4 _VolWakeA7;
+uniform vec4 _VolWakeB7;
+uniform vec4 _VolWakeC7;
+uniform sampler3D _Volume;  // rg: how much smoke lies towards the sun (sixteen bits in two bytes), b: how much towards the open sky, a: how hot the flame is
 uniform sampler3D _Amount;   // rg: how much smoke (sixteen bits in two bytes), ba: how much flame
 uniform sampler3D _Around;   // r: how much smoke there is round about, over a couple of metres (square root), g: more than nothing if there is any smoke or flame near, b: how light that smoke is (square root), a: how much of it is dust
 uniform sampler3D _Flow;     // rgb: which way the smoke is moving and how fast, as a share of the fastest (0.5: not at all), a: how much the pattern of billows is squeezed there (1: to a sixteenth)
@@ -115,7 +161,11 @@ uniform sampler3D _Detail;   // r: how much the smoke is gathered (lumps upon lu
 uniform sampler2D _CameraDepthTexture;
 in vec3 vs_TEXCOORD0;
 in vec4 vs_TEXCOORD1;
-out vec4 SV_Target0;
+layout(location = 0) out vec4 SV_Target0;
+// (and, where the picture drawn into has a second part: how far along the ray what the smoke hides lies, on the whole, and how
+// widely that is spread along it (r and g), each times how much it hides, times _VolCamera.w. With them the patches' smoke is put
+// in order pixel by pixel: see layers.glsl.)
+layout(location = 1) out vec4 SV_Target1;
 
 // The billows at one place. The pattern is lumps upon lumps (cellular noise), read twice: once as it is,
 // for the small billows, and once much larger and turned another way, for the big. No lump of the one lines up
@@ -160,6 +210,118 @@ float begun(vec3 here, vec4 a, vec4 b, vec4 c)
     return 1.0 - c.y * beside * ahead;
 }
 
+// The light a lamp of the scene throws on smoke at a place: falling off much as the game's own lamps' light does,
+// to nothing at the end of its reach; and a spotlight's only inside its cone. (Not shaded by the smoke between: nor
+// is a fire's, above.)
+vec3 sceneLamp(vec3 here, vec4 at, vec4 tint, vec4 dir)
+{
+    if (at.w <= 0.0) return vec3(0.0);
+    vec3 d = here - at.xyz;
+    float d2 = dot(d, d);
+    float fall = clamp(1.0 - d2 / at.w, 0.0, 1.0);
+    fall = fall * fall / (1.0 + 25.0 * d2 / at.w);
+    if (tint.a > -1.5) fall *= smoothstep(tint.a, tint.a + 0.06, dot(d, dir.xyz) * inversesqrt(d2 + 1e-4));
+    return tint.rgb * fall;
+}
+
+// An engine's flame, as its pattern is seen: in the nozzle's own frame, not the gas's. The gas goes through a flame at a
+// hundred metres a second and more, and a pattern carried with it is smeared to nothing by the game's smoothing from one
+// frame to the next: the flame was a blur of colour. What is seen of a real one holds its place on the nozzle and flows
+// down it: tongues and streaks drawn out along the jet, coming on at the nozzle and carried down it far slower than the
+// gas. So the pattern here is read in the jet's own measure (two ways across it, one along it drawn out three times) and
+// carried down it by _VolJet.w, at three sizes. 0 to 1, about 0.45 on the whole.
+float jetPattern(vec3 here, float level, out float along, out float aside)
+{
+    vec3 axis = _VolJet.xyz;
+    vec3 rel = here - _VolJetFrom.xyz;
+    along = dot(rel, axis);
+    vec3 across = rel - axis * along;
+    aside = length(across);
+    vec3 u = normalize(cross(axis, abs(axis.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 v = cross(axis, u);
+    vec3 q = vec3(dot(across, u), dot(across, v), (along - _VolJet.w) * 0.33) / _VolJetLook.w;
+    float l = max(level - 0.5, 0.0);
+    float n1 = textureLod(_Detail, q * 0.31 + vec3(0.13, 0.57, 0.91), l).r;
+    float n2 = textureLod(_Detail, q * 0.83 + vec3(0.71, 0.29, 0.43), l + 0.6).r;
+    float n3 = textureLod(_Detail, q * 2.2 + vec3(0.37, 0.83, 0.17), l + 1.4).r;
+    return 0.5 * n1 + 0.33 * n2 + 0.17 * n3;
+}
+
+// A fire's flames in the open, as their pattern is seen (see the flame in the walk). Real flames are thin sheets where the fuel
+// vapour meets the air, wrinkled at every size by the turmoil of the hot gas, so that a fire shows sharp-edged tongues and folds,
+// not a glow: whole and brightest low down where it burns steadily, torn into tongues above that flicker as they rise and tear
+// off at their tips (a pool fire's continuous and intermittent flame, McCaffrey 1979), a fireball's surface a mass of burning
+// folds. The pattern is carried with the burning gas (read where the gas "was", as the billows are) and rises through it as the
+// flames lick upward, stretched up a little as they are; at a size that goes with the fire (see TuneFire). Two sizes of lump,
+// 0 to 1, about 0.45 on the whole.
+float firePattern(vec3 was, float level)
+{
+    vec3 q = vec3(was.x, was.y * 0.62, was.z) * _VolFire.y;
+    float rise = _VolFire.x * _VolFire.y;
+    // (as finely as the billows are read where they are, for the size of these lumps against theirs)
+    float l = max(level + log2(0.093 * _VolFire.y / max(_VolDetail.w, 1e-4)), 0.0);
+    float n1 = textureLod(_Detail, (q - vec3(0.0, rise, 0.0)) * 0.093 + vec3(0.29, 0.61, 0.17), l).r;
+    float n2 = textureLod(_Detail, (q - vec3(0.0, 1.7 * rise, 0.0)) * 0.25 + vec3(0.83, 0.07, 0.53), l + 1.4).r;
+    return 0.62 * n1 + 0.38 * n2;
+}
+
+// What is left in the smoke where something has gone through it (see Wakes.cs): a tunnel as wide as the thing, filling in again from its
+// walls as it ages, the walls a little thicker for the smoke pushed into them; the smoke round it wound round the way the air left
+// turning there carries it (behind a blunt thing a little, one way and then the other along its path, a vortex street; round a wing's tip
+// as round a vortex, the smoke drawn out into a spiral round its core); and how churned it is there (see churn, after the wakes in the walk).
+// Drawn here, at the pixel, whatever the size of the grid's cells: a piece of wreckage a metre wide cuts a hole a metre wide.
+void carve(vec3 here, vec4 a, vec4 b, vec4 c, inout float hole, inout float wall, inout vec3 twist, inout vec4 churn, inout float churnWide)
+{
+    // (a width below nought: a wake that clears nothing, only turns the smoke round it: a rocket's in the smoke its own engines lay)
+    if (c.x == 0.0) return;
+    vec3 ab = b.xyz - a.xyz;
+    float long2 = max(dot(ab, ab), 1e-4);
+    float s = clamp(dot(here - a.xyz, ab) / long2, 0.0, 1.0);
+    vec3 off = here - (a.xyz + ab * s);
+    float age = mix(a.w, b.w, s);
+    float r = abs(c.x) * (1.0 + 0.3 * age);                    // (it widens as the air in it mixes with the air round it)
+    float d2 = dot(off, off);
+    // (c.z below nought: a wing tip's, whose turning reaches out so many of its widths)
+    float reach = c.z < 0.0 ? max(-c.z, 2.0) : 2.0;
+    if (d2 > reach * reach * r * r) return;
+    float d = sqrt(d2), x = d / r;
+    // (Right behind the thing the smoke is pushed out of the way altogether, and the tunnel stays clear for a moment before the
+    // turmoil in it brings the smoke back in: nearly empty for the first half of its filling time, mostly filled by the end of it.
+    // Only so is it seen through dense smoke: a tunnel with a quarter of the smoke left in it is as dark as the smoke round it.)
+    float filled = age / max(_VolWakes.y * (1.0 + 0.12 * abs(c.x)), 0.2);
+    float fresh = exp(-filled * filled);
+    if (c.x > 0.0) hole = max(hole, _VolWakes.w * fresh * (1.0 - smoothstep(0.6, 1.0, x)));
+    float rim = (x - 1.0) / 0.35;
+    if (c.x > 0.0) wall = max(wall, 0.3 * fresh * exp(-rim * rim));
+    // (The air in a wake is turmoil: eddies about as big as the wake is wide, coming up within a quarter of a second of the thing's going
+    // by and dying away over several. Of the most churned wake here: how churned it is, where in it this is (in its widths, from its
+    // older end, which the wind carries along with it; drifting slowly through the pattern as it ages, so that the eddies turn over),
+    // and how wide it is.)
+    float churned = (1.0 - exp(-4.0 * age)) / (1.0 + 0.25 * age) * (1.0 - smoothstep(0.8, 1.8, x));
+    if (churned > churn.w) { churn = vec4((here - a.xyz) / r + vec3(0.0, 0.07 * age, 0.0), churned); churnWide = r; }
+    float turn;
+    if (c.z < 0.0)
+    {
+        // A wing tip's vortex: the core turns whole, and outside it the air turns the slower the further out (as 1 / distance, so
+        // round in a time as distance squared), so the smoke round it is drawn out into a spiral, a few arms round a clear core,
+        // that winds up over the first half second and goes on turning slowly while the vortex lasts. (All along the tube the same
+        // way, so seen down the tube it is one spiral, not a blur of them.)
+        turn = (c.y * (1.0 - exp(-2.0 * age)) + 0.6 * min(age, 3.0)) * (x < 1.0 ? 1.0 : 1.0 / (x * x)) * (1.0 - smoothstep(0.7 * reach, reach, x)) * c.w;
+    }
+    else
+    {
+        // (it winds up as the air turns, and stays wound once the turning has died away)
+        turn = c.y * (1.0 - exp(-age / max(_VolWakes.z, 0.05))) * (x < 1.0 ? x : max(2.0 - x, 0.0)) * c.w;
+        if (c.z > 0.0) turn *= sin(6.2831853 * s * sqrt(long2) / c.z);
+    }
+    if (abs(turn) > 0.002)
+    {
+        vec3 axis = ab * inversesqrt(long2);
+        float cs = cos(turn), sn = sin(turn);
+        twist += off * (cs - 1.0) + cross(axis, off) * sn + axis * (dot(axis, off) * (1.0 - cs));
+    }
+}
+
 void main()
 {
     vec3 eye = _WorldSpaceCameraPos;
@@ -187,7 +349,7 @@ void main()
             // screen's. It stops at the nearest of the four things behind them or at the farthest, turn and turn
             // about like the squares of a chessboard: so whatever a pixel of the screen shows, near thing or far,
             // one of the pixels round it here stopped at the same.
-            ivec2 cell = ivec2(gl_FragCoord.xy), most = textureSize(_CameraDepthTexture, 0) - 1;
+            ivec2 cell = ivec2(gl_FragCoord.xy - _VolSlot.xy), most = textureSize(_CameraDepthTexture, 0) - 1;
             vec4 four = vec4(texelFetch(_CameraDepthTexture, min(2 * cell, most), 0).x, texelFetch(_CameraDepthTexture, min(2 * cell + ivec2(1, 0), most), 0).x,
                              texelFetch(_CameraDepthTexture, min(2 * cell + ivec2(0, 1), most), 0).x, texelFetch(_CameraDepthTexture, min(2 * cell + ivec2(1, 1), most), 0).x);
             four = 1.0 / (_ZBufferParams.z * four + _ZBufferParams.w);
@@ -232,6 +394,7 @@ void main()
     float shine = 1.0 + _VolSun.w * toward * toward * toward * toward;
     vec3 colour = vec3(0.0);
     float through = 1.0;
+    float deep = 0.0, deep2 = 0.0;      // the depth of each step along the ray (and its square), weighed by how much it hid of what is behind (see SV_Target1)
     for (int i = 0; i < 288; i++)
     {
         if (through < 0.02) break;
@@ -269,6 +432,7 @@ void main()
         // the smoke about here was moving then: between one grid and the next the whole cloud is carried
         // smoothly on, instead of standing still and then jumping.
         vec4 going = textureLod(_Flow, p + 0.5, 0.0);
+        vec2 wakeShown = vec2(0.0);      // (testing: see TestView 17 below)
         vec3 gone = (going.xyz - 0.5) * _VolFlow.x;
         gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
         vec3 here = p * _VolSize.xyz + _VolOffset.xyz;
@@ -284,6 +448,41 @@ void main()
         float smoke = amount.r * 0.99611 + amount.g * 0.0038911, flame = amount.b * 0.99611 + amount.a * 0.0038911;
         if (_VolCutA.w > 0.0) smoke *= begun(here, _VolCutA, _VolCutB, _VolCutC);
         if (_VolCutD.w > 0.0) smoke *= begun(here, _VolCutD, _VolCutE, _VolCutF);
+        if (_VolWakes.x > 0.5 && smoke > 0.0 && all(greaterThan(here, _VolWakeLo.xyz)) && all(lessThan(here, _VolWakeHi.xyz)))
+        {
+            // (where something has gone through: see carve)
+            float hole = 0.0, wall = 0.0;
+            vec3 twist = vec3(0.0);
+            vec4 churn = vec4(0.0);
+            float churnWide = 1.0;
+            carve(here, _VolWakeA0, _VolWakeB0, _VolWakeC0, hole, wall, twist, churn, churnWide);
+            if (_VolWakes.x > 1.5) carve(here, _VolWakeA1, _VolWakeB1, _VolWakeC1, hole, wall, twist, churn, churnWide);
+            if (_VolWakes.x > 2.5) carve(here, _VolWakeA2, _VolWakeB2, _VolWakeC2, hole, wall, twist, churn, churnWide);
+            if (_VolWakes.x > 3.5) carve(here, _VolWakeA3, _VolWakeB3, _VolWakeC3, hole, wall, twist, churn, churnWide);
+            if (_VolWakes.x > 4.5) carve(here, _VolWakeA4, _VolWakeB4, _VolWakeC4, hole, wall, twist, churn, churnWide);
+            if (_VolWakes.x > 5.5) carve(here, _VolWakeA5, _VolWakeB5, _VolWakeC5, hole, wall, twist, churn, churnWide);
+            if (_VolWakes.x > 6.5) carve(here, _VolWakeA6, _VolWakeB6, _VolWakeC6, hole, wall, twist, churn, churnWide);
+            if (_VolWakes.x > 7.5) carve(here, _VolWakeA7, _VolWakeB7, _VolWakeC7, hole, wall, twist, churn, churnWide);
+            if (churn.w > 0.02)
+            {
+                // The turmoil: the pattern of the smoke pushed this way and that by eddies about as big as the wake is wide (the
+                // slope of the pattern itself, read large, gives each place a way to be pushed that changes smoothly from place to
+                // place but has no order), and the edge of the tunnel ragged with them rather than round. (Wound round the wake's
+                // line alone, the pattern was drawn out into rings, as of a record, seen down the wake.) The eddies go along with
+                // the wake as the wind carries it, and turn over slowly as it ages.
+                // (the pattern has about eleven lumps to its width: read at 0.065 a wake's width, a lump is some 1.4 widths across)
+                vec4 eddy = textureLod(_Detail, churn.xyz * 0.065 + vec3(0.53, 0.19, 0.71), 0.0);
+                twist += (eddy.gba - 0.5) * (2.4 * churn.w * churnWide);
+                hole = clamp(hole * (1.0 + 1.8 * (eddy.r - 0.45) * churn.w), 0.0, 1.0);
+            }
+            // (testing: 17 leaves the smoke as it is and shows where the wakes are instead: red where they have cleared it, green where they wind it)
+            if (_VolGrid.w > 16.5 && _VolGrid.w < 17.5) { wakeShown = vec2(max(hole, wall), length(twist)); }
+            else
+            {
+                smoke *= (1.0 - hole) * (1.0 + wall);
+                was += twist;
+            }
+        }
         bool some = smoke + flame > 0.00001;
         if (some && passed < _VolThin.x)
         {
@@ -396,7 +595,7 @@ void main()
             // (Told with a little to spare, so that a rounding error cannot make it a different answer from the full sum.)
             float lumpMost = lumpBig + 0.2475 * (smallSeen.x + smallSeen.y + smallSeen.z);
             float eatenLeast = _VolParams.z * clamp(1.25 - 1.6 * lumpMost, 0.0, 1.0);
-            if (_VolGrid.w < 0.5 && fill - eatenLeast * edge - cut < -1e-5 && (flame <= 0.0 || lumpMost < 0.1799))
+            if (_VolGrid.w < 0.5 && fill - eatenLeast * edge - cut < -1e-5 && (flame <= 0.0 || (lumpMost < 0.1799 && _VolJetLook.w <= 0.0 && _VolFire.w < 0.5)))
             {
                 // (what follows is all that such a step does: see where the flame is worked out, below)
                 left -= 1.0;
@@ -417,8 +616,47 @@ void main()
             if (_VolGrid.w > 0.5 && (_VolGrid.w < 1.5 || _VolGrid.w > 2.5)) sigma = smoke * _VolParams.x;      // (testing: the smoke as it is on the grid, not cut into)
             float thin = exp(-sigma * _VolPeak.w);
 
-            // Flame: licked into tongues by the same pattern, flickering, and coloured by how hot it is.
-            float burning = flame * _VolParams.w * mix(clamp(2.5 * lump - 0.45, 0.0, 1.8), 0.7, _VolPeak.y);
+            // Flame: licked into tongues, flickering, and coloured by how hot it is.
+            float burning, fireN = -1.0;
+            if (_VolFire.w > 0.5 && _VolJetLook.w <= 0.0 && flame > 0.0)
+            {
+                // A fire in the open (see firePattern): where the flame is thick it burns whole; where it thins (its edge, the tops
+                // of its tongues) the pattern cuts it into tongues with sharp edges (the steep step from nothing to flame is what
+                // makes a fire read as one: a soft ramp is a glow), brighter in the lumps of the pattern; and its cooler, thinner
+                // parts are dark with the soot it makes, pockets in the flame and smoke rolling off its tips.
+                fireN = firePattern(was, level);
+                // (and as it cools on its way up, it thins: so low down, where it is hot, it burns whole and steady, higher up it
+                // breaks into tongues, and above them it is gone: a pool fire's continuous flame, its tongues, and its plume)
+                float hotHere = textureLod(_Volume, at, 0.0).a;
+                // (Most of a fire's flame burns whole: only where it is thin is it torn. Cut more keenly, as first tried, a young
+                // fireball, which should be luminous all through, was smoke with a few bright patches in it.)
+                float body = (1.0 - exp(-flame * _VolParams.w * 2.0)) * smoothstep(0.05, 0.35, hotHere);
+                float tongue = smoothstep(0.30, 0.40, body * 1.2 + (fireN - 0.5) * 1.2 * _VolFire.z + (lump - 0.45) * 0.4);
+                burning = flame * _VolParams.w * tongue * (0.7 + 0.9 * fireN);
+                // (soot only where it has cooled: a fuel fireball is luminous all through for its first second)
+                sigma += flame * _VolParams.w * _VolFire.z * 0.45 * smoothstep(0.5, 0.25, fireN) * (1.0 - tongue) * smoothstep(0.75, 0.35, hotHere);
+            }
+            else burning = flame * _VolParams.w * mix(clamp(2.5 * lump - 0.45, 0.0, 1.8), 0.7, _VolPeak.y);
+            // An engine's flame (see jetPattern): where it is thin, at its edge and its far end, the pattern tears it into
+            // tongues with sharp edges, and where it is thick it burns whole; brighter and dimmer along the pattern's
+            // streaks; in thick air with shock diamonds in its core, a few nozzles' widths long; and a sooty fuel's
+            // flame darkened by its own soot in the cooler streaks of its outer part.
+            float jetN = -1.0, diamonds = 0.0;
+            if (_VolJetLook.w > 0.0 && flame > 0.0)
+            {
+                float along, aside;
+                jetN = jetPattern(here, level, along, aside);
+                float f = 1.0 - exp(-flame * _VolParams.w * _VolJetBody.x);
+                float shape = smoothstep(0.32, 0.52, f * 1.25 + (jetN - 0.45) * 2.6 * _VolJetLook.x);
+                float spacing = 2.6 * _VolJetFrom.w;
+                float diamond = pow(max(cos(6.2831853 * along / spacing), 0.0), 10.0) * exp(-along / (2.5 * spacing)) * step(0.3 * spacing, along) * step(along, (_VolJetBody.y + 0.3) * spacing)
+                              * exp(-aside * aside / (0.5 * _VolJetFrom.w * _VolJetFrom.w));
+                diamonds = _VolJetLook.z * diamond;
+                // (a diamond is a thin disc of gas made hotter by the shock in it: it glows of itself, however faint the flame
+                // round it is, as in a hydrogen engine's clear flame, and in the hot colours)
+                burning = flame * _VolParams.w * (shape * (0.45 + 1.2 * jetN) + 2.2 * diamonds);
+                sigma += flame * _VolParams.w * _VolJetLook.y * smoothstep(0.5, 0.25, jetN) * (1.0 - f) * 0.6;
+            }
             // (Flame is a glow, and can be stepped through twice as fast as smoke. A step where the billows have cut
             // everything away counts in full, though there was nothing to light: there are only so many steps to a
             // ray, and counted for less, as they once were, a ray that began in the thin skirts of a cloud spent them
@@ -431,8 +669,12 @@ void main()
                 continue;
             }
             vec4 air = textureLod(_Volume, at, 0.0);
-            float heat = air.a * 1.2 * (0.72 + 0.56 * mix(lump, 0.5, _VolPeak.y));
+            float heat = jetN >= 0.0 ? air.a * 1.2 * (0.38 + 1.25 * jetN) + 0.9 * diamonds : fireN >= 0.0 ? air.a * 1.2 * (0.5 + 0.85 * fireN) : air.a * 1.2 * (0.72 + 0.56 * mix(lump, 0.5, _VolPeak.y));
             vec3 hot = heat < 0.25 ? _VolHot1.rgb * (heat * 4.0) : heat < 0.5 ? mix(_VolHot1.rgb, _VolHot2.rgb, heat * 4.0 - 1.0) : heat < 0.75 ? mix(_VolHot2.rgb, _VolHot3.rgb, heat * 4.0 - 2.0) : mix(_VolHot3.rgb, _VolHot4.rgb, min(heat * 4.0 - 3.0, 1.0));
+            // (A fire's light goes with its heat far more steeply than its colour does (a black body's light in what the eye sees
+            // grows many times over between a dull red and a yellow heat): its hottest parts, low in it and in the lumps of the
+            // pattern, blaze yellow-white, its edges a dim deep red. Spread evenly, as before, it was a warm haze.)
+            if (fireN >= 0.0) { float h = min(heat, 1.1); hot *= 0.55 + 2.2 * h * h * h; }
 
             // Smoke: its own colour, in the light that reaches it. Thinned out, dark smoke looks paler. And each puff
             // has a lit side and a shaded one: where the smoke gets thicker towards the sun, this place is darker.
@@ -453,16 +695,24 @@ void main()
             // Beside a fire the eye is taken up by the fire: the daylight on the smoke there counts for little, and it shows by the firelight.
             float dazzle = 1.0 - 0.85 * min(firelight * 1.6, 1.0);
             vec3 light = (_VolSun.rgb * (sun * shine * relief) + _VolAmb.rgb * (0.3 + 0.7 * sky)) * dazzle + _VolGlow.rgb * (firelight * 4.0);
+            // (and the lamps of the scene: at night a launch's smoke in the floodlights is not left black where its own fire does not reach)
+            if (_VolSceneA.w > 0.0) light += clamp(sceneLamp(here, _VolSceneA, _VolSceneTintA, _VolSceneDirA) + sceneLamp(here, _VolSceneB, _VolSceneTintB, _VolSceneDirB)
+                                                 + sceneLamp(here, _VolSceneC, _VolSceneTintC, _VolSceneDirC) + sceneLamp(here, _VolSceneD, _VolSceneTintD, _VolSceneDirD), 0.0, 8.0) * dazzle;
             vec3 lit = sqrt(own * light);
             if (_VolGrid.w > 0.5 && _VolGrid.w < 2.5) { lit = vec3(0.45); burning = 0.0; }                      // (testing: no light and no flame)
-            if (_VolGrid.w > 14.5) burning = 0.0;                      // (testing: 15 everything but the flame,
+            if (_VolGrid.w > 16.5) { lit = mix(lit, vec3(1.0, 0.12, 0.08), min(wakeShown.x * 1.5, 1.0)) + vec3(0.0, min(wakeShown.y * 0.3, 0.8), 0.0); burning = 0.0; }      // (testing: 17 where the wakes are)
+            else if (_VolGrid.w > 14.5) burning = 0.0;                 // (testing: 15 everything but the flame,
             else if (_VolGrid.w > 13.5) lit = vec3(0.0);                // 14 the flame alone, on black smoke)
             else if (_VolGrid.w > 9.5) { burning = 0.0; lit = _VolGrid.w < 10.5 ? vec3(sun * shine * relief) : _VolGrid.w < 11.5 ? vec3(sky) : _VolGrid.w < 12.5 ? own * 3.0 : vec3(firelight); }      // (testing: 10 the sun's light alone, 11 the sky's, 12 the smoke's own colour, 13 the firelight)
             else if (_VolGrid.w > 4.5) { burning = 0.0; lit = _VolGrid.w < 5.5 ? vec3(lump) : _VolGrid.w < 6.5 ? fract((was + testFrom) * _VolDetail.w) : _VolGrid.w < 7.5 ? abs(testFrom) / 30.0 : _VolGrid.w < 8.5 ? abs(gone) * 2.0 : vec3(going.a, 1.0 - going.a, 0.0); }      // (testing: 5 the billows, 6 where in their pattern, 7 how far from where it "was", 8 how far carried on, 9 how squeezed the pattern is: green not at all, red sixteen times)
 
             float both = sigma + burning;
-            float a = 1.0 - exp(-both * min(stride * finest, t1 - t));        // the last step stops at whatever solid thing is behind
+            float stepLength = min(stride * finest, t1 - t);
+            float a = 1.0 - exp(-both * stepLength);        // the last step stops at whatever solid thing is behind
             colour += through * a * (lit * sigma + hot * (burning * 1.8)) / max(both, 1e-5);
+            float hidHere = through * a, tHere = t + 0.5 * stepLength;
+            deep += hidHere * tHere;
+            deep2 += hidHere * tHere * tHere;
             through *= 1.0 - a;
         }
         else if (fine)
@@ -488,5 +738,7 @@ void main()
     // it was enough for a bright sky, or the line of the horizon, to show faintly through the thickest smoke.)
     float hides = 1.0 - through, all = min(hides / 0.98, 1.0);
     SV_Target0 = vec4(colour * (all / max(hides, 1e-6)), all);
+    float meanDepth = deep / max(hides, 1e-6), spread = sqrt(max(deep2 / max(hides, 1e-6) - meanDepth * meanDepth, 0.0));
+    SV_Target1 = vec4(all * meanDepth * _VolCamera.w, all * spread * _VolCamera.w, 0.0, all);
 }
 #endif

@@ -6,7 +6,7 @@ using UnityEngine;
 /// <summary>
 /// Builds this project's shaders into asset bundles for each kind of computer the game runs on: the four of
 /// Volumetric Explosions into one ("shaders"), Keystone's lens into another ("lens"), Natural Light's two into
-/// a third ("light"). Run from the command
+/// a third ("light"), Natural Weather's three clouds' shaders into a fourth ("clouds"). Run from the command
 /// line (see tools/unityshaders/README.md), or from the menu in the editor. The game is Unity 2019.4.18f1 and
 /// loads only bundles made by that version.
 /// </summary>
@@ -20,10 +20,12 @@ public static class BuildShaderBundles
             new AssetBundleBuild
             {
                 assetBundleName = "shaders",
-                assetNames = new[] { "Assets/VolumetricExplosions/Volume.shader", "Assets/VolumetricExplosions/Enlarge.shader", "Assets/VolumetricExplosions/Mark.shader", "Assets/VolumetricExplosions/Shock.shader" },
+                assetNames = new[] { "Assets/VolumetricExplosions/Volume.shader", "Assets/VolumetricExplosions/Enlarge.shader", "Assets/VolumetricExplosions/Layers.shader", "Assets/VolumetricExplosions/Mark.shader",
+                                     "Assets/VolumetricExplosions/Shock.shader", "Assets/VolumetricExplosions/Shadow.shader" },
             },
             new AssetBundleBuild { assetBundleName = "lens", assetNames = new[] { "Assets/Keystone/Lens.shader" } },
-            new AssetBundleBuild { assetBundleName = "light", assetNames = new[] { "Assets/NaturalLight/Shafts.shader", "Assets/NaturalLight/Clean.shader" } },
+            new AssetBundleBuild { assetBundleName = "light", assetNames = new[] { "Assets/NaturalLight/Shafts.shader", "Assets/NaturalLight/Clean.shader", "Assets/NaturalLight/Veil.shader" } },
+            new AssetBundleBuild { assetBundleName = "clouds", assetNames = new[] { "Assets/NaturalWeather/Clouds.shader", "Assets/NaturalWeather/CloudsOver.shader", "Assets/NaturalWeather/CloudShade.shader" } },
         };
         // (a repository of one mod has that mod's shaders and not the others': a bundle none of whose shaders are here is passed over)
         var here = new List<AssetBundleBuild>();

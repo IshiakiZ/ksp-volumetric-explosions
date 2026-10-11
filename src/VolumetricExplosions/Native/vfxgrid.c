@@ -253,7 +253,9 @@ static void deposit(Work *w, const Grid *g)
         rx = rx > fx * fx ? root_(rx) : fx;
         ry = ry > fy * fy ? root_(ry) : fy;
         rz = rz > fz * fz ? root_(rz) : fz;
-        if (resting && py - ry < ground) py = ground + ry;
+        /* (its foot on the ground even where the grid cannot make it as flat as it should be, a flame standing on what burns: see the C#) */
+        if (resting && flame > 1e-4f) py = ground + 0.35f * ry;
+        else if (resting && py - ry < ground) py = ground + (tall > 0.5f * ry ? tall : 0.5f * ry);
         int side = G >> level;
         float ix = 1.0f / lx, iy = 1.0f / ly, iz = 1.0f / lz;
         int i0 = to_int((px - rx - x0) * ix), i1 = to_int((px + rx - x0) * ix), j0 = to_int((py - ry - y0) * iy), j1 = to_int((py + ry - y0) * iy), k0 = to_int((pz - rz - z0) * iz), k1 = to_int((pz + rz - z0) * iz);

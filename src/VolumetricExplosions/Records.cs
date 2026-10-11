@@ -31,7 +31,7 @@ namespace VolumetricExplosions
     /// explosion should look like (what was in the tank, whether it hit the ground or burned up) is noted
     /// here from the game's events, in the same frame, and matched to the effect by place.
     /// </summary>
-    public static class Records
+    public static partial class Records
     {
         struct Why { public Cause cause; public float value; public int frame; }
 

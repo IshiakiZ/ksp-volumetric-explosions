@@ -31,10 +31,24 @@ Shader "VolumetricExplosions/Shock"
             #define SampleFlat(S, uv) S.SampleLevel(sampler##S, uv, 0.0)
             #define Mod(x, y) ((x) - (y) * floor((x) / (y)))
             #define GreaterThan(a, b) ((a) > (b))
+            #define GreaterThanEqual(a, b) ((a) >= (b))
+            #define LessThan(a, b) ((a) < (b))
+            #define LessThanEqual(a, b) ((a) <= (b))
             float4 TexelFetch(Texture2D t, int2 p, int lod) { return t.Load(int3(p, lod)); }
             float4 TexelFetch(Texture3D t, int3 p, int lod) { return t.Load(int4(p, lod)); }
             int2 TextureSize(Texture2D t, int lod) { uint w, h; t.GetDimensions(w, h); return int2(w, h); }
             bool AllZero(float4 v) { return !any(v); }
+            // gl_FragCoord: which pixel is being drawn, its rows counted from the bottom, as every picture's are read here. Direct3D counts
+            // the rows of what it draws into from the top, and the game draws into its pictures upside down to make up for it (saying so with
+            // _ProjectionParams.x at -1): so where it is drawing straight to the screen, the row is turned over, or each picture read by pixel
+            // (the camera's depth, the smoke drawn small) would be read upside down.
+            float4 FragCoord(float4 pos)
+            {
+            #if UNITY_UV_STARTS_AT_TOP
+                if (_ProjectionParams.x > 0.0) pos.y = _ScreenParams.y - pos.y;
+            #endif
+                return pos;
+            }
 
             float4 _ShockSheet;     // xy: 1 (the sheet as large as the screen), z: its depth, w: 1
             float4 _ShockEye;     // xyz: where the camera is
@@ -58,15 +72,6 @@ Shader "VolumetricExplosions/Shock"
             Texture2D _VolScene; SamplerState sampler_VolScene;     // the picture so far
             Texture2D _CameraDepthTexture; SamplerState sampler_CameraDepthTexture;
             static float shade;
-
-            float4 DepthFetch(int2 p, int lod)
-            {
-            #if UNITY_UV_STARTS_AT_TOP
-                if (_ProjectionParams.x > 0.0) { uint w, h; _CameraDepthTexture.GetDimensions(w, h); p.y = (int)h - 1 - p.y; }
-            #endif
-                return _CameraDepthTexture.Load(int3(p, lod));
-            }
-
 
             struct v2f
             {

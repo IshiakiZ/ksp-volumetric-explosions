@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Pack one of this project's shaders into a Unity asset bundle, without the Unity editor.
 
-    python3 tools/shaderpack/make_bundle.py <KSP folder> <output file> [volume|enlarge|mark|shock|lens|shafts|clean]
+    python3 tools/shaderpack/make_bundle.py <KSP folder> <output file> [volume|layers|enlarge|shadow|mark|shock|lens|shafts|clean|veil|clouds|cloudsover|cloudshade]
 
-Volumetric Explosions': "volume" (the default) is the smoke, "enlarge" what puts the smoke on the screen
-when it has been drawn at half size, "mark" the burn mark thrown onto the ground, "shock" the shock front
+Volumetric Explosions': "volume" (the default) is the smoke, "layers" what puts every patch's smoke on the screen in depth order
+(since 0.5.0; "enlarge" did it a patch at a time before, and is kept for older copies of the mod), "shadow" the shadow it throws
+on what is under it, "mark" the burn mark thrown onto the ground, "shock" the shock front
 that bends the picture behind it. Keystone's: "lens", what a lens, a shutter and a film do to a picture.
-Natural Light's: "shafts", shafts of sunlight; "clean", which blacks out the pixels that are not numbers.
+Natural Light's: "shafts", shafts of sunlight; "clean", which blacks out the pixels that are not numbers; "veil", the weather
+(rain, snow, fog, dust) in the air between the camera and the distance.
 
 A KSP mod's own shader normally has to be compiled in the Unity editor. On OpenGL (the Mac and Linux
 versions of the game) a compiled shader is only its GLSL text plus a list of what it reads, so this
@@ -16,6 +18,7 @@ which this cannot make: there the mod falls back to drawing its particles as sof
 """
 import copy
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -37,8 +40,15 @@ SHADERS = {
         "fragment": [("_WorldSpaceCameraPos", 3, False), ("_ProjectionParams", 4, False), ("_ZBufferParams", 4, False), ("_VolParams", 4, False), ("_VolStep", 4, False), ("_VolGrid", 4, False),
                      ("_VolSize", 4, False), ("_VolOffset", 4, False), ("_VolDetail", 4, False), ("_VolFlow", 4, False), ("_VolCamera", 4, False), ("_VolPeak", 4, False), ("_VolThin", 4, False), ("_VolSun", 4, False),
                      ("_VolSunDir", 4, False), ("_VolSunLocal", 4, False), ("_VolAmb", 4, False), ("_VolGlow", 4, False), ("_VolLampA", 4, False), ("_VolLampB", 4, False), ("_VolLampC", 4, False), ("_VolLamps", 4, False),
+                     ("_VolSceneA", 4, False), ("_VolSceneB", 4, False), ("_VolSceneC", 4, False), ("_VolSceneD", 4, False),
+                     ("_VolSceneTintA", 4, False), ("_VolSceneTintB", 4, False), ("_VolSceneTintC", 4, False), ("_VolSceneTintD", 4, False),
+                     ("_VolSceneDirA", 4, False), ("_VolSceneDirB", 4, False), ("_VolSceneDirC", 4, False), ("_VolSceneDirD", 4, False),
+                     ("_VolJet", 4, False), ("_VolJetFrom", 4, False), ("_VolJetLook", 4, False), ("_VolJetBody", 4, False), ("_VolFire", 4, False),
                      ("_VolTint", 4, False), ("_VolHot1", 4, False), ("_VolHot2", 4, False), ("_VolHot3", 4, False), ("_VolHot4", 4, False),
-                     ("_VolCutA", 4, False), ("_VolCutB", 4, False), ("_VolCutC", 4, False), ("_VolCutD", 4, False), ("_VolCutE", 4, False), ("_VolCutF", 4, False), ("unity_WorldToObject", 4, True), ("unity_MatrixV", 4, True)],
+                     ("_VolCutA", 4, False), ("_VolCutB", 4, False), ("_VolCutC", 4, False), ("_VolCutD", 4, False), ("_VolCutE", 4, False), ("_VolCutF", 4, False), ("_VolSlot", 4, False),
+                     ("_VolWakes", 4, False), ("_VolWakeLo", 4, False), ("_VolWakeHi", 4, False)]
+                    + [("_VolWake%s%d" % (part, n), 4, False) for n in range(8) for part in "ABC"]
+                    + [("unity_WorldToObject", 4, True), ("unity_MatrixV", 4, True)],
         "textures": [("_Volume", 3), ("_Amount", 3), ("_Detail", 3), ("_Around", 3), ("_Flow", 3), ("_RestA", 3), ("_RestB", 3), ("_RestC", 3), ("_RestD", 3), ("_RestE", 3), ("_Turns", 3), ("_Clear", 3), ("_CameraDepthTexture", 2)],
     },
     "mark": {
@@ -55,6 +65,14 @@ SHADERS = {
         "textures": [("_VolHalf", 2), ("_CameraDepthTexture", 2)],
         "vertex": VERTEX + [("_VolDrawn", 4, False)],
     },
+    "layers": {
+        "name": "VolumetricExplosions/Layers", "path": "assets/volumetricexplosions/layers.shader", "id": 7307199000000000010, "program": 1987650010,
+        "bundle": "volumetricexplosionslayers", "file": "CAB-766f6c756d65747269636c6179657273", "code": "layers.glsl",
+        "fragment": [("_ZBufferParams", 4, False), ("_VolCamera", 4, False), ("_VolLayers", 4, False), ("_VolSlots", 4, False)],
+        "textures": [("_VolAtlas", 2), ("_VolAtlasDepth", 2), ("_VolFull", 2), ("_VolFullDepth", 2), ("_CameraDepthTexture", 2)],
+        "vertex": [("_VolSheet", 4, False)],
+        "cull": 0.0,                     # a sheet over the part of the screen the smoke is on, whichever way round
+    },
     "shock": {
         "name": "VolumetricExplosions/Shock", "path": "assets/volumetricexplosions/shock.shader", "id": 7307199000000000003, "program": 1987650003,
         "bundle": "volumetricexplosionsshock", "file": "CAB-766f6c756d6574726963730068636b00", "code": "shock.glsl",
@@ -65,6 +83,14 @@ SHADERS = {
         "textures": [("_VolScene", 2), ("_CameraDepthTexture", 2)],
         "vertex": [("_ShockSheet", 4, False)],
         "cull": 0.0, "ztest": 8.0,       # a sheet over the whole screen; the shader works out for itself what stands in front of a front
+    },
+    "shadow": {
+        "name": "VolumetricExplosions/Shadow", "path": "assets/volumetricexplosions/shadow.shader", "id": 7307199000000000009, "program": 1987650009,
+        "bundle": "volumetricexplosionsshadow", "file": "CAB-766f6c756d6574726963736861646f77", "code": "shadow.glsl",
+        "fragment": [("_WorldSpaceCameraPos", 3, False), ("_ProjectionParams", 4, False), ("_ZBufferParams", 4, False), ("_VolCamera", 4, False),
+                     ("_ShadowGridX", 4, False), ("_ShadowGridY", 4, False), ("_ShadowGridZ", 4, False), ("_ShadowSun", 4, False), ("_ShadowSunWorld", 4, False), ("unity_MatrixV", 4, True)],
+        "textures": [("_Volume", 3), ("_CameraDepthTexture", 2)],
+        "blend": (2.0, 0.0),             # what is there is multiplied by what it draws: darkened, and nothing added
     },
     "lens": {
         "name": "Keystone/Lens", "path": "assets/keystone/lens.shader", "id": 7307199000000000005, "program": 1987650005,
@@ -95,6 +121,52 @@ SHADERS = {
         "cull": 0.0, "ztest": 8.0,
         "blend": (1.0, 0.0),             # what it draws takes the place of what was there (and it draws only where it has to)
         "given": 1,                      # (the half-size picture is handed to it as it is made, not kept by the material)
+    },
+    "veil": {
+        "name": "NaturalLight/Veil", "path": "assets/naturallight/veil.shader", "id": 7307199000000000021, "program": 1987650021,
+        "bundle": "nlveil", "file": "CAB-6e6c7665696c00000000000000000000", "code": "veil.glsl",
+        "fragment": [("_ZBufferParams", 4, False), ("_VeilView", 4, False), ("_VeilUp", 4, False), ("_VeilAir", 4, False), ("_VeilColour", 4, False), ("_VeilSun", 4, False), ("_VeilSunColour", 4, False)],
+        "textures": [("_CameraDepthTexture", 2)],
+        "vertex": [("_VeilSheet", 4, False)],
+        "cull": 0.0, "ztest": 8.0,       # a sheet over the whole screen, drawn over what is there by as much weather as there is (premultiplied)
+    },
+    # Natural Weather's clouds: "clouds" makes the noise, walks the clouds into small pictures of its own, takes them together
+    # over frames and works out their shadow (all into its own pictures); "cloudsover" lays them on the camera's picture;
+    # "cloudshade" darkens the scene under them. (Numbers from 101 up, out of the way of the others'.)
+    "clouds": {
+        "name": "NaturalWeather/Clouds", "path": "assets/naturalweather/clouds.shader", "id": 7307199000000000101, "program": 1987650101,
+        "bundle": "weatherclouds", "file": "CAB-77656174686572636c6f756473000000", "code": "clouds.glsl",
+        "fragment": [("_ZBufferParams", 4, False), ("_CloudStage", 4, False), ("_CloudCam", 4, False), ("_CloudHigh", 4, False), ("_CloudRight", 4, False), ("_CloudUp", 4, False),
+                     ("_CloudAhead", 4, False), ("_CloudFixedX", 4, False), ("_CloudFixedY", 4, False), ("_CloudFixedZ", 4, False), ("_CloudNoise", 4, False), ("_CloudDrift", 4, False),
+                     ("_CloudShell", 4, False), ("_CloudLook", 4, False), ("_CloudSun", 4, False), ("_CloudSunTint", 4, False), ("_CloudSky", 4, False), ("_CloudGround", 4, False),
+                     ("_CloudAir", 4, False), ("_CloudHaze", 4, False), ("_CloudFlashA", 4, False), ("_CloudFlashB", 4, False), ("_CloudFlashTint", 4, False),
+                     ("_CloudPrevAt", 4, False), ("_CloudPrevRight", 4, False), ("_CloudPrevUp", 4, False), ("_CloudPrevAhead", 4, False),
+                     ("_CloudShadowAt", 4, False), ("_CloudShadowX", 4, False), ("_CloudShadowY", 4, False), ("_CloudSunFixed", 4, False),
+                     ("_CloudStreets", 4, False), ("_CloudAlong", 4, False)]
+                    + [("_CloudCellA%d" % n, 4, False) for n in range(6)] + [("_CloudCellB%d" % n, 4, False) for n in range(6)],
+        "textures": [("_CloudShape", 3), ("_CloudDetail", 3), ("_CloudMap", 2), ("_CloudMapB", 2), ("_CloudMapC", 2), ("_CloudAirLut", 2), ("_CloudNow", 2), ("_CloudNowD", 2),
+                     ("_CloudHist", 2), ("_CloudHistD", 2), ("_CameraDepthTexture", 2)],
+        "vertex": [("_CloudSheet", 4, False)],
+        "cull": 0.0, "ztest": 8.0,
+        "blend": (1.0, 0.0),             # what it draws takes the place of what was there (its own pictures)
+    },
+    "cloudsover": {
+        "name": "NaturalWeather/CloudsOver", "path": "assets/naturalweather/cloudsover.shader", "id": 7307199000000000102, "program": 1987650102,
+        "bundle": "weathercloudsover", "file": "CAB-77656174686572636c6f7564736f7665", "code": "cloudsover.glsl",
+        "fragment": [("_ZBufferParams", 4, False), ("_CloudRight", 4, False), ("_CloudUp", 4, False), ("_CloudAhead", 4, False), ("_CloudOver", 4, False)],
+        "textures": [("_CloudHist", 2), ("_CloudHistD", 2), ("_CameraDepthTexture", 2)],
+        "vertex": [("_CloudSheet", 4, False)],
+        "cull": 0.0, "ztest": 8.0,       # (laid over what is there by how much the cloud hides: colour already multiplied by that)
+    },
+    "cloudshade": {
+        "name": "NaturalWeather/CloudShade", "path": "assets/naturalweather/cloudshade.shader", "id": 7307199000000000103, "program": 1987650103,
+        "bundle": "weathercloudshade", "file": "CAB-77656174686572636c6f756473686164", "code": "cloudshade.glsl",
+        "fragment": [("_ZBufferParams", 4, False), ("_CloudRight", 4, False), ("_CloudUp", 4, False), ("_CloudAhead", 4, False), ("_CloudCam", 4, False), ("_CloudSun", 4, False),
+                     ("_CloudShadeAt", 4, False), ("_CloudShadeX", 4, False), ("_CloudShadeY", 4, False), ("_CloudShade", 4, False), ("_CloudShadeSun", 4, False)],
+        "textures": [("_CloudShadowMap", 2), ("_CameraDepthTexture", 2)],
+        "vertex": [("_CloudSheet", 4, False)],
+        "cull": 0.0, "ztest": 8.0,
+        "blend": (2.0, 3.0),             # what is there is multiplied by twice what it draws: darkened or lightened, nothing added
     },
 }
 
@@ -131,13 +203,45 @@ def layout(params):
     return out, at
 
 
+def fixed_locations(code, textures):
+    """The GLSL with each texture's uniform given a location of its own (its place in the list of textures), where the driver
+    takes that: GL_ARB_explicit_uniform_location, which NVIDIA's and AMD's drivers have (on Windows and Linux) and the Mac's
+    OpenGL 4.1 has not (there the text reads as it was).
+
+    Left to itself NVIDIA's driver numbers a program's uniforms in the order of their names, and Unity cannot give a texture
+    unit to a texture whose uniform comes 32nd or later: it says "OpenGL Error: Invalid texture unit!" at every draw, and the
+    texture is read from unit 0 instead. Found on Windows started with -force-glcore (2026-10-10): the smoke's _Volume (after
+    76 _Vol... values) was right only because it is on unit 0 anyway; the clouds, with five of their maps there, drew nothing
+    at all (a 2D and a 3D texture on one unit)."""
+    text = code.decode("utf-8")
+    at = text.index("#ifdef FRAGMENT")
+    head, body = text[:at], text[at:]
+    lines = body.split("\n")
+    out, placed = [], False
+    for line in lines:
+        m = re.match(r"uniform (sampler\w+) (\w+);(.*)$", line)
+        if m and m.group(2) in textures:
+            where = textures.index(m.group(2))
+            out += ["#ifdef GL_ARB_explicit_uniform_location",
+                    "layout(location = %d) uniform %s %s;%s" % (where, m.group(1), m.group(2), m.group(3)),
+                    "#else", line, "#endif"]
+            continue
+        out.append(line)
+        # (the extension asked for straight after the program's #version line, before anything that is not a directive)
+        if not placed and line.startswith("#version"):
+            out.append("#extension GL_ARB_explicit_uniform_location : enable")
+            placed = True
+    assert placed, "no #version line in the fragment program"
+    return (head + "\n".join(out)).encode("utf-8")
+
+
 def build(ksp, out_path, which):
     spec = SHADERS[which]
     NAME, PATH, SHADER_ID, FRAGMENT, TEXTURES = spec["name"], spec["path"], spec["id"], spec["fragment"], spec["textures"]
     VERTEX = spec.get("vertex", globals()["VERTEX"])
     shader, shader_tree, shader_type = pattern(ksp, "makinghistory_scene", 48, lambda v: v["m_ParsedForm"]["m_Name"] == "UnlitAlpha")
     index, index_tree, index_type = pattern(ksp, "serenity.kspexpansion", 142, lambda v: True)
-    code = open(os.path.join(HERE, spec["code"]), "rb").read()
+    code = fixed_locations(open(os.path.join(HERE, spec["code"]), "rb").read(), [t[0] for t in TEXTURES])
 
     names = ["$Globals"] + [p[0] for p in FRAGMENT + VERTEX] + [t[0] for t in TEXTURES]
     number = {name: n for n, name in enumerate(names)}

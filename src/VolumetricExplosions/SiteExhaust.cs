@@ -23,7 +23,28 @@ namespace VolumetricExplosions
         public float lasts;            // seconds the smoke hangs, in thick still air
         public int tint;               // the flame's colours, as a blast's: 0 fuel, 1 solid propellant, 2 monopropellant, 4 hydrogen
         public float fire;             // how bright its flame is, drawn as burning gas: 0 none of it (the smoke alone), 1 a kerosene engine's at full thrust
-        public Transform rides;        // what the nozzle is on (its ship): the flame is worked out in a patch of air that goes along with this. Without it there is no flame.
+        public Transform rides;        // what the nozzle is on (its ship): the flame is worked out in a patch of air that goes along with this, and so is the smoke while it is young (since 0.5.0). Without it there is no flame, and the smoke is laid straight into the air the ship leaves it in.
+        public int kind;               // (since 0.5.0) what it is, one of ExhaustKind: an engine's jet, something burning with no jet, dust thrown up, a spray. Nought (unset): worked out from the rest (see ExhaustKind)
+    }
+
+    /// <summary>
+    /// What a source of smoke is (Exhaust.kind), which decides how its smoke comes out (since 0.5.0). Left at Unset, as by a mod
+    /// written before there was such a field, it is worked out from the rest: something that says what ship it is on, or has a
+    /// flame, is an engine; something on no ship and with no flame is something burning (running 0.08 or less, its "jet" pointing
+    /// up or level), dust (the same, its jet aimed into the ground), or a spray (running more).
+    /// </summary>
+    public static class ExhaustKind
+    {
+        /// <summary>Not said: worked out as above.</summary>
+        public const int Unset = 0;
+        /// <summary>A rocket engine's jet (or a burning leak, which is one): smoke thrown out down the jet at tens of metres a second, laid ahead of a fast nozzle and cut where it is.</summary>
+        public const int Engine = 1;
+        /// <summary>Something burning with no jet: a piece of wreckage on fire, a wreck burning. Its smoke goes up as a plume: hot and unseen as it leaves, coming into view as it cools, widening as it climbs. "along" is up (or up and back from the way it moves); "nozzle" is how big the fire is.</summary>
+        public const int Burning = 2;
+        /// <summary>Dust thrown up by something scraping along the ground: cold, low, mostly the ground's own colour, rolling out behind it. "going" is how it is moving; lay "rim" at the ground.</summary>
+        public const int Dust = 3;
+        /// <summary>A spray from a split tank or a burst line that is not alight: a mist driven out of the split at a few metres a second that thins away within a second or two and lies low. "along" is the way the split faces.</summary>
+        public const int Spray = 4;
     }
 
     /// <summary>
@@ -40,6 +61,17 @@ namespace VolumetricExplosions
 
         /// <summary>Whether it was taken: not where there is no air to hold smoke, nor when there is no room left.</summary>
         public static bool Burning(in Exhaust exhaust) => Air.Instance != null && Air.Instance.Take(exhaust);
+
+        /// <summary>What a weather mod says the wind is at a place: ten metres above the ground there (world space, metres a second), and how gusty (the typical size of a gust there, metres a second).</summary>
+        public struct Breeze { public Vector3d wind; public float gusts; }
+
+        /// <summary>
+        /// A weather mod's wind (since 0.5.0): asked by each patch of air when it is made and twice a second after, on the
+        /// game's thread, with the patch's place (world space) and the game's time; never for each particle. Null, as
+        /// installed: the air makes up a wind of its own for each place and half hour, as it always has. (The test knob
+        /// TestWind still wins over both.)
+        /// </summary>
+        public static System.Func<Vector3d, double, Breeze> Wind;
 
         internal static void Ask()
         {
@@ -181,11 +213,7 @@ namespace VolumetricExplosions
                 {
                     // (A flame is a finer thing than the smoke it leaves: its billows are a fraction of the nozzle across.)
                     turnDecided = true;
-                    FlameFamily = Family(exhaust.tint);
-                    flameKind = (byte)Mathf.Clamp(exhaust.tint, 0, 7);
-                    scale = Mathf.Clamp(1f + 3f * exhaust.nozzle, 1.2f, 6f);
-                    detailRepeat = Mathf.Clamp(0.5f + 3.5f * exhaust.nozzle, 1.5f, 10f);
-                    fullLength = Mathf.Clamp(0.5f * exhaust.nozzle, 0.3f, 2f);
+                    Flamed(exhaust);
                 }
                 else if (count < 50)
                 {
@@ -195,9 +223,22 @@ namespace VolumetricExplosions
                     fullLength = Mathf.Clamp(0.13f * scale, 0.8f, 4f);
                 }
             }
+            // (A ship's patch begun for its young smoke takes on the look of the first flame it is given: see Air.TakeFlame.)
+            else if (riding && exhaust.fire > 0.01f && !hasFlame) Flamed(exhaust);
+            if (riding && exhaust.fire > 0.01f) hasFlame = true;
             passing[fedCount] = false;
             fed[fedCount++] = exhaust;
             return true;
+        }
+
+        /// <summary>A ship's patch: the colours of its flames, and billows as fine as a flame's.</summary>
+        void Flamed(in Exhaust exhaust)
+        {
+            FlameFamily = Family(exhaust.tint);
+            flameKind = (byte)Mathf.Clamp(exhaust.tint, 0, 7);
+            scale = Mathf.Clamp(1f + 3f * exhaust.nozzle, 1.2f, 6f);
+            detailRepeat = Mathf.Clamp(0.5f + 3.5f * exhaust.nozzle, 1.5f, 10f);
+            fullLength = Mathf.Clamp(0.5f * exhaust.nozzle, 0.3f, 2f);
         }
 
         /// <summary>
@@ -265,7 +306,23 @@ namespace VolumetricExplosions
                     vent.last = rim; vent.begun = true; vent.seen = time; vent.fed = time;
                     fedAt = time;
                     allGoing += going; allAlong += along; flames++;
-                    if (e.fire > 0.01f && e.running > 0.02f) Flame(ref vent, e, rim, along, e.fire, dt, q);
+                    // (something burning on the ship, its owner says, not an engine's jet: a fire on it, see Blaze; its smoke goes
+                    // straight into a patch that stays where it is, see Air.Take)
+                    bool burns = e.kind == ExhaustKind.Burning;
+                    if (e.fire > 0.01f && e.running > 0.02f)
+                    {
+                        if (burns) Blaze(ref vent, e, rim, along, e.fire, dt, q);
+                        else
+                        {
+                            Flame(ref vent, e, rim, along, e.fire, dt, q);
+                            // (the strongest of the ship's flames gives the pattern its place and its size: see TuneJet)
+                            float strength = e.fire * e.nozzle;
+                            if (strength > jetStrongest) { jetStrongest = strength; jetFromL = rim; jetNozzle = e.nozzle; jetSpeed = Mathf.Max(6.25f * Mathf.Max(e.flame, 4f * e.nozzle), 60f); jetKind = e.tint; }
+                        }
+                    }
+                    // (and the smoke that the flame turns into, while it is young, lit by the flame: see SiteYoung)
+                    if (e.amount > 0.001f && e.running > 0.02f && !vacuum && !burns) { YoungSmoke(ref vent, e, rim, along, going, dt, q); VentLamp(ref vent, e, rim, along); }
+                    else if (burns && !vacuum) VentLamp(ref vent, e, rim, along);
                     continue;
                 }
                 float fast = speed / 200f;
@@ -308,28 +365,7 @@ namespace VolumetricExplosions
 #endif
                 if (e.amount <= 0.001f || e.running <= 0.02f) continue;
 
-                // ---- its light on the smoke: a steady fire a third of the way down the flame. (Never under the ground: on a
-                // pad the flame is turned along the pad a metre or two below the nozzle, and what lights the smoke there
-                // is the sheet of fire lying on it. Put where the flame would have reached had nothing stopped it, the
-                // light was in the pad, and the smoke of a launch at night came out of the ground black.)
-                Vector3 fire = rim + along * (0.35f * e.flame);
-                float glows = Mathf.Max(2.5f, e.nozzle * 5f);
-                if (hasGround)
-                {
-                    float floor = GroundAt(fire.x, fire.z) + 1.5f;
-                    if (fire.y < floor) { fire.y = floor; glows *= 1.6f; }
-                }
-                if (vent.lamp < 0 || vent.lamp >= lampCount || !lamps[vent.lamp].quiet || lamps[vent.lamp].owner != e.id)
-                {
-                    vent.lamp = AddLamp(fire.x, fire.y, fire.z, glows, 2.4f * e.running, 0.6f, (byte)e.tint, true, 0f, 0f);
-                    lamps[vent.lamp].quiet = true;
-                    lamps[vent.lamp].owner = e.id;
-                }
-                else
-                {
-                    ref Lamp lamp = ref lamps[vent.lamp];
-                    lamp.x = fire.x; lamp.y = fire.y; lamp.z = fire.z; lamp.r = glows; lamp.age = 0f; lamp.peak = 2.4f * e.running;
-                }
+                VentLamp(ref vent, e, rim, along);
                 if (e.amount >= flameWeight * 0.02f && flameWeight < 400f) { flameKind = (byte)Mathf.Clamp(e.tint, 0, 7); }
 
                 // ---- its smoke
@@ -337,7 +373,32 @@ namespace VolumetricExplosions
                 // near enough to see it, and a trail laid as finely at five hundred metres a second as at fifty would be ten
                 // times the puffs for the same smoke. Nor does it hang as long: it is torn apart by the speed it was left at.)
                 Wants(rim, along, going, speed, wide, e.flame);
-                float standing = (26f + 34f * Mathf.Sqrt(e.amount)) * e.running;
+                // Not every source is an engine. Something burning with no jet to speak of (a piece of wreckage on fire: its owner
+                // says it is hardly "running", and has no flame for us to draw) sends its smoke up as a plume: hot gas rising off
+                // it, narrow where it leaves the fire and widening as it climbs and draws the air in (by about an eighth of the
+                // height it has risen), leaning on the wind, in many small puffs close together. And what such a source aims
+                // into the ground is dust thrown up by a wreck scraping along: cold, low, rolling out behind it. (Until
+                // 2026-10-09 both were thrown out as an engine's smoke is, at twenty metres a second, a puff every half second:
+                // each puff hung over the wreck as a dark ball.)
+                // (what its owner says it is (Exhaust.kind); or, where it says nothing, worked out: an engine says what ship it is on,
+                // however far it is throttled down, so only what says none is taken for such a thing)
+                bool smoulders, scraped, sprays;
+                if (Settings.TestSoot >= 1f || e.kind == ExhaustKind.Engine) smoulders = scraped = sprays = false;
+                else if (e.kind == ExhaustKind.Burning) { smoulders = true; scraped = sprays = false; }
+                else if (e.kind == ExhaustKind.Dust) { smoulders = scraped = true; sprays = false; }
+                else if (e.kind == ExhaustKind.Spray) { sprays = true; smoulders = scraped = false; }
+                else
+                {
+                    smoulders = e.running <= 0.08f && e.fire <= 0.01f && e.rides == null;
+                    scraped = smoulders && along.y < -0.2f;
+                    // And what says no ship and no flame but does run is a tank split open and spraying: a mist, not an engine's smoke
+                    // (see Smoulder). (Thrown as an engine's smoke, in dense puffs at twenty metres a second, it hung behind a sliding
+                    // wreck as a row of white balls.)
+                    sprays = !smoulders && e.fire <= 0.01f && e.rides == null;
+                }
+                if (smoulders) wide = Mathf.Max(0.12f, e.nozzle * (scraped ? 1.6f : 1.1f));
+                if (sprays) wide = Mathf.Max(0.12f, e.nozzle * 1.3f);
+                float standing = smoulders || sprays ? 9f + 25f * Mathf.Sqrt(e.amount) : (26f + 34f * Mathf.Sqrt(e.amount)) * e.running;
                 vent.due += Mathf.Max(stretch / (0.6f * wide), dt * standing) * q * (0.45f + 0.55f * Mathf.Sqrt(e.amount));
                 int puffs = Mathf.Min((int)vent.due, 48);
                 vent.due -= (int)vent.due;
@@ -354,6 +415,13 @@ namespace VolumetricExplosions
                     float turn = Random.Range(0f, Mathf.PI * 2f), out_ = Mathf.Sqrt(Random.value);
                     Vector3 side = across * Mathf.Cos(turn) + over * Mathf.Sin(turn);
                     Vector3 on = Vector3.Lerp(from, ahead, way);
+                    if (smoulders || sprays)
+                    {
+                        if (sprays) Spray(ref o, e, on, along, going, side * out_, wide, stays);
+                        else Smoulder(ref o, e, on, rim, going, speed, side * out_, wide, stays, scraped);
+                        Born(i);
+                        continue;
+                    }
                     Vector3 c = on + along * (e.flame * Random.Range(0.45f, 0.9f)) + side * (out_ * wide * 0.8f);
                     float push_ = thrown * Random.Range(0.45f, 1.1f);
                     Vector3 push = along * push_ + side * (out_ * push_ * 0.22f);
@@ -406,9 +474,126 @@ namespace VolumetricExplosions
             {
                 // (the grid of the flames lies along the jets, as the ship points now: see TurnAlong)
                 ridesGoing = allGoing / flames;
-                if (allAlong.sqrMagnitude > 0.01f) TurnAlong(allAlong.normalized);
+                if (allAlong.sqrMagnitude > 0.01f) { TurnAlong(allAlong.normalized); jetAxisL = allAlong.normalized; }
+                if (jetStrongest > 0f) jetSeen = time;
             }
             Cuts();
+        }
+
+        /// <summary>
+        /// One puff of what something burning with no jet gives off (see Vents): the plume of a piece of wreckage on fire, or the dust
+        /// a wreck throws up scraping along (scraped).
+        /// </summary>
+        void Smoulder(ref P o, in Exhaust e, Vector3 on, Vector3 rim, Vector3 going, float speed, Vector3 aside, float wide, float stays, bool scraped)
+        {
+            Vector3 c = on + aside * (0.6f * wide);
+            float floor = hasGround ? GroundAt(c.x, c.z) : -1e9f;
+            if (scraped)
+            {
+                // Dust: thrown up off the ground behind the wreck, at a part of the speed it is sliding at, and then the air's. Cold:
+                // it does not rise as smoke off a fire does, only billows up a little in the stirred air, and spreads low.
+                c.y = Mathf.Max(c.y, floor + 0.35f * wide);
+                Vector3 back = speed > 1f ? going * (-1f / speed) : Vector3.zero;
+                float thrown = Mathf.Min(14f, 0.2f * speed) * Random.Range(0.5f, 1.1f);
+                Vector3 push = back * thrown + aside * (0.3f * thrown) + Vector3.up * (thrown * Random.Range(0.25f, 0.6f));
+                o.x = c.x; o.y = c.y; o.z = c.z;
+                o.vx = going.x * 0.15f; o.vy = 0f; o.vz = going.z * 0.15f;
+                o.kx = push.x; o.ky = push.y; o.kz = push.z;
+                o.kloss = 2.2f; o.drag = 3f;
+                o.r = wide * Random.Range(0.7f, 1.3f);
+                o.grow = 0.35f + 0.1f * wide;
+                o.turb = 1.8f;
+                o.rise = Random.Range(0.1f, 0.45f);
+                o.mass = Random.Range(0.6f, 1.3f) * 4.5f * e.amount * o.r * o.r;
+                o.life = stays * Random.Range(0.6f, 1.2f);
+                o.fadeIn = 0.15f;
+                Color ground = groundBare ? groundDust : new Color(0.32f, 0.3f, 0.27f);
+                float light = Random.Range(0.85f, 1.15f), tone = e.shade * Random.Range(0.85f, 1.15f);
+                // (mostly the ground's own colour: what is thrown up is the ground)
+                o.ar = Mathf.Lerp(tone, ground.r * light * 1.15f, 0.7f); o.ag = Mathf.Lerp(tone * (1f - 0.05f * e.warm), ground.g * light * 1.15f, 0.7f); o.ab = Mathf.Lerp(tone * (1f - 0.14f * e.warm), ground.b * light * 1.15f, 0.7f);
+            }
+            else
+            {
+                // A plume: it leaves the burning thing as hot gas, unseen at first, its soot coming into view in the first second as
+                // it cools (see Deposit), rising at a couple of metres a second and widening as it climbs; it is left behind in the
+                // air the thing moves through, with a little of its speed.
+                c += Vector3.up * (0.3f * wide);
+                if (c.y < floor + 0.2f) c.y = floor + 0.2f;
+                o.x = c.x; o.y = c.y; o.z = c.z;
+                o.vx = going.x * 0.12f; o.vy = going.y * 0.12f; o.vz = going.z * 0.12f;
+                Vector3 push = Vector3.up * Random.Range(0.8f, 2f) + aside * 0.6f;
+                o.kx = push.x; o.ky = push.y; o.kz = push.z;
+                o.kloss = 2f; o.drag = 3.5f;
+                o.r = wide * Random.Range(0.6f, 1.0f);
+                o.grow = 0.16f + 0.08f * wide;
+                o.turb = Random.Range(0.8f, 1.5f);
+                o.rise = Random.Range(2.2f, 3.4f) * Mathf.Clamp(0.7f + 0.6f * wide, 0.8f, 1.6f);
+                o.heat = Random.Range(0.38f, 0.46f);
+                o.cool = Random.Range(1.3f, 1.8f);
+                o.mass = Random.Range(0.7f, 1.4f) * 2.7f * e.amount * o.r * o.r;
+                o.life = stays * Random.Range(0.6f, 1.3f);
+                o.fadeIn = 0.2f;
+                float tone = e.shade * Random.Range(0.82f, 1.22f);
+                o.ar = tone; o.ag = tone * (1f - 0.05f * e.warm); o.ab = tone * (1f - 0.14f * e.warm);
+            }
+            o.tint = (byte)Mathf.Clamp(e.tint, 0, 7);
+            o.tile = Random.value < 0.4f ? Wispy() : Lumpy();
+        }
+
+        /// <summary>
+        /// One puff of the mist a split tank sprays (see Vents): driven out of the split at a few metres a second, it spreads and thins
+        /// within a second or two as the spray breaks up and evaporates, is left behind in the air the wreck moves through, and lies low:
+        /// it is cold, and as heavy as air or more. Small puffs, many and thin, that run together into a stream.
+        /// </summary>
+        void Spray(ref P o, in Exhaust e, Vector3 on, Vector3 along, Vector3 going, Vector3 aside, float wide, float stays)
+        {
+            Vector3 c = on + along * (0.3f * wide) + aside * (0.5f * wide);
+            if (hasGround) { float floor = GroundAt(c.x, c.z) + 0.3f * wide; if (c.y < floor) c.y = floor; }
+            float thrown = Random.Range(3f, 9f) * (0.5f + 0.5f * e.running);
+            Vector3 push = along * thrown + aside * (0.4f * thrown);
+            o.x = c.x; o.y = c.y; o.z = c.z;
+            o.vx = going.x * 0.1f; o.vy = going.y * 0.1f; o.vz = going.z * 0.1f;
+            o.kx = push.x; o.ky = push.y; o.kz = push.z;
+            o.kloss = 3f; o.drag = 3.5f;
+            o.r = wide * Random.Range(0.6f, 1.0f);
+            o.grow = 0.5f + 0.15f * wide;
+            o.turb = Random.Range(1.2f, 2.2f);
+            o.rise = Random.Range(-0.15f, 0.1f);
+            o.mass = Random.Range(0.6f, 1.2f) * 1.8f * e.amount * o.r * o.r;
+            o.life = stays * Random.Range(0.25f, 0.5f);
+            o.fadeIn = 0.12f;
+            float tone = e.shade * Random.Range(0.85f, 1.1f);
+            o.ar = tone; o.ag = tone * (1f - 0.05f * e.warm); o.ab = tone * (1f - 0.14f * e.warm);
+            o.tint = (byte)Mathf.Clamp(e.tint, 0, 7);
+            o.tile = Wispy();
+        }
+
+        /// <summary>
+        /// An engine's light on its smoke: a steady fire a third of the way down the flame. (Never under the ground: on a
+        /// pad the flame is turned along the pad a metre or two below the nozzle, and what lights the smoke there is the
+        /// sheet of fire lying on it. Put where the flame would have reached had nothing stopped it, the light was in the
+        /// pad, and the smoke of a launch at night came out of the ground black.)
+        /// </summary>
+        void VentLamp(ref Vent vent, in Exhaust e, Vector3 rim, Vector3 along)
+        {
+            Vector3 fire = rim + along * (0.35f * e.flame);
+            float glows = Mathf.Max(2.5f, e.nozzle * 5f);
+            if (hasGround)
+            {
+                float floor = GroundAt(fire.x, fire.z) + 1.5f;
+                if (fire.y < floor) { fire.y = floor; glows *= 1.6f; }
+            }
+            if (vent.lamp < 0 || vent.lamp >= lampCount || !lamps[vent.lamp].quiet || lamps[vent.lamp].owner != e.id)
+            {
+                vent.lamp = AddLamp(fire.x, fire.y, fire.z, glows, 2.4f * e.running, 0.6f, (byte)e.tint, true, 0f, 0f);
+                lamps[vent.lamp].quiet = true;
+                lamps[vent.lamp].owner = e.id;
+            }
+            else
+            {
+                ref Lamp lamp = ref lamps[vent.lamp];
+                lamp.x = fire.x; lamp.y = fire.y; lamp.z = fire.z; lamp.r = glows; lamp.age = 0f; lamp.peak = 2.4f * e.running;
+            }
         }
 
         /// <summary>Whether this patch is on its way out (see Leave): it takes nothing more and no longer counts as one of the patches there is room for.</summary>
@@ -441,6 +626,58 @@ namespace VolumetricExplosions
         /// Where the air is thin there is less to hold the jet together: it opens out into a wide pale bell and is
         /// spent in half the length, and in a vacuum nothing slows it or stirs it at all.
         /// </summary>
+        /// <summary>
+        /// Something burning on a ship, its owner says (Exhaust.kind Burning: a wreck on fire, a tank alight), not an engine's jet:
+        /// flames standing on it where it burns, over a patch as wide as the fire, licking up off it at a few metres a second as
+        /// the hot gas rises (about the speed of a fire's own buoyant gas, the square root of gravity times its width), torn and
+        /// flickering, and swept back by the air when the ship moves (the air goes by in this patch: see the mover). Not a jet
+        /// thrown out at tens of metres a second from a point, which is what such a fire was drawn as until 2026-10-10: a torch
+        /// standing off the wreck. A fire's flames, as the fires on the ground are: see Fires, and firePattern in the shader.
+        /// </summary>
+        void Blaze(ref Vent vent, in Exhaust e, Vector3 rim, Vector3 along, float fire, float dt, float q)
+        {
+            float wide = Mathf.Max(0.25f, e.nozzle);
+            float lick = Mathf.Sqrt(Mathf.Max(gravity, 1f) * 2f * wide);                  // m/s: how fast its gas rises
+            float tall = Mathf.Clamp(e.flame > 0f ? e.flame : 3f * wide, 0.8f * wide, 8f * wide);
+            blazeWide = Mathf.Max(blazeWide, wide); blazeSeen = time;
+            float span = stepDt > 1e-4f ? stepDt : dt;
+            // (enough flame, close enough together, that it burns as one fire and not a few separate flickers: seen the first time,
+            // twenty-odd small bits a second made a fire on a tank's side that was mostly its own smoke)
+            vent.fire += Mathf.Clamp(45f + 75f * wide, 50f, 240f) * span * Mathf.Clamp(q, 0.4f, 1.2f) * Mathf.Clamp(fire, 0.3f, 1f);
+            int bits = Mathf.Min((int)vent.fire, 60);
+            vent.fire -= (int)vent.fire;
+            if (bits <= 0) return;
+            if (fire >= flameWeight) { flameKind = (byte)Mathf.Clamp(e.tint, 0, 7); flameWeight = fire; }
+            Vector3 up = along.sqrMagnitude > 1e-4f ? along.normalized : Vector3.up;
+            Vector3 across = Vector3.Cross(up, Mathf.Abs(up.y) < 0.9f ? Vector3.up : Vector3.right).normalized, over = Vector3.Cross(up, across);
+            for (int k = 0; k < bits; k++)
+            {
+                int i = Add();
+                if (i < 0) break;
+                ref P o = ref p[i];
+                float turn = Random.Range(0f, Mathf.PI * 2f), out_ = Mathf.Sqrt(Random.value);
+                // (on the burning part itself, over the width of the fire: its foot touches what burns)
+                Vector3 c = rim + (across * Mathf.Cos(turn) + over * Mathf.Sin(turn)) * (out_ * wide) + up * (0.15f * wide * Random.value);
+                o.x = c.x; o.y = c.y; o.z = c.z;
+                float push = lick * Random.Range(0.5f, 1.1f);
+                o.kx = up.x * push; o.ky = up.y * push; o.kz = up.z * push;
+                o.kloss = 1.5f; o.drag = 3f;
+                o.r = 0.65f * wide * Random.Range(0.7f, 1.2f);
+                o.turb = 3f + 4f * out_;
+                // (hottest in the middle and low down, cooling as it rises: gone from sight by the height of the flame)
+                o.heat = Random.Range(0.95f, 1.08f) * (1f - 0.2f * out_ * out_);
+                float lasts = tall / Mathf.Max(lick, 0.5f);
+                o.cool = 1.2f / lasts * Random.Range(0.85f, 1.2f);
+                o.life = 1.6f * lasts * Random.Range(0.85f, 1.15f);
+                o.flame = Mathf.Clamp(fire, 0.3f, 1f) * Random.Range(1f, 1.4f);
+                o.rise = lick * Random.Range(0.6f, 1f);
+                o.grow = 0.08f;
+                o.tint = (byte)Mathf.Clamp(e.tint, 0, 7);
+                o.tile = Lumpy();
+                Born(i);
+            }
+        }
+
         void Flame(ref Vent vent, in Exhaust e, Vector3 rim, Vector3 along, float fire, float dt, float q)
         {
             float length = Mathf.Max(e.flame, 4f * e.nozzle);
@@ -485,7 +722,8 @@ namespace VolumetricExplosions
                 o.r = r0 * Random.Range(0.8f, 1.2f);
                 // (its edge, where it meets the air, is torn by it; its middle hardly at all)
                 o.turb = (3f + 9f * out_ * out_) * (1f - thin);
-                o.heat = (1.02f - 0.26f * out_ * out_) * Random.Range(0.92f, 1.08f);
+                // (a white-hot core and a cooler sheath round it, yellow and orange, which is where the tongues are)
+                o.heat = (1.02f - 0.55f * out_ * out_) * Random.Range(0.92f, 1.08f);
                 o.flame = 0.17f * fire * Random.Range(0.8f, 1.2f) * (1f - 0.86f * thin);
                 // (White at the nozzle, yellow down most of its length, and out through orange in the last third: in thick
                 // air. Where there is little or none it hardly cools at all in the time it takes to spread to nothing.)

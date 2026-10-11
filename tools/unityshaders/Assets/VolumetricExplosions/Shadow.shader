@@ -1,17 +1,16 @@
-// VolumetricExplosions/Mark: made from tools/shaderpack/mark.glsl by tools/unityshaders/port.py. Do not edit: edit the GLSL and run that again.
-Shader "VolumetricExplosions/Mark"
+// VolumetricExplosions/Shadow: made from tools/shaderpack/shadow.glsl by tools/unityshaders/port.py. Do not edit: edit the GLSL and run that again.
+Shader "VolumetricExplosions/Shadow"
 {
     Properties
     {
-        _MarkTex ("MarkTex", 2D) = "" {}
-        _MarkEmbers ("MarkEmbers", 2D) = "" {}
+        _Volume ("Volume", 3D) = "" {}
     }
     SubShader
     {
         Tags { "Queue" = "Transparent" "RenderType" = "Transparent" "IgnoreProjector" = "True" }
         Pass
         {
-            Blend One OneMinusSrcAlpha
+            Blend DstColor Zero
             ZWrite Off
             ZTest Always
             Cull Front
@@ -51,12 +50,13 @@ Shader "VolumetricExplosions/Mark"
                 return pos;
             }
 
-            float4 _VolCamera;     // x: 1 if the camera drawing this has a depth picture of the scene, y: the angle one of its pixels covers
-            float4 _MarkTint;     // rgb: the colour the mark's picture is multiplied by, a: how strongly the mark shows
-            float4 _MarkGlow;     // rgb: how brightly the embers glow
-            float4 _MarkSize;     // x: metres to a cell of the mark's picture
-            Texture2D _MarkTex; SamplerState sampler_MarkTex;
-            Texture2D _MarkEmbers; SamplerState sampler_MarkEmbers;
+            float4 _VolCamera;     // x: 1 if the camera drawing this has a depth picture of the scene
+            float4 _ShadowGridX;     // the rows of the turn from the scene's axes into the cloud's grid box (-0.5 to 0.5 each way)
+            float4 _ShadowGridY;
+            float4 _ShadowGridZ;
+            float4 _ShadowSun;     // xyz: towards the sun, in the grid box's own axes (and its sizes); w: how dark a shadow may be (0: none)
+            float4 _ShadowSunWorld;     // xyz: towards the sun, in the scene's axes
+            Texture3D _Volume; SamplerState sampler_Volume;
             Texture2D _CameraDepthTexture; SamplerState sampler_CameraDepthTexture;
 
             struct v2f
@@ -64,7 +64,6 @@ Shader "VolumetricExplosions/Mark"
                 float4 pos : SV_POSITION;
                 float3 vs_TEXCOORD0 : TEXCOORD0;
                 float4 vs_TEXCOORD1 : TEXCOORD1;
-                float3 vs_TEXCOORD2 : TEXCOORD2;
             };
 
             v2f vert(float3 in_POSITION0 : POSITION)
@@ -81,14 +80,15 @@ Shader "VolumetricExplosions/Mark"
                 OUT.pos = clip_;
                 OUT.vs_TEXCOORD0 = world.xyz;
                 OUT.vs_TEXCOORD1 = clip_;
-                OUT.vs_TEXCOORD2 = normalize(hlslcc_mtx4x4unity_ObjectToWorld[1].xyz);
                 return OUT;
             }
 
-            // A burn mark, thrown onto whatever is there. The mark is a flat box laid on the ground where the fire
-            // was. For each pixel of the box the place the game has already drawn there is worked out from its depth
-            // picture, and if that place lies inside the box it takes the mark's colour at the spot straight "above"
-            // it. So the mark follows steps, ramps and roofs exactly, and cannot float over a slope or sink into one.
+            // The shadow a cloud of smoke throws on whatever is under it. The box this is drawn with is the stretch the shadow can
+            // fall in (the cloud's box drawn out away from the sun to the ground). For each pixel of it the place the game has drawn
+            // there is worked out from its depth picture and followed towards the sun into the cloud's grid, where how much smoke
+            // lies between each cell and the sun is kept already (the smoke's own light is worked out from it): what is drawn there
+            // is darkened by as much of the sunlight as that smoke takes away. So a cloud's shadow lies on the ground, the pad, the
+            // buildings and the ships as they are, and goes soft and thin where the smoke does.
 
             float4 frag(v2f IN) : SV_Target
             {
@@ -99,24 +99,32 @@ Shader "VolumetricExplosions/Mark"
                 forward = max(forward, 1e-4);
                 float2 uv = float2(IN.vs_TEXCOORD1.x / IN.vs_TEXCOORD1.w, IN.vs_TEXCOORD1.y / IN.vs_TEXCOORD1.w * _ProjectionParams.x) * 0.5 + 0.5;
                 float depth = 1.0 / (_ZBufferParams.z * SampleFlat(_CameraDepthTexture, uv).x + _ZBufferParams.w);
+                if (_VolCamera.x < 0.5 || depth > _ProjectionParams.z * 0.999) discard;
                 float3 place = eye + rd * (depth / forward);
-                float3 inBox = hlslcc_mtx4x4unity_WorldToObject[0].xyz * place.x + hlslcc_mtx4x4unity_WorldToObject[1].xyz * place.y + hlslcc_mtx4x4unity_WorldToObject[2].xyz * place.z + hlslcc_mtx4x4unity_WorldToObject[3].xyz;
-                // Which way the surface there faces, from how the place changes from one pixel to the next. A face
-                // turned well away from the mark (a wall, the side of a ship standing in it) is left alone: thrown
-                // onto it from above, the mark would be drawn out into streaks.
-                float3 facing = normalize(cross(ddx(place), ddy(place)));
-                float flat_ = smoothstep(0.3, 0.6, abs(dot(facing, IN.vs_TEXCOORD2)));
-                // The picture is read as coarsely as it shows from here (worked out from the distance: the graphics card's own way goes wrong along the outline of whatever stands in front).
-                float level = max(log2(depth * _VolCamera.y / _MarkSize.x), 0.0) + 0.5 * (1.0 - flat_);
-                float4 mark = SampleLod(_MarkTex, inBox.xz + 0.5, level);
-                float4 hot = SampleLod(_MarkEmbers, inBox.xz + 0.5, level);
-                float3 embers = hot.rgb * hot.a;
-                float inside = step(abs(inBox.x), 0.5) * step(abs(inBox.z), 0.5) * (1.0 - smoothstep(0.35, 0.5, abs(inBox.y)));
-                float shown = _VolCamera.x * step(depth, _ProjectionParams.z * 0.999) * inside * flat_;
-                float a = mark.a * _MarkTint.a * shown;
-                float3 glow = embers * _MarkGlow.rgb * shown;
-                if (a + glow.r + glow.g + glow.b <= 0.0005) discard;
-                result = float4(mark.rgb * _MarkTint.rgb * a + glow, a);
+                // Which way the surface there faces (from how the place changes from one pixel to the next, turned to face the
+                // camera): a face turned from the sun is in its own shadow already, and has no sunlight for the smoke to take.
+                float3 facing = cross(ddx(place), ddy(place));
+                float size = length(facing);
+                facing = size > 1e-8 ? facing / size : -rd;
+                if (dot(facing, rd) > 0.0) facing = -facing;
+                float lit_ = clamp(dot(facing, _ShadowSunWorld.xyz) * 4.0, 0.0, 1.0);
+                if (lit_ <= 0.0) discard;
+                // Into the grid's box, on the way to the sun.
+                float3 p = float3(dot(_ShadowGridX.xyz, place) + _ShadowGridX.w, dot(_ShadowGridY.xyz, place) + _ShadowGridY.w, dot(_ShadowGridZ.xyz, place) + _ShadowGridZ.w);
+                float3 d = _ShadowSun.xyz;
+                float3 safe = float3(abs(d.x) < 1e-6 ? 1e-6 : d.x, abs(d.y) < 1e-6 ? 1e-6 : d.y, abs(d.z) < 1e-6 ? 1e-6 : d.z);
+                float3 ta = (((float3)(-0.5)) - p) / safe, tb = (((float3)(0.5)) - p) / safe;
+                float3 lo = min(ta, tb), hi = max(ta, tb);
+                float t0 = max(max(lo.x, lo.y), max(lo.z, 0.0)), t1 = min(min(hi.x, hi.y), hi.z);
+                if (t1 <= t0) discard;
+                float3 e = clamp(p + d * (t0 + 1e-3 * (t1 - t0)), ((float3)(-0.5)), ((float3)(0.5)));
+                float4 air = SampleLod(_Volume, e + 0.5, 0.0);
+                float before = (air.r * 0.99611 + air.g * 0.0038911) * 16.0;
+                // (as the smoke's own light reckons it: a part of the sunlight finds its way round inside a cloud)
+                float through = 0.8 * exp(-before) + 0.2 * exp(-0.25 * before);
+                float dark = _ShadowSun.w * lit_ * (1.0 - through);
+                if (!(dark > 0.004)) discard;
+                result = float4(((float3)(1.0 - min(dark, 0.95))), 1.0);
                 return result;
             }
             ENDCG
