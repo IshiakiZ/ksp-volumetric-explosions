@@ -8,6 +8,8 @@ by the sun, the sky and the fire, and drawn by a shader that walks a ray through
 the way Counter-Strike 2 draws its smoke grenades. There are no pictures of explosions in this mod. It
 needs no other mod and changes nothing but the look.
 
+![A blast on the launch pad, with the mod](src/VolumetricExplosions/img/volumetric-explosions.gif)
+
 ![The game's own explosion and this mod's](src/VolumetricExplosions/img/explosions-compare.jpg)
 
 *Left: the game's own explosion. Right: the same blast with the mod.*
@@ -80,4 +82,4 @@ from 79 frames a second to 56 in its first seconds and 70 to 75 once it was smok
 
 ## Licence
 
-[MIT](LICENSE).
+[CC BY 4.0](LICENSE): use it, change it and pass it on as you like, as long as you credit Ishiaki and link back here.
