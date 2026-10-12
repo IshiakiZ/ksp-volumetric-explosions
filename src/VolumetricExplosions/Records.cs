@@ -155,7 +155,8 @@ namespace VolumetricExplosions
             else if (name == "xenongas") d.gas += kg;
             else if (name == "ore") d.ore += kg;
             else if (name == "ablator" || name == "intakeair") { }
-            // Other mods' resources, by what their names say.
+            // Other mods' resources: as resources.cfg lists them (see Resources.cs), or else by what their names say.
+            else if (Listed(d, name, kg, units)) { }
             else if (name.Contains("hydrogen")) { d.fuel += kg; d.hydrogen = true; }
             else if (name.Contains("oxygen") || name.Contains("oxidi") || name.Contains("nto") || name.Contains("n2o4") || name.Contains("htp") || name.Contains("nitrous")) d.oxidizer += kg;
             else if (name.Contains("solid")) d.solid += kg;
