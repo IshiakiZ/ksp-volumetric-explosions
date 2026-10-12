@@ -27,8 +27,12 @@ build() {
   cp "$SRC"/Textures/*.png "$SRC"/Textures/*.bin "$SRC"/Shaders/*.bundle "$OUT/PluginData/"
   native "$OUT/PluginData"
   others "$OUT/PluginData"
-  # (the settings are in PluginData, which the game does not read: a .cfg anywhere else is one of the game's configs, and changing it costs a slow start)
+  # (the settings are in PluginData, which the game does not read: a .cfg anywhere else is one of the game's configs, and changing it costs a slow start;
+  # so is the list of what other mods' resources count as, which is the mod's own and is put in afresh with each build)
   cp "$SRC/settings.cfg" "$OUT/PluginData/settings.cfg"
+  cp "$SRC/resources.cfg" "$OUT/PluginData/resources.cfg"
+  # (the one config the game does read: a ModuleManager patch that takes only with RealBattery installed, and that nobody changes)
+  cp "$SRC/RealBattery.cfg" "$OUT/RealBattery.cfg"
 }
 
 case "$MODE" in
@@ -46,7 +50,7 @@ case "$MODE" in
     build
     FX="$KSP_DIR/GameData/VolumetricExplosions"
     mkdir -p "$FX/PluginData"
-    cp "$OUT/VolumetricExplosions.dll" "$FX/"
+    cp "$OUT/VolumetricExplosions.dll" "$OUT/RealBattery.cfg" "$FX/"
     # (everything of the mod's is put in afresh but the player's own settings, which are kept: in PluginData, or beside the library where they used to be, from where the mod moves them itself)
     find "$FX/PluginData" -maxdepth 1 -type f ! -name settings.cfg -delete
     for f in "$OUT"/PluginData/*; do
