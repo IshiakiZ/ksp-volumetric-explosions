@@ -73,6 +73,11 @@ namespace VolumetricExplosions
         [MethodImpl(MethodImplOptions.NoInlining)] static IntPtr FindOnWindows(IntPtr library, string name) => WindowsFind(library, name);
         [MethodImpl(MethodImplOptions.NoInlining)] static bool Quarantined(string path) => MacNote(path, "com.apple.quarantine", IntPtr.Zero, UIntPtr.Zero, 0, 0).ToInt64() >= 0;
 
+#if DEV
+        /// <summary>For the development build: whether macOS has a file marked as downloaded from the internet, as the check that keeps such a library from being loaded sees it.</summary>
+        public static string Marked(string path) => !File.Exists(path) ? "no such file" : Application.platform != RuntimePlatform.OSXPlayer ? "not a Mac" : Quarantined(path) ? "marked as downloaded" : "not marked";
+#endif
+
         static bool tried;
         static Begin begin;
         static End end;

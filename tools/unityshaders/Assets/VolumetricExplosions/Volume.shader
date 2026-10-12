@@ -40,6 +40,7 @@ Shader "VolumetricExplosions/Volume"
             #define hlslcc_mtx4x4unity_MatrixV transpose(UNITY_MATRIX_V)
             #define SampleLod(S, uv, lod) S.SampleLevel(sampler##S, uv, lod)
             #define SampleFlat(S, uv) S.SampleLevel(sampler##S, uv, 0.0)
+            #define SampleGradient(S, uv, dx, dy) S.SampleGrad(sampler##S, uv, dx, dy)
             #define Mod(x, y) ((x) - (y) * floor((x) / (y)))
             #define GreaterThan(a, b) ((a) > (b))
             #define GreaterThanEqual(a, b) ((a) >= (b))
@@ -49,6 +50,13 @@ Shader "VolumetricExplosions/Volume"
             float4 TexelFetch(Texture3D t, int3 p, int lod) { return t.Load(int4(p, lod)); }
             int2 TextureSize(Texture2D t, int lod) { uint w, h; t.GetDimensions(w, h); return int2(w, h); }
             bool AllZero(float4 v) { return !any(v); }
+            // (one of a vector's numbers, chosen by a variable, read and given a new value: see chosen in tools/unityshaders/port.py)
+            float Pick(float2 v, int n) { return n <= 0 ? v.x : v.y; }
+            float Pick(float3 v, int n) { return n <= 0 ? v.x : n == 1 ? v.y : v.z; }
+            float Pick(float4 v, int n) { return n <= 0 ? v.x : n == 1 ? v.y : n == 2 ? v.z : v.w; }
+            float2 Put(float2 v, int n, float x) { return float2(n == 0 ? x : v.x, n == 1 ? x : v.y); }
+            float3 Put(float3 v, int n, float x) { return float3(n == 0 ? x : v.x, n == 1 ? x : v.y, n == 2 ? x : v.z); }
+            float4 Put(float4 v, int n, float x) { return float4(n == 0 ? x : v.x, n == 1 ? x : v.y, n == 2 ? x : v.z, n == 3 ? x : v.w); }
             // gl_FragCoord: which pixel is being drawn, its rows counted from the bottom, as every picture's are read here. Direct3D counts
             // the rows of what it draws into from the top, and the game draws into its pictures upside down to make up for it (saying so with
             // _ProjectionParams.x at -1): so where it is drawing straight to the screen, the row is turned over, or each picture read by pixel
@@ -96,6 +104,17 @@ Shader "VolumetricExplosions/Volume"
             float4 _VolJetFrom;     // xyz: the mouth of the strongest nozzle, in the grid's axes; w: its radius, metres
             float4 _VolJetLook;     // x: how far the flame's edge is torn into tongues (0 to 1); y: how sooty it is; z: how strong its shock diamonds are; w: the size of its pattern, metres (nought: not a ship's patch)
             float4 _VolJetBody;     // x: how much flame makes the flame's body whole (a clear, faint flame is whole where there is any of it); y: how many shock diamonds there are
+            float4 _VolJetFlow;     // x: how far down the jet, metres, the pattern is carried half as fast as at the nozzle and is half as drawn out; y: how far the pattern's streaks differ in heat at the nozzle, z: and far down the jet; w: 0 if the flame ends at a sharp edge where it thins, as fire does, 1 if it thins away as a glow
+            float4 _VolJetEnd;     // x: the length of the strongest flame, metres; y: how far its far end is broken up into tongues, whatever is there (0 to 1); z: how much cooler its far end is drawn than the gas there is reckoned (0 to 1); w: how much wider the jet gets for each metre it goes
+            float4 _VolJetGlow;     // x: how much a shock diamond glows of itself, whatever flame is round it: so much a metre in the jet of a nozzle a metre wide, and by so much more as the nozzle is narrower; y: how far the flame's gas is gone from sight once it has cooled (1: a clear flame's, seen by its own light alone; 0: a sooty one's, dark)
+            float4 _VolJetAt0;     // The mouths of up to eight of the ship's nozzles, for the shock diamonds in each one's jet. xyz: where, in the grid's axes; w: how wide, a radius in metres (nought: no such nozzle)
+            float4 _VolJetAt1;
+            float4 _VolJetAt2;
+            float4 _VolJetAt3;
+            float4 _VolJetAt4;
+            float4 _VolJetAt5;
+            float4 _VolJetAt6;
+            float4 _VolJetAt7;
             float4 _VolFire;     // A fire in the open (not an engine's): x how far its flames' pattern has risen through the burning gas, metres; y one over the size of its tongues, per metre; z how far thin flame is torn into tongues (0 to 1); w 1 to draw it so (0: as a glow, as until 2026-10-10)
             float4 _VolTint;     // rgb: the hue of the dust here
             float4 _VolHot1;     // rgb: the colour of flame at a quarter of full heat,
@@ -225,8 +244,8 @@ Shader "VolumetricExplosions/Volume"
             // widely that is spread along it (r and g), each times how much it hides, times _VolCamera.w. With them the patches' smoke is put
             // in order pixel by pixel: see layers.glsl.)
 
-            // The billows at one place. The pattern is lumps upon lumps (cellular noise), read twice: once as it is,
-            // for the small billows, and once much larger and turned another way, for the big. No lump of the one lines up
+            // The billows at one place. The pattern is lumps upon lumps (cellular noise), read twice: once turned one way,
+            // for the small billows, and once much larger and turned another, for the big. No lump of the one lines up
             // with a lump of the other, so although each repeats every few metres, the two together never show the same
             // shape twice. How finely they are read depends on how far away the place is: the smallest lumps drawn are
             // a pixel or two across. (Were it to follow the length of the steps, which changes in jumps, parts of a
@@ -236,20 +255,29 @@ Shader "VolumetricExplosions/Volume"
             // it repeats on. Each adds how much more (or less) than usual the smoke is gathered there, and which way that slopes,
             // times what its set counts for just now (seen: see the walk below, which leaves a set that counts for nothing unread).
             // (The bigger lumps count for twice the smaller: a lump no deeper than a small one would not show as big.)
+            //
+            // Both are read turned, each its own way, and by turns that bring no line of the grid back on to the pattern's own lines
+            // before it has gone many repeats: along each of the grid's three axes the pattern is within a quarter of a repeat of
+            // where it began only after nearly four repeats, and within an eighth only after twelve. (Until 2026-10-10 the small
+            // billows were read straight, and the big turned by a 3-4-5 turn that came back on itself in thirteen. A column of
+            // smoke lying along the grid, which is how every engine's trail lies, showed the same small lump again at every
+            // repeat, a row of balls behind the rocket as far as it could be seen.)
             void bigBillows(float3 q, float level, float seen, inout float lump, inout float3 slope)
             {
-                float3 turned = float3(dot(q, float3(0.80, -0.48, 0.36)), dot(q, float3(0.60, 0.64, -0.48)), dot(q, float3(0.0, 0.60, 0.80))) * 0.37 + float3(0.31, 0.67, 0.13);
+                float3 turned = float3(dot(q, float3(0.578659, -0.748473, -0.323945)), dot(q, float3(0.328128, 0.577295, -0.747705)), dot(q, float3(0.746649, 0.326371, 0.579653))) * 0.37 + float3(0.31, 0.67, 0.13);
                 float4 broad = SampleLod(_Detail, turned, max(level - 1.43, 0.0));
                 lump += 0.9 * seen * (broad.r - 0.45);
                 float3 way = (broad.gba - 0.5) * (2.0 * 10.72 * 0.37 * 1.4 * seen);
-                slope += float3(dot(way, float3(0.80, 0.60, 0.0)), dot(way, float3(-0.48, 0.64, 0.60)), dot(way, float3(0.36, -0.48, 0.80)));
+                slope += float3(dot(way, float3(0.578659, 0.328128, 0.746649)), dot(way, float3(-0.748473, 0.577295, 0.326371)), dot(way, float3(-0.323945, -0.747705, 0.579653)));
             }
 
             void smallBillows(float3 q, float level, float seen, inout float lump, inout float3 slope)
             {
-                float4 fine_ = SampleLod(_Detail, q, max(level, 0.0));
+                float3 turned = float3(dot(q, float3(0.578659, 0.328128, 0.746649)), dot(q, float3(-0.748473, 0.577295, 0.326371)), dot(q, float3(-0.323945, -0.747705, 0.579653)));
+                float4 fine_ = SampleLod(_Detail, turned, max(level, 0.0));
                 lump += 0.45 * seen * (fine_.r - 0.45);
-                slope += (fine_.gba - 0.5) * (2.0 * 10.72 * 0.7 * seen);
+                float3 way = (fine_.gba - 0.5) * (2.0 * 10.72 * 0.7 * seen);
+                slope += float3(dot(way, float3(0.578659, -0.748473, -0.323945)), dot(way, float3(0.328128, 0.577295, -0.747705)), dot(way, float3(0.746649, 0.326371, 0.579653)));
             }
 
             // How much of the smoke at a place is left where an engine is leaving a trail.
@@ -259,10 +287,17 @@ Shader "VolumetricExplosions/Volume"
             // caught it up in jumps. So the mod lays the smoke a little way ahead of the engine, where it is about to be, and
             // says here every frame exactly where the engine now is: ahead of that, along the line it is flying, the smoke is
             // not drawn yet, and for a little way behind it comes on by degrees, as the engine's own smoke does along its flame.
+            //
+            // And the other way about, for the patch of air that goes along with a ship (told by taking away less than nothing):
+            // there the engines' smoke is drawn while it is young, from the flame as far as that place, and gives way from there
+            // back, over the same stretch, to the trail laid in the air the ship is leaving, which comes on as this goes. What is
+            // here, and what is there, are two reckonings of the same smoke: so much of the one and the rest of the other, the
+            // same curve for both, make one trail of them, with no place where it can be told which is which.
             float begun(float3 here, float4 a, float4 b, float4 c)
             {
                 float3 d = here - a.xyz;
                 float back = dot(d, b.xyz);
+                if (c.y < 0.0) return 1.0 + c.y * smoothstep(0.0, b.w, back);
                 float beside = 1.0 - smoothstep(a.w, 2.25 * a.w, dot(d, d) - back * back);
                 float ahead = (1.0 - smoothstep(0.0, b.w, back)) * (1.0 - smoothstep(0.7 * c.x, c.x, -back));
                 return 1.0 - c.y * beside * ahead;
@@ -282,6 +317,16 @@ Shader "VolumetricExplosions/Volume"
                 return tint.rgb * fall;
             }
 
+            // Which of the ship's nozzles a place is nearest the line of: how far from that line (squared), how far down it from the
+            // nozzle's mouth, and how wide that nozzle is. (All of a ship's jets are taken to go the same way.)
+            void nearer(float4 mouth, float3 here, inout float aside2, inout float along, inout float wide)
+            {
+                if (mouth.w <= 0.0) return;
+                float3 rel = here - mouth.xyz;
+                float a = dot(rel, _VolJet.xyz), s2 = dot(rel, rel) - a * a;
+                if (s2 < aside2) { aside2 = s2; along = a; wide = mouth.w; }
+            }
+
             // An engine's flame, as its pattern is seen: in the nozzle's own frame, not the gas's. The gas goes through a flame at a
             // hundred metres a second and more, and a pattern carried with it is smeared to nothing by the game's smoothing from one
             // frame to the next: the flame was a blur of colour. What is seen of a real one holds its place on the nozzle and flows
@@ -297,7 +342,15 @@ Shader "VolumetricExplosions/Volume"
                 aside = length(across);
                 float3 u = normalize(cross(axis, abs(axis.y) < 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0)));
                 float3 v = cross(axis, u);
-                float3 q = float3(dot(across, u), dot(across, v), (along - _VolJet.w) * 0.33) / _VolJetLook.w;
+                // (Fast at the nozzle, where the game's smoothing between frames draws it out into streaks, as the eye and a camera see
+                // gas going that fast; slower and slower down the jet, and less and less drawn out, until at its far end it is the
+                // slow turning lumps of a fire: the gas slows as it goes and what was streaks breaks up into eddies.)
+                float down = max(along, 0.0);
+                float gone = down + down * down / (2.0 * max(_VolJetFlow.x, 1e-3));
+                // (and the jet opens out as it goes: its pattern opens out with it, as the gas's own paths do, so that what are fine
+                // streaks at the nozzle are lumps as wide as the flame at its far end)
+                float wider = 1.0 / (1.0 + _VolJetEnd.w * down / max(_VolJetFrom.w, 1e-3));
+                float3 q = float3(dot(across, u) * wider, dot(across, v) * wider, (gone - _VolJet.w) * _VolJetBody.z) / _VolJetLook.w;
                 float l = max(level - 0.5, 0.0);
                 float n1 = SampleLod(_Detail, q * 0.31 + float3(0.13, 0.57, 0.91), l).r;
                 float n2 = SampleLod(_Detail, q * 0.83 + float3(0.71, 0.29, 0.43), l + 0.6).r;
@@ -513,8 +566,15 @@ Shader "VolumetricExplosions/Volume"
                     }
                     float4 amount = SampleLod(_Amount, at, 0.0);
                     float smoke = amount.r * 0.99611 + amount.g * 0.0038911, flame = amount.b * 0.99611 + amount.a * 0.0038911;
-                    if (_VolCutA.w > 0.0) smoke *= begun(here, _VolCutA, _VolCutB, _VolCutC);
-                    if (_VolCutD.w > 0.0) smoke *= begun(here, _VolCutD, _VolCutE, _VolCutF);
+                    // (How much of the smoke here is to be seen, where an engine's trail begins: see begun. It is what the smoke hides
+                    // that is cut down by it, further on, not how much smoke there is taken to be: thin smoke is cut into by the billows
+                    // far more than thick (see below), and smoke taken to be half as thick, in the midst of as much as there is, was
+                    // not half as much to see but a few scraps of it, or nothing. Where one patch's smoke gave way to another's, each
+                    // by halves, there was a gap between them.)
+                    float shows = 1.0;
+                    if (_VolCutA.w > 0.0) shows *= begun(here, _VolCutA, _VolCutB, _VolCutC);
+                    if (_VolCutD.w > 0.0) shows *= begun(here, _VolCutD, _VolCutE, _VolCutF);
+                    if (shows <= 0.0) smoke = 0.0;
                     if (_VolWakes.x > 0.5 && smoke > 0.0 && all(GreaterThan(here, _VolWakeLo.xyz)) && all(LessThan(here, _VolWakeHi.xyz)))
                     {
                         // (where something has gone through: see carve)
@@ -679,8 +739,8 @@ Shader "VolumetricExplosions/Volume"
                         float kept = max(fill - eaten * edge - cut, 0.0) / (1.0 - 0.6 * eaten);
                         // (Just inside where it is cut away the smoke comes on gently: thick smoke that began at once at its full thickness had an edge like card.)
                         float whole = fill > 1e-4 ? min(kept / fill, 1.6) : 0.0;
-                        float sigma = smoke * _VolParams.x * whole * min(1.25 * whole, 1.0);
-                        if (_VolGrid.w > 0.5 && (_VolGrid.w < 1.5 || _VolGrid.w > 2.5)) sigma = smoke * _VolParams.x;      // (testing: the smoke as it is on the grid, not cut into)
+                        float sigma = smoke * _VolParams.x * whole * min(1.25 * whole, 1.0) * shows;
+                        if (_VolGrid.w > 0.5 && (_VolGrid.w < 1.5 || _VolGrid.w > 2.5)) sigma = smoke * _VolParams.x * shows;      // (testing: the smoke as it is on the grid, not cut into)
                         float thin = exp(-sigma * _VolPeak.w);
 
                         // Flame: licked into tongues, flickering, and coloured by how hot it is.
@@ -708,21 +768,49 @@ Shader "VolumetricExplosions/Volume"
                         // tongues with sharp edges, and where it is thick it burns whole; brighter and dimmer along the pattern's
                         // streaks; in thick air with shock diamonds in its core, a few nozzles' widths long; and a sooty fuel's
                         // flame darkened by its own soot in the cooler streaks of its outer part.
-                        float jetN = -1.0, diamonds = 0.0;
+                        float jetN = -1.0, diamonds = 0.0, jetFar = 0.0, jetCooled = 1.0;
                         if (_VolJetLook.w > 0.0 && flame > 0.0)
                         {
                             float along, aside;
                             jetN = jetPattern(here, level, along, aside);
                             float f = 1.0 - exp(-flame * _VolParams.w * _VolJetBody.x);
-                            float shape = smoothstep(0.32, 0.52, f * 1.25 + (jetN - 0.45) * 2.6 * _VolJetLook.x);
-                            float spacing = 2.6 * _VolJetFrom.w;
-                            float diamond = pow(max(cos(6.2831853 * along / spacing), 0.0), 10.0) * exp(-along / (2.5 * spacing)) * step(0.3 * spacing, along) * step(along, (_VolJetBody.y + 0.3) * spacing)
-                                          * exp(-aside * aside / (0.5 * _VolJetFrom.w * _VolJetFrom.w));
+                            // (Towards its far end the gas has taken in air all the way through, and burns in pockets: the flame ends in
+                            // tongues with gaps between them, not in a rounded tip.)
+                            float ending = smoothstep(0.5, 1.1, along / max(_VolJetEnd.x, 1e-3));
+                            f *= 1.0 - _VolJetEnd.y * ending;
+                            // (and cools out through orange there)
+                            jetCooled = 1.0 - _VolJetEnd.z * ending;
+                            // (the air has had no time to tear it where it leaves the nozzle: its edge is straight there, and more and more torn the further it has gone)
+                            jetFar = clamp(along / max(_VolJetBody.w, 1e-3), 0.0, 1.0);
+                            float torn = _VolJetLook.x * max(jetFar, 0.12);
+                            float shape = smoothstep(0.32, 0.52, f * 1.25 + (jetN - 0.45) * 2.6 * torn);
+                            // (a clear flame, hydrogen's, has no such edge: it is a glow that thins away to nothing)
+                            shape = lerp(shape, 1.0, _VolJetFlow.w * _VolJetFlow.w);
+                            // (A shock diamond: the gas is stopped short and heated where the shock stands across the jet, a bright disc
+                            // three quarters of a spacing out and then at every spacing; behind each the hot gas narrows to a point as
+                            // it speeds up and cools again, before the next. Each fainter than the last. In the jet of every nozzle,
+                            // each by its own width.)
+                            float dAside2 = 1e9, dAlong = along, dWide = _VolJetFrom.w;
+                            nearer(_VolJetAt0, here, dAside2, dAlong, dWide); nearer(_VolJetAt1, here, dAside2, dAlong, dWide);
+                            nearer(_VolJetAt2, here, dAside2, dAlong, dWide); nearer(_VolJetAt3, here, dAside2, dAlong, dWide);
+                            nearer(_VolJetAt4, here, dAside2, dAlong, dWide); nearer(_VolJetAt5, here, dAside2, dAlong, dWide);
+                            nearer(_VolJetAt6, here, dAside2, dAlong, dWide); nearer(_VolJetAt7, here, dAside2, dAlong, dWide);
+                            if (dAside2 > 1e8) dAside2 = aside * aside;
+                            float spacing = 2.6 * dWide;
+                            float cell = dAlong / spacing - 0.75, nth = floor(cell), into = cell - nth;
+                            float span = dWide * lerp(0.6, 0.18, into);
+                            float diamond = step(0.0, cell) * step(nth, _VolJetBody.y - 0.5) * exp(-3.2 * into) * smoothstep(0.0, 0.16, into) * exp(-0.65 * nth)
+                                          * exp(-dAside2 / (span * span));
                             diamonds = _VolJetLook.z * diamond;
                             // (a diamond is a thin disc of gas made hotter by the shock in it: it glows of itself, however faint the flame
                             // round it is, as in a hydrogen engine's clear flame, and in the hot colours)
-                            burning = flame * _VolParams.w * (shape * (0.45 + 1.2 * jetN) + 2.2 * diamonds);
-                            sigma += flame * _VolParams.w * _VolJetLook.y * smoothstep(0.5, 0.25, jetN) * (1.0 - f) * 0.6;
+                            // (a clear flame is even: the pattern that makes streaks and tongues of a thick one would make cloud of it)
+                            // (and a clear flame's gas is seen only by its own light: cooled, it is not there to be seen at all, where a
+                            // sooty flame's is dark and hides what is behind it)
+                            float seen = lerp(1.0, smoothstep(0.35, 0.9, SampleLod(_Volume, at, 0.0).a * 1.2 * jetCooled), _VolJetGlow.y);
+                            burning = flame * _VolParams.w * (shape * lerp(0.45 + 1.2 * jetN, 1.0, _VolJetFlow.w) + 2.2 * diamonds) * seen + _VolJetGlow.x / max(dWide, 0.05) * diamonds * smoothstep(0.0, 0.02, flame);
+                            // (soot is made where the flame has had the time to cool, not at the nozzle)
+                            sigma += flame * _VolParams.w * _VolJetLook.y * smoothstep(0.5, 0.25, jetN) * (1.0 - f) * 0.6 * clamp(along / max(_VolJetBody.w, 1e-3) - 0.3, 0.0, 1.0) * (1.0 - _VolJetGlow.y);
                         }
                         // (Flame is a glow, and can be stepped through twice as fast as smoke. A step where the billows have cut
                         // everything away counts in full, though there was nothing to light: there are only so many steps to a
@@ -736,7 +824,7 @@ Shader "VolumetricExplosions/Volume"
                             continue;
                         }
                         float4 air = SampleLod(_Volume, at, 0.0);
-                        float heat = jetN >= 0.0 ? air.a * 1.2 * (0.38 + 1.25 * jetN) + 0.9 * diamonds : fireN >= 0.0 ? air.a * 1.2 * (0.5 + 0.85 * fireN) : air.a * 1.2 * (0.72 + 0.56 * lerp(lump, 0.5, _VolPeak.y));
+                        float heat = jetN >= 0.0 ? air.a * 1.2 * clamp(1.0 + (jetN - 0.45) * lerp(_VolJetFlow.y, _VolJetFlow.z, jetFar), 0.15, 1.2) * jetCooled + 0.9 * diamonds : fireN >= 0.0 ? air.a * 1.2 * (0.5 + 0.85 * fireN) : air.a * 1.2 * (0.72 + 0.56 * lerp(lump, 0.5, _VolPeak.y));
                         float3 hot = heat < 0.25 ? _VolHot1.rgb * (heat * 4.0) : heat < 0.5 ? lerp(_VolHot1.rgb, _VolHot2.rgb, heat * 4.0 - 1.0) : heat < 0.75 ? lerp(_VolHot2.rgb, _VolHot3.rgb, heat * 4.0 - 2.0) : lerp(_VolHot3.rgb, _VolHot4.rgb, min(heat * 4.0 - 3.0, 1.0));
                         // (A fire's light goes with its heat far more steeply than its colour does (a black body's light in what the eye sees
                         // grows many times over between a dull red and a yellow heat): its hottest parts, low in it and in the lumps of the

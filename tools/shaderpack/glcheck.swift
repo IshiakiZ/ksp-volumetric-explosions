@@ -4,6 +4,10 @@
 //
 //     swiftc -O -o /tmp/glcheck tools/shaderpack/glcheck.swift && /tmp/glcheck tools/shaderpack/volume.glsl
 //
+// That checks the text as it is written. What goes into a bundle is that text with each texture's uniform given a
+// location (make_bundle.py's fixed_locations): tools/shaderpack/glcheck_all.py checks every shader as it is packed,
+// and that each bundle holds that very text.
+//
 // (The text of each program is what lies between "#ifdef VERTEX" or "#ifdef FRAGMENT" and the "#endif" that closes it,
 // as make_bundle.py packs it.)
 import AppKit
@@ -11,14 +15,20 @@ import OpenGL.GL3
 
 func programs(_ text: String) -> [(String, String)] {
     var out: [(String, String)] = []
+    let lines = text.components(separatedBy: "\n")
     for name in ["VERTEX", "FRAGMENT"] {
-        guard let start = text.range(of: "#ifdef \(name)\n") else { continue }
-        let rest = text[start.upperBound...]
-        // the last "#endif" before the next "#ifdef" (or the end)
-        let stop = rest.range(of: "\n#ifdef ")?.lowerBound ?? rest.endIndex
-        let body = rest[..<stop]
-        guard let end = body.range(of: "#endif", options: .backwards) else { continue }
-        out.append((name, String(body[..<end.lowerBound])))
+        guard let start = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "#ifdef \(name)" }) else { continue }
+        // (to the "#endif" that closes it: a program may have conditions of its own inside it, as every packed fragment
+        // program has since each texture's uniform was given a location where the driver takes one. Cut at the first
+        // "#ifdef" inside, as this was at first, such a program was passed over without a word.)
+        var depth = 1, body: [String] = [], closed = false
+        for line in lines[(start + 1)...] {
+            let word = line.trimmingCharacters(in: .whitespaces)
+            if word.hasPrefix("#if") { depth += 1 }
+            else if word.hasPrefix("#endif") { depth -= 1; if depth == 0 { closed = true; break } }
+            body.append(line)
+        }
+        if closed { out.append((name, body.joined(separator: "\n") + "\n")) }
     }
     return out
 }
@@ -52,7 +62,12 @@ guard let format = NSOpenGLPixelFormat(attributes: attributes), let context = NS
 }
 context.makeCurrentContext()
 var all = true
-for (name, source) in programs(text) {
+let found = programs(text)
+for (name, source) in found {
     all = compile(name, source, name == "VERTEX" ? GLenum(GL_VERTEX_SHADER) : GLenum(GL_FRAGMENT_SHADER)) && all
+}
+// (both, or it has not been checked: a program that was not found is not one that compiles)
+for name in ["VERTEX", "FRAGMENT"] where !found.contains(where: { $0.0 == name }) {
+    print("\(name): NOT FOUND in \(arguments[1])"); all = false
 }
 exit(all ? 0 : 1)

@@ -200,7 +200,17 @@ namespace VolumetricExplosions
             p.chunks = p.radius > 1.5f ? Mathf.Min(18f, 2f + p.radius * 0.7f) + Mathf.Min(14f, Mathf.Sqrt((float)solid) * 0.35f) : 0f;
             p.dirt = p.ground && !p.water ? (p.paved ? 0.35f : 1f) * (1f + (float)ore / 300f) : 0f;
             bool spills = fromPair + burnsInAir > 20.0 && (p.oxygen || fromPair > 20.0);
-            p.burn = p.ground && !p.water && !p.vacuum && spills ? Mathf.Clamp(2f + 0.4f * Mathf.Sqrt((float)(fromPair + burnsInAir)), 3f, 30f) * Mathf.Max(0.3f, Settings.Smoke) : 0f;
+            // How long what is spilt goes on burning on the ground. A pool of kerosene burns away at about a twentieth of a
+            // kilogram a second from each square metre of it (some four millimetres of its depth a minute: Babrauskas 1983 has
+            // 0.039 for kerosene and 0.054 for jet fuel). Take a fifth of what blew up to be left lying in a pool as wide as the
+            // fire here is drawn (a radius four tenths of the fireball's, which goes as the 0.29th power of the kilograms): that
+            // is 2.6 seconds times the kilograms to the power 0.42. Half a minute for four hundred kilograms, a minute and a half
+            // for four tonnes, nearly three minutes for twenty, and never more than three. (Until 0.6.2 it was three seconds to
+            // half a minute whatever was spilt, fifteen seconds for a tonne: a wreck's fire was dying down by the time the smoke
+            // of its blast had lifted enough for it to be seen.)
+            float spilt = (float)(fromPair + burnsInAir);
+            float burns = Settings.TestBlaze == 1f ? Mathf.Clamp(2f + 0.4f * Mathf.Sqrt(spilt), 3f, 30f) : Mathf.Clamp(2.6f * Mathf.Pow(Mathf.Max(spilt, 1f), 0.42f), 6f, 180f);
+            p.burn = p.ground && !p.water && !p.vacuum && spills ? burns * Mathf.Max(0.3f, Settings.Smoke) : 0f;
 
             p.label = (any ? parts.Count + " part(s)" : "unknown source") + ", " + p.cause + (p.impact > 0 ? " at " + p.impact.ToString("F0") + " m/s" : "") +
                 ", fire " + p.fire.ToString("F0") + " kg (radius " + p.radius.ToString("F1") + " m, soot " + p.soot.ToString("F2") + ", tint " + p.tint + "), vapour " + p.vapour.ToString("F0") +

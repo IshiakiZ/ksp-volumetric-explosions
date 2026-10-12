@@ -262,15 +262,18 @@ namespace VolumetricExplosions
         void LetOneGo()
         {
             int staying = 0, flames = 0;
-            Site oldest = null;
+            Site oldest = null, cloud = null;
             foreach (Site s in sites)
             {
                 if (s.Riding) { flames++; continue; }               // (the flames of ships are counted by themselves: see MostFlames)
                 if (s.Leaving) continue;
                 staying++;
                 if (s.Vented && s.Unfed > 1f && (oldest == null || s.Unfed > oldest.Unfed)) oldest = s;
+                if (s.Cloudy && (cloud == null || s.Count < cloud.Count)) cloud = s;
             }
             if (staying < Most) return;
+            // (clouds give way first: they are the weather's to make again when there is room)
+            if (cloud != null) { cloud.Leave(); return; }
             if (oldest != null && sites.Count - flames < Most + 3) { oldest.Leave(); return; }
             Site least = null;
             foreach (Site s in sites)
@@ -315,12 +318,26 @@ namespace VolumetricExplosions
                 // stays where it is, where it is made as such (see Site.Vents), whatever ship it is on; its flame still goes along
                 // with the ship.)
                 bool jet = exhaust.kind == ExhaustKind.Engine || exhaust.kind == ExhaustKind.Unset;
-                if (exhaust.rides != null && jet && Settings.TestYoung < 1f) smoke = TakeYoung(exhaust);
+                Site young = null;
+                if (exhaust.rides != null && jet && Settings.TestYoung < 1f) smoke = TakeYoung(exhaust, out young);
                 if (!smoke)
                 {
                     Exhaust rest = exhaust;
                     rest.amount *= 1f - trench;
                     smoke = rest.amount > 0.001f && TakeSmoke(rest) || trench > 0.01f;
+                }
+                else if (Site.LaidStraight(exhaust))
+                {
+                    // (Going at any speed, its trail is laid straight into the air it leaves it in, as well: what its ship's
+                    // patch makes of its smoke is then only what is seen of it near the ship. See Site.LaidStraight.)
+                    Exhaust rest = exhaust;
+                    rest.amount *= 1f - trench;
+                    rest.young = Mathf.Max(young != null ? young.HandFar : 0f, Site.YoungFar(exhaust));
+                    // (whether any patch has been laid its trail until now: where none has, its ship's patch has been making
+                    // copies of its smoke for the air, and what is laid begins at the nozzle, where those leave off)
+                    rest.begins = true;
+                    foreach (Site s in sites) if (!s.Riding && s.Laying(exhaust.id)) { rest.begins = false; break; }
+                    if (rest.amount > 0.001f) TakeSmoke(rest);
                 }
             }
             return flame || smoke;
@@ -335,11 +352,11 @@ namespace VolumetricExplosions
         /// and so too where as many ships have such patches as there may be (it then goes straight into a patch that
         /// stays where it is, as it did before there were these).
         /// </summary>
-        bool TakeYoung(in Exhaust exhaust)
+        bool TakeYoung(in Exhaust exhaust, out Site site)
         {
+            site = null;
             CelestialBody body = FlightGlobals.currentMainBody;
             if (body == null || !body.atmosphere) return false;
-            Site site = null;
             int riding = 0;
             int family = Site.Family(exhaust.tint);
             foreach (Site s in sites)
@@ -490,8 +507,8 @@ namespace VolumetricExplosions
             Site site = null;
             for (int n = sites.Count - 1; n >= 0 && site == null; n--)
             {
-                if (sites[n].Feeds(body, exhaust.rim)) site = sites[n];
-                else if (sites[n].Has(exhaust.id)) break;
+                if (sites[n].Feeds(body, exhaust)) site = sites[n];
+                else if (!sites[n].Riding && sites[n].Has(exhaust.id)) break;      // (not the patch that goes along with its ship, which has its flame, and its smoke while that is young: that never holds its trail)
             }
             if (site == null)
             {
@@ -501,6 +518,8 @@ namespace VolumetricExplosions
 #if DEV
                 if (sites.Count > 0 && Settings.TestView == 8f) Debug.Log("[VolumetricExplosions] a new patch for engine " + exhaust.id + ": the newest would not have it: " + sites[sites.Count - 1].WhyNot(body, exhaust.rim));
 #endif
+                // (a cloud pushes nothing out: explosions and trails keep three patches' room of their own)
+                if (exhaust.kind == ExhaustKind.Thermal && Staying() >= Most - 3) return false;
                 Plan plan = Plan.Where(exhaust.rim);
                 if (plan.vacuum || plan.space || plan.underwater) { noAirUntil = Time.time + 0.5f; return false; }              // no air to hold smoke
                 if (Staying() >= Most) LetOneGo();
@@ -971,6 +990,27 @@ namespace VolumetricExplosions
             return say.ToString();
         }
 
+        /// <summary>(Every puff of smoke there is, in every patch, against the first running nozzle of the craft being flown and the way it is going: written to a file, see Site.Column.)</summary>
+        public static string Column()
+        {
+            Vessel ship = FlightGlobals.ActiveVessel;
+            if (Instance == null || ship == null) return "nothing";
+            Vector3d nozzle = (Vector3d)ship.transform.position;
+            foreach (Part part in ship.parts)
+            {
+                ModuleEngines e = part.FindModuleImplementing<ModuleEngines>();
+                if (e != null && e.finalThrust > 0f && e.thrustTransforms.Count > 0) { nozzle = (Vector3d)e.thrustTransforms[0].position; break; }
+            }
+            Vector3d going = ship.srf_velocity;
+            if (going.sqrMagnitude < 1.0) return "the ship is not moving";
+            var say = new System.Text.StringBuilder();
+            say.Append("# speed ").Append(going.magnitude.ToString("F1")).Append(" dt ").Append(Time.deltaTime.ToString("F4")).Append(" altitude ").Append(ship.altitude.ToString("F0")).Append("\n");
+            for (int n = 0; n < Instance.sites.Count; n++) Instance.sites[n].Column(say, n, nozzle, -going.normalized);
+            string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vfx_column.txt");
+            System.IO.File.WriteAllText(path, say.ToString());
+            return path;
+        }
+
         /// <summary>For the development build: how completely the smoke hid what was behind it in the last frame (see Site.Opacity).</summary>
         public static string Opacity()
         {
@@ -1026,6 +1066,37 @@ namespace VolumetricExplosions
             int tested = 0, inside = 0;
             foreach (Site s in Instance.sites) { inside += s.Inside(out int some); tested += some; }
             return inside + " of " + tested;
+        }
+
+        /// <summary>For the development build: what is going on, in one line.</summary>
+        // A trial for Natural Weather's rework (2026-10-11): a heap of cloud made as smoke is made. Thermals (ExhaustKind.Thermal)
+        // hung over the ship: one broad one and four lesser round it, as a heap is a cluster of turrets. Called again: off.
+        // (The user, of the noise clouds: "I don't think they look realistic because of how they're made. Our volumetric
+        // explosions: the smoke looks almost real.")
+        static bool thermals;
+        public static float ThermalHigh = 450f, ThermalWide = 110f, ThermalDeep = 380f, ThermalAmount = 1f;
+        public static string Thermals()
+        {
+            thermals = !thermals;
+            if (thermals) Sources.Asked += FeedThermals; else Sources.Asked -= FeedThermals;
+            return thermals ? "thermals on, " + ThermalHigh + " m up, " + ThermalWide + " m wide, " + ThermalDeep + " m deep" : "thermals off";
+        }
+
+        static void FeedThermals()
+        {
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) return;
+            Vector3d up = FlightGlobals.getUpAxis(v.mainBody, v.CoMD);
+            Vector3d east = Vector3d.Cross(up, v.mainBody.transform.up).normalized, north = Vector3d.Cross(east, up);
+            for (int k = 0; k < 5; k++)
+            {
+                double turn = k * 2.399963, out_ = k == 0 ? 0.0 : 1.25 * ThermalWide;
+                float size = k == 0 ? 1f : 0.62f;
+                Vector3d at = v.CoMD + up * ThermalHigh + east * (out_ * Math.Cos(turn)) + north * (out_ * Math.Sin(turn));
+                var e = new Exhaust { id = 990000 + k, rim = at, along = up, going = Vector3d.zero, nozzle = ThermalWide * size, flame = ThermalDeep * (k == 0 ? 1f : 0.6f),
+                                      running = k == 0 ? 0.8f : 0.3f, amount = ThermalAmount, shade = 1f, warm = 0f, lasts = 100f, tint = 0, fire = 0f, rides = null, kind = ExhaustKind.Thermal };
+                Sources.Burning(e);
+            }
         }
 
         /// <summary>For the development build: what is going on, in one line.</summary>

@@ -726,24 +726,132 @@ namespace VolumetricExplosions
         /// <summary>Spilled propellant goes on burning on the ground, and that is where the column of smoke comes from.</summary>
         void AddFire(Plan pl, Vector3 c, float R, float q)
         {
-            if (fireCount >= fires.Length) return;
-            float floor = GroundAt(c.x, c.z);
-            var f = new Fire
+            bool asWas = Settings.TestBlaze == 1f;                                          // (for testing: as until 0.6.2)
+            float wide = Mathf.Max(0.6f, R * 0.4f);
+            int into = -1;
+            if (!asWas)
             {
-                x = c.x, y = floor + 0.2f, z = c.z, r = Mathf.Max(0.6f, R * 0.4f), left = pl.burn, total = pl.burn,
-                rate = q * Mathf.Clamp(18f + 9f * R, 20f, 220f), soot = pl.soot, shade = pl.smokeShade, scale = Mathf.Clamp(0.25f + 0.05f * R, 0.3f, 1f), tint = (byte)pl.tint,
-            };
-            // How tall its flames stand and how fast they rise: a pool of kerosene burns some 1.5 MW to the square metre, its visible
-            // flame reaches 0.235 Q^(2/5) - 1.02 D on the whole (Q in kW, D its width in metres: Heskestad 1983), a few times its
-            // width for a small pool and one and a half times for a big one, and the gas in its flames goes up at about
-            // 1.9 Q^(1/5) metres a second (McCaffrey 1979), of which the flames' puffs here take a third, the rest being the
-            // turmoil the shader draws. (Until 2026-10-10 its flames rose at a couple of metres a second and cooled within half a
-            // second: a fire some eight metres across stood a metre or two high, a low warm glow on the ground.)
+                // What is spilt where a pool is burning already runs into it: the two are one pool, as wide as both together,
+                // that burns for as long as there is fuel in it for its width. (A rocket that comes down on its pad blows up
+                // tank by tank, each within a few metres of the last. Each used to leave a pool of its own, up to eight of them
+                // in the same place, each sending up as many bits of flame and smoke as if it were the only one: which was
+                // bearable while none of them burned for more than half a minute.)
+                for (int n = 0; n < fireCount && into < 0; n++)
+                {
+                    if (fires[n].patch) continue;
+                    float dx = fires[n].x - c.x, dz = fires[n].z - c.z, reach = 0.8f * (fires[n].r + wide);
+                    if (dx * dx + dz * dz < reach * reach) into = n;
+                }
+                // (and where there is no room for one more fire, a pool takes the place of the patch with the least left to burn)
+                if (into < 0 && fireCount >= fires.Length)
+                {
+                    int least = -1;
+                    for (int n = 0; n < fireCount; n++) if (fires[n].patch && (least < 0 || fires[n].left < fires[least].left)) least = n;
+                    if (least >= 0) fires[least] = fires[--fireCount];
+                }
+            }
+            if (into < 0 && fireCount >= fires.Length) return;
+            Fire f;
+            int lit = -1;                                                                   // (the light of the pool this runs into, if it still has one)
+            if (into >= 0)
+            {
+                f = fires[into];
+                for (int n = 0; n < lampCount; n++)
+                    if (lamps[n].steady && !lamps[n].quiet && Mathf.Abs(lamps[n].x - f.x) < 0.01f && Mathf.Abs(lamps[n].z - f.z) < 0.01f) lit = n;
+                float a = f.r * f.r, b = wide * wide, both = a + b;
+                f.x = (f.x * a + c.x * b) / both; f.z = (f.z * a + c.z * b) / both;
+                f.left = (f.left * a + pl.burn * b) / both;
+                f.total = Mathf.Max(f.total, f.left);
+                f.soot = (f.soot * a + pl.soot * b) / both; f.shade = (f.shade * a + pl.smokeShade * b) / both;
+                if (b > a) f.tint = (byte)pl.tint;
+                f.r = Mathf.Min(Mathf.Sqrt(both), 18f);
+            }
+            else f = new Fire { x = c.x, z = c.z, r = wide, left = pl.burn, total = pl.burn, soot = pl.soot, shade = pl.smokeShade, tint = (byte)pl.tint, smoky = 0.45f };
+            f.y = GroundAt(f.x, f.z) + 0.2f;
+            // (as many bits a second, and as big, as go with a blast whose pool is this wide: a pool is four tenths as wide as its blast)
+            float blast = into >= 0 ? f.r / 0.4f : R;
+            f.rate = q * Mathf.Clamp(18f + 9f * blast, 20f, 220f);
+            f.scale = Mathf.Clamp(0.25f + 0.05f * blast, 0.3f, 1f);
+            Stands(ref f);
+            if (lit >= 0)
+            {
+                // (one pool, one light: it goes where the pool now is, and lasts as long as the pool now will, as a new pool's would)
+                ref Lamp l = ref lamps[lit];
+                l.x = f.x; l.y = f.y + Mathf.Max(f.r * 0.5f, 0.3f * f.tall); l.z = f.z; l.r = f.r * 1.6f; l.age = 0f; l.life = f.left; l.tint = f.tint;
+                f.lamp = lit;
+            }
+            else f.lamp = AddLamp(f.x, f.y + Mathf.Max(f.r * 0.5f, 0.3f * f.tall), f.z, f.r * 1.6f, 2.2f, f.left, f.tint, true, 0f, 0f);
+            if (into >= 0) fires[into] = f; else fires[fireCount++] = f;
+            // What a blast spills does not all lie in one pool under it. Some of it is thrown out and burns where it falls: patches
+            // of fire round about the place, most of them the way the wreck was going. They are what is seen of the fire at
+            // first, and for most of the time it burns: the pool is in the middle of the blast's own smoke, whose foot stands on
+            // it for a minute, and what shows of the pool from outside is the lowest few metres of its flames, when anything
+            // does (until 0.6.2 there was the pool and nothing else: the fire a blast left was a glow in the foot of its smoke).
+            // The patches stand at the smoke's edge, from just inside the fireball's rim to half as far out again, clear of it
+            // within a few seconds, each with its own flames standing a few times its width. Each is a fire of its own, a
+            // quarter to a half as wide as the pool, with less to burn and so out sooner; it makes little smoke of its own
+            // (most of a fire's smoke is the pool's), sends up no bubbles of hot gas to stir the air as the pool does, and
+            // lights the smoke round it but not the ground. One for a blast a few metres wide, three for a big one; and always
+            // room left for the pool of the next blast here.
+            //
+            // (What they cost: a small fire under a tall column is drawn no finer than the grid, some six metres, however narrow
+            // it is, so a patch fed in proportion to its width would be a faint smudge. Each is fed some three tenths of the
+            // pool's bits instead, as big as the pool's: the three of them are half as many particles again as the pool has, a
+            // thousand for a 4-tonne blast, a tenth more than the blast and its pool had without them. TestBlaze 2: without.)
+            if (asWas || Settings.TestBlaze == 2f) return;
+            // By day only, for now. A patch throws no light on the ground (a patch of air has two real lamps, and they are the
+            // blast's and the pool's). By day that does not show. By night it does: seen on 2026-10-10, the patches were bright
+            // fires standing on ground that stayed black beside them, glowing shapes and not fire, where the pool alone, its
+            // light on the ground and on its smoke, looked right. So a blast in the dusk or the dark leaves its pool and no
+            // patches, until the patches can light the ground round them. (Seen with the sun 16 degrees up and three hours
+            // after it had set; then, the same night, either side of sunset: with the sun 2.9 and 1.1 degrees up the scene
+            // is as good as dark already and the patches were the same glowing shapes, and 1.1 and 4 degrees down the pool
+            // alone looked right. So the rule is not the horizon but ten degrees of sun, below which the day's light no
+            // longer hides what the patches lack. TestBlaze 3: patches whatever the hour, for working on that.)
+            if (sunL.y < 0.174f && Settings.TestBlaze != 3f) return;
+            int patches = R < 3.5f ? 0 : R < 7f ? 1 : R < 13f ? 2 : 3;
+            var flung = new Vector3(pl.going.x, 0f, pl.going.z);
+            float carried = Mathf.Clamp01(flung.magnitude / 120f), first = Random.Range(0f, Mathf.PI * 2f);
+            if (carried > 0.05f) flung.Normalize();
+            for (int k = 0; k < patches && fireCount < fires.Length - 2; k++)
+            {
+                // (each in its own part of the round, so that they do not fall in a heap)
+                float turn = first + (k + Random.Range(-0.3f, 0.3f)) * (Mathf.PI * 2f / patches);
+                var way = new Vector3(Mathf.Cos(turn), 0f, Mathf.Sin(turn));
+                if (carried > 0.05f) way = (way + flung * (1.6f * carried)).normalized;
+                float far = R * Random.Range(0.9f, 1.6f) * (1f + 0.8f * carried);
+                Fire g = f;
+                g.x = c.x + way.x * far; g.z = c.z + way.z * far;
+                g.y = GroundAt(g.x, g.z) + 0.2f;
+                g.r = Mathf.Max(0.5f, wide * Random.Range(0.25f, 0.45f));
+                g.left = g.total = pl.burn * Random.Range(0.45f, 0.85f);
+                // (no two quite alike: some burn harder than others)
+                g.rate = q * Mathf.Clamp(0.3f * (18f + 9f * R), 14f, 66f) * Random.Range(0.7f, 1.15f);
+                g.scale = Mathf.Clamp(0.25f + 0.05f * R, 0.3f, 1f);
+                g.smoky = 0.15f;
+                g.patch = true;
+                g.due = Random.value; g.puff = 0f;
+                Stands(ref g);
+                // (its light is on the smoke round it and no more: the light thrown on the ground and the wreck is the pool's)
+                g.lamp = AddLamp(g.x, g.y + Mathf.Max(g.r * 0.5f, 0.3f * g.tall), g.z, g.r * 1.6f, 1.2f, g.total, g.tint, true, 0f, 0f);
+                lamps[g.lamp].quiet = true;
+                fires[fireCount++] = g;
+            }
+        }
+
+        /// <summary>
+        /// How tall a fire's flames stand and how fast they rise, from how wide it is: a pool of kerosene burns some 1.5 MW to the
+        /// square metre, its visible flame reaches 0.235 Q^(2/5) - 1.02 D on the whole (Q in kW, D its width in metres: Heskestad
+        /// 1983), a few times its width for a small pool and one and a half times for a big one, and the gas in its flames goes up
+        /// at about 1.9 Q^(1/5) metres a second (McCaffrey 1979), of which the flames' puffs here take a third, the rest being the
+        /// turmoil the shader draws. (Until 2026-10-10 its flames rose at a couple of metres a second and cooled within half a
+        /// second: a fire some eight metres across stood a metre or two high, a low warm glow on the ground.)
+        /// </summary>
+        static void Stands(ref Fire f)
+        {
             float power = 1500f * Mathf.PI * f.r * f.r;
             f.tall = Mathf.Max(0.235f * Mathf.Pow(power, 0.4f) - 2.04f * f.r, 1.2f * f.r);
             f.lick = Mathf.Clamp(0.33f * 1.93f * Mathf.Pow(power, 0.2f), 1.5f, 9f);
-            f.lamp = AddLamp(f.x, f.y + Mathf.Max(f.r * 0.5f, 0.3f * f.tall), f.z, f.r * 1.6f, 2.2f, pl.burn, f.tint, true, 0f, 0f);
-            fires[fireCount++] = f;
         }
 
         void Fires(float dt)
@@ -763,7 +871,7 @@ namespace VolumetricExplosions
                 // air in behind it: these, one after another, are what carry the smoke up as a column, roll it into
                 // billows on the way, and pull the smoke near by in towards the fire.
                 f.puff -= dt;
-                if (f.puff <= 0f && !vacuum && grip > 0.2f)
+                if (f.puff <= 0f && !vacuum && grip > 0.2f && !f.patch)
                 {
                     f.puff = 0.667f * Mathf.Sqrt(Mathf.Max(0.5f, 2f * f.r)) * Random.Range(0.85f, 1.15f);
                     float lift = 0.34f * Mathf.Sqrt(gravity * 2f * f.r) * strength * Mathf.Min(1f, grip) * Random.Range(0.85f, 1.15f);
@@ -800,7 +908,7 @@ namespace VolumetricExplosions
                         o.rise = 0.8f * lick;
                         o.cool = 1.2f * lick / Mathf.Max(f.tall * (0.6f + 0.4f * strength), 0.5f) * Random.Range(0.85f, 1.2f);
                     }
-                    if (Random.value < 0.45f * Mathf.Lerp(0.5f, 1f, f.soot))
+                    if (Random.value < f.smoky * Mathf.Lerp(0.5f, 1f, f.soot))
                     {
                         float later = o.r * 2.2f;
                         o.mass = Random.Range(1f, 2.4f) * Mathf.Max(0.15f, f.soot) * later * later;
