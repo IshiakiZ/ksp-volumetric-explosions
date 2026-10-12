@@ -358,7 +358,7 @@ namespace VolumetricExplosions
                             Flame(ref vent, e, rim, along, -going, e.fire, dt, q);
                             // (the strongest of the ship's flames gives the pattern its place and its size: see TuneJet)
                             float strength = e.fire * e.nozzle;
-                            if (strength > jetStrongest) { jetStrongest = strength; jetFromL = rim; jetNozzle = e.nozzle; jetLong = Mathf.Max(e.flame, 4f * e.nozzle); jetSpeed = Mathf.Max(6.25f * jetLong, 60f); jetKind = e.tint; }
+                            if (strength > jetStrongest) { jetStrongest = strength; jetFromL = rim; jetNozzle = e.nozzle; jetLong = Mathf.Max(e.flame, 4f * e.nozzle); jetSpeed = JetSpeed(jetLong); jetKind = e.tint; }
                         }
                     }
                     // (and the smoke that the flame turns into, while it is young, lit by the flame: see SiteYoung)
@@ -546,7 +546,19 @@ namespace VolumetricExplosions
             {
                 // (the grid of the flames lies along the jets, as the ship points now: see TurnAlong)
                 ridesGoing = allGoing / flames;
-                if (allAlong.sqrMagnitude > 0.01f) { TurnAlong(allAlong.normalized); jetAxisL = allAlong.normalized; }
+                if (allAlong.sqrMagnitude > 0.01f)
+                {
+                    Vector3 now = allAlong.normalized;
+                    TurnAlong(now);
+                    // The line the flame's pattern is drawn along comes round to the nozzles' line a little late: by about
+                    // as long as the gas half way down the flame has been out. When the ship turns, the gas further down
+                    // the flame is still going the way the nozzle pointed when it left, and the flame bends; a pattern
+                    // laid along the nozzle's line of the moment lay straight across that bend. One line cannot follow a
+                    // bend, but this one lies along the flame as a whole: right at the nozzle, where being a little out
+                    // matters least, and nearly right at its far end. (Standing still, or flying straight, the two are one.)
+                    float late = Mathf.Clamp(Settings.JetLags * jetLong / Mathf.Max(jetSpeed, 1f), 0.02f, 0.6f);
+                    jetAxisL = Vector3.Dot(jetAxisL, now) < 0.5f ? now : Vector3.Slerp(jetAxisL, now, 1f - Mathf.Exp(-dt / late)).normalized;
+                }
                 if (jetStrongest > 0f) jetSeen = time;
             }
             if (youngCount > 0) youngRim = youngRims / youngCount;
@@ -823,12 +835,25 @@ namespace VolumetricExplosions
         {
             if (since > 0f)
             {
-                float hold = grip;
+                float hold = grip, went = 0f;
                 if ((o.flags & Ballistic) == 0)
                 {
                     float x = o.drag * hold * since, follow = x / (1f + x);
                     o.vx += (air.x - o.vx) * follow; o.vy += (air.y - o.vy) * follow; o.vz += (air.z - o.vz) * follow;
-                    float keep = 1f / (1f + o.kloss * (hold < 0.55f ? 0.55f : hold) * since);
+                    float keep, was = Mathf.Sqrt(o.kx * o.kx + o.ky * o.ky + o.kz * o.kz);
+                    went = was * since;
+                    if ((o.flags & JetGas) != 0)
+                    {
+                        // (as the mover slows it, see there: and how far it has got by now is that law's own sum, not the speed it ends at times the time)
+                        float by = 2f * o.kloss * was * was * (hold < 0.55f ? 0.55f : hold);
+                        keep = 1f / Mathf.Sqrt(1f + by * since);
+                        o.flame /= Mathf.Sqrt(keep);
+                        float gone = by > 1e-6f ? was * (2f / by) * (Mathf.Sqrt(1f + by * since) - 1f) : was * since;
+                        went = gone;
+                        if (was > 1e-4f) { float step = gone / was; o.x += o.kx * step; o.y += o.ky * step; o.z += o.kz * step; }
+                        o.r += (0.02f + o.swell) * gone;
+                    }
+                    else keep = 1f / (1f + o.kloss * (hold < 0.55f ? 0.55f : hold) * since);
                     o.kx *= keep; o.ky *= keep; o.kz *= keep;
                     o.r += (o.grow / o.r + 0.012f * o.turb) * since;
                 }
@@ -837,9 +862,13 @@ namespace VolumetricExplosions
                     if (hold > 0f) { float keep = 1f / (1f + 0.35f * hold * since); o.vx *= keep; o.vy *= keep; o.vz *= keep; }
                     o.r += o.grow * since;
                 }
-                o.x += (o.vx + o.kx) * since; o.y += (o.vy + o.ky) * since; o.z += (o.vz + o.kz) * since;
-                o.r += (0.02f + o.swell) * Mathf.Sqrt(o.kx * o.kx + o.ky * o.ky + o.kz * o.kz) * since;
-                o.heat *= Mathf.Exp(-o.cool * since);
+                if ((o.flags & (JetGas | Ballistic)) == JetGas) { o.x += o.vx * since; o.y += o.vy * since; o.z += o.vz * since; }
+                else
+                {
+                    o.x += (o.vx + o.kx) * since; o.y += (o.vy + o.ky) * since; o.z += (o.vz + o.kz) * since;
+                    o.r += (0.02f + o.swell) * Mathf.Sqrt(o.kx * o.kx + o.ky * o.ky + o.kz * o.kz) * since;
+                }
+                o.heat *= Mathf.Exp(-o.cool * ((o.flags & (JetGas | Ballistic)) == JetGas ? went + 6f * since : since));
             }
             o.age = since;
         }
@@ -857,15 +886,23 @@ namespace VolumetricExplosions
         void Flame(ref Vent vent, in Exhaust e, Vector3 rim, Vector3 along, Vector3 air, float fire, float dt, float q)
         {
             float length = Mathf.Max(e.flame, 4f * e.nozzle);
-            // How fast it looks to go, not how fast it goes, which is ten times this: the length of the flame in a sixth
-            // of a second, and never slower than sixty metres a second, however short the flame (a small engine's flame
-            // is as quick as a big one's, and shorter because it is over sooner). It keeps most of that speed to the
-            // end, and the end of the flame is where it has cooled, not where it has stopped: gas that slowed to a stop
-            // would spend most of its time at the far end, and the flame would be thin at the nozzle and thick at its tip.
-            float jet = Mathf.Max(6.25f * length, 60f);
+            // How fast it looks to go at the nozzle, not how fast it goes, which is some eight times this: so many of the
+            // flame's lengths a second, and never slower than sixty metres a second, however short the flame (a small
+            // engine's flame is as quick as a big one's, and shorter because it is over sooner).
+            float jet = JetSpeed(length);
             float thin = Thin;                                          // 0 at the ground, 1 in a vacuum
             // (With no air to hold it in, the jet opens out at once and is spent in half the length.)
-            float reach = length * Mathf.Lerp(1f, 0.45f, thin), lasts = reach / jet, slows = 0.5f / lasts;
+            float reach = length * Mathf.Lerp(1f, 0.45f, thin);
+            // It slows as a jet does (see the mover, at JetGas): hardly at all for the first stretch, where the air drawn in at
+            // its sides has not reached its middle, and from there on as one over how far it has come. That first stretch is
+            // a quarter of the flame in thick air, and longer than the whole flame where there is next to no air to draw in.
+            // So the gas at a flame's far end goes at a fifth of the speed it left at, and has been out three times as long
+            // as it would have been at that speed: that end is what is left behind when the ship turns or its tail swings,
+            // and what the wind takes. The end of the flame is still where the gas has cooled, not where it has stopped.
+            float holds = grip < 0.55f ? 0.55f : grip;
+            float core = Mathf.Lerp(Settings.JetCore, 3f, thin) * reach, coreNow = core / holds;
+            float slowing = 1f / (jet * core);
+            float far = 1f + reach / coreNow, lasts = coreNow / (2f * jet) * (far * far - 1f);
             float opens = Mathf.Lerp(0.035f, 0.36f, thin);              // how much wider it gets for each metre it goes
             float r0 = 0.7f * e.nozzle;
             // (what this kind of flame is like: see Plumes)
@@ -892,6 +929,15 @@ namespace VolumetricExplosions
             if (bits <= 0) return;
             Vector3 across = Vector3.Cross(along, Mathf.Abs(along.y) < 0.9f ? Vector3.up : Vector3.right).normalized, over = Vector3.Cross(along, across);
             if (fire >= flameWeight) { flameKind = (byte)Mathf.Clamp(e.tint, 0, 7); flameWeight = fire; }
+            // What a jet does not do is come out the same from one moment to the next: the air it tears at its edge tears
+            // it in gusts, and the whole of it wavers a little about its line. Each bit is given what the moment it left
+            // at, and the place round the nozzle it left from, make of four slow-changing numbers: how much of it there
+            // is, how hot, how fast, and how hard it is thrown outward; and all that leaves at one moment a little the
+            // same way aside. Those go down the jet with the gas, at the gas's speed, and are what is seen to stream in
+            // it. By the moment, not by the frame: a frame's own rhythm showed as lumps, once (above). In thin air there is
+            // nothing to tear it, and it comes out even.
+            uint salt = (uint)e.id * 2654435761u;
+            float uneven = Settings.JetUneven * (1f - thin);
             for (int k = 0; k < bits; k++)
             {
                 int i = Add();
@@ -902,19 +948,25 @@ namespace VolumetricExplosions
                 // bits to a frame bunch here and leave gaps there, and the jet's outline was a row of bulges, new ones every frame.
                 int nth = vent.shot++ & 0xFFFFF;
                 float since = (k + (float)(nth * 0.8191725133961645 % 1.0)) / bits * span;         // how long ago within that stretch it left
-                float turn = (float)(nth * 0.6710436067037893 % 1.0) * Mathf.PI * 2f, out_ = Mathf.Sqrt((float)(nth * 0.5497004779019703 % 1.0));
+                float round = (float)(nth * 0.6710436067037893 % 1.0), turn = round * Mathf.PI * 2f, out_ = Mathf.Sqrt((float)(nth * 0.5497004779019703 % 1.0));
                 Vector3 side = across * Mathf.Cos(turn) + over * Mathf.Sin(turn);
+                float left = time - since;
+                float much = 0.65f * Wavers(left * 13f, round * 5f, 5, salt) + 0.35f * Wavers(left * 31f, round * 9f, 9, salt + 1u);
+                float quick = Wavers(left * 8f, round * 4f, 4, salt + 2u), thrown = Wavers(left * 19f, round * 7f, 7, salt + 3u);
+                float wayA = 0.7f * Wavers(left * 4.3f, 0f, 1, salt + 4u) + 0.3f * Wavers(left * 11f, 0f, 1, salt + 5u) - 0.5f;
+                float wayB = 0.7f * Wavers(left * 4.7f, 0f, 1, salt + 6u) + 0.3f * Wavers(left * 12f, 0f, 1, salt + 7u) - 0.5f;
                 // (the middle of a jet is fastest, and hottest)
-                float speed = jet * Random.Range(0.88f, 1.06f) * (1f - 0.35f * out_ * out_);
+                float speed = jet * Random.Range(0.88f, 1.06f) * (1f - 0.35f * out_ * out_) * (1f + uneven * 0.16f * (quick - 0.5f));
                 // (Where it fans, more of it near the middle than at the rim: a bright lobe along the jet's line, and a faint skirt.)
-                Vector3 push = along * speed + side * (out_ * Mathf.Lerp(1f, out_, thin) * speed * fans);
+                Vector3 push = along * speed + side * (out_ * Mathf.Lerp(1f, out_, thin) * speed * fans)
+                               + side * (out_ * speed * uneven * 0.09f * (thrown - 0.5f)) + (across * wayA + over * wayB) * (speed * uneven * Settings.JetWavers);
                 // It begins a little way up inside the nozzle, so that the flame is whole at its mouth. (And is put, below, where
                 // it would have got to by now, sideways as well as on: where the gas fans out, bits put straight down the jet's
                 // line for their first frame were a rod as long as the gas goes in a frame, with the fan beginning at its end.)
                 Vector3 c = rim + side * (out_ * 0.8f * e.nozzle) - along * (0.8f * r0);
                 o.x = c.x; o.y = c.y; o.z = c.z;
                 o.kx = push.x; o.ky = push.y; o.kz = push.z;
-                o.kloss = slows; o.drag = 2f;
+                o.kloss = slowing; o.drag = 2f;
                 o.r = r0 * Random.Range(0.8f, 1.2f);
                 // (its edge, where it meets the air, is stirred by it; its middle hardly at all)
                 o.turb = (1.8f + 5.4f * out_ * out_) * (1f - thin);
@@ -923,13 +975,22 @@ namespace VolumetricExplosions
                 // through yellow and orange in the last of it: brightness goes with heat far more steeply than colour does
                 // (see JetShines), and a flame that had begun to cool at the nozzle was a dim orange thing for most of its
                 // length beside the game's own. In thin air it starts a little cooler, the sooner to show its colours.
-                o.heat = (1.02f - look.edge * Mathf.Pow(out_, 3.5f)) * Random.Range(0.92f, 1.08f) * look.hot * Mathf.Lerp(1f, 0.8f, thin);
-                o.flame = 0.22f * dense * fire * Random.Range(0.8f, 1.2f) * (1f - 0.45f * thin);
+                o.heat = (1.02f - look.edge * Mathf.Pow(out_, 3.5f)) * Random.Range(0.92f, 1.08f) * look.hot * Mathf.Lerp(1f, 0.8f, thin) * (1f + uneven * 0.07f * (much - 0.5f));
+                o.flame = 0.22f * dense * fire * Random.Range(0.8f, 1.2f) * (1f - 0.45f * thin) * (1f + uneven * 1.1f * (much - 0.5f));
                 // (In a vacuum it cools as it spreads, all the faster for having nothing to hold it together: what is seen
                 // of it there is a bright lobe at the nozzle, gone within a few nozzles' widths.)
                 o.cool = 2.1f * look.cool / lasts * Random.Range(0.85f - 0.3f * thin, 1.2f + 0.5f * thin) * Mathf.Lerp(1f, 0.9f, thin * thin * thin * thin);
                 // (some of it spent sooner and some later, by a good deal: so that the flame ends in tongues and not at a line)
                 o.life = Mathf.Lerp(1.7f, 1.06f, thin) * lasts * Random.Range(0.6f, 1.4f);
+                if (!vacuum)
+                {
+                    // (In air both go by how far the gas has come, see the mover: cooled to a twentieth at the flame's reach, as
+                    // it was when it kept its speed; and spent between eight tenths of that reach and fourteen, this bit at its
+                    // own speed.)
+                    o.cool = 2.9f * look.cool / reach * Random.Range(0.85f - 0.3f * thin, 1.2f + 0.5f * thin);
+                    float own = jet * core / (speed * holds), to = Mathf.Lerp(1.15f, 1.03f, thin) * reach * Random.Range(0.7f, 1.22f), on = 1f + to / own;
+                    o.life = own / (2f * speed) * (on * on - 1f);
+                }
                 // (Flame that has spread out is drawn thinner, by how much wider it is than it began: see Deposit. Where the
                 // gas fans out that begins at once, so that it is brightest at the nozzle.)
                 float began = o.r;
@@ -937,20 +998,53 @@ namespace VolumetricExplosions
                 {
                     // (nothing slows it, and nothing stirs it: it only spreads, each bit by less than the fan does, or the fan is a ball)
                     o.flags = Ballistic | Exhausted;
+                    o.kloss = 0.5f * jet / reach;
                     o.grow = 0.4f * fans * speed;
                     began += o.grow * (1f / 120f);          // (as wide as it was reckoned to begin while this was tuned, at sixty frames a second: whatever the frame rate now)
                 }
                 else
                 {
-                    o.flags = Exhausted;
+                    o.flags = Exhausted | JetGas;
                     o.grow = 0.02f;
                     o.swell = opens - 0.02f;
+                    // (Slowing, it spends longer in every metre: so some of it is spent early, by chance, as many as leave
+                    // the bits no thicker on the ground at its far end than JetKept allows; see there, and the mover.)
+                    float spent = Random.Range(0.05f, 1f);
+                    spent *= spent; spent *= spent;                      // (to the power two over JetKept: four)
+                    float early = (1f / spent - 1f) / (2f * slowing * holds * speed * speed);
+                    if (early < o.life) o.life = early;
                 }
                 Since(ref o, since, air);
                 o.tint = (byte)Mathf.Clamp(e.tint, 0, 7);
                 o.tile = Lumpy();
                 Born(i);
                 p[i].born = began * Mathf.Lerp(1f, 0.5f, thin);
+            }
+        }
+
+        /// <summary>How fast an engine's gas is taken to leave its nozzle (as it looks: see Flame), by the length of its flame.</summary>
+        static float JetSpeed(float length) => Mathf.Max(Settings.JetPace * length, 60f);
+
+        /// <summary>A number between 0 and 1 that changes smoothly from one moment to the next (t: one change to each whole number) and from one place round a ring to the next (a, which comes round again at `ring`).</summary>
+        static float Wavers(float t, float a, int ring, uint salt)
+        {
+            float tf = Mathf.Floor(t), af = Mathf.Floor(a);
+            int t0 = (int)tf, a0 = (int)af;
+            float ft = t - tf, fa = a - af;
+            ft = ft * ft * (3f - 2f * ft); fa = fa * fa * (3f - 2f * fa);
+            a0 = ((a0 % ring) + ring) % ring;
+            int a1 = (a0 + 1) % ring;
+            float h00 = Chance(t0, a0, salt), h01 = Chance(t0, a1, salt), h10 = Chance(t0 + 1, a0, salt), h11 = Chance(t0 + 1, a1, salt);
+            return (h00 + (h01 - h00) * fa) * (1f - ft) + (h10 + (h11 - h10) * fa) * ft;
+        }
+
+        static float Chance(int x, int y, uint salt)
+        {
+            unchecked
+            {
+                uint h = (uint)x * 0x9E3779B1u ^ (uint)y * 0x85EBCA77u ^ salt * 0xC2B2AE3Du;
+                h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;
+                return (h & 0xFFFFFFu) * (1f / 16777216f);
             }
         }
 

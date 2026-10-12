@@ -50,7 +50,8 @@ see [Installing](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Inst
   rocket engines: see [engines' smoke and flames](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Engines-smoke-and-flames).
   By itself the mod does nothing with engines. Since 0.6.0 an engine's flame is as bright as a rocket's is: a
   solid white-hot body for kerosene and solid fuel, a clear veil with shock diamonds for hydrogen, a bright lobe
-  at the nozzle in a vacuum.
+  at the nozzle in a vacuum. Since 0.6.4 it moves as fire does: its gas slows along the jet as a real one does,
+  so its far end trails when the ship turns, and what is in it streams.
 
 ![Each kind by itself: fuel and oxidiser (fireball, then smoke), fuel alone, solid propellant (flash, then smoke), monopropellant, a battery bank, a xenon tank, and fuel alone on Duna](src/VolumetricExplosions/img/explosions-kinds.jpg)
 

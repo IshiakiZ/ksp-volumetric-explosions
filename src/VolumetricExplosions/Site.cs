@@ -52,6 +52,14 @@ namespace VolumetricExplosions
 
         const byte Ballistic = 1, DiesOnGround = 2, Exhausted = 4;      // (Exhausted: it came out of an engine: see the ships' wash in the mover)
         const byte Raised = 16;              // (an engine's young smoke that has taken up the ground's dust or spray where its jet struck: see the mover)
+        const byte JetGas = 64;                 // (an engine's burning gas: its push is taken from it as a jet's is, by the air it draws in, see the mover and Flame; "kloss" is then that law's own number)
+        /// <summary>
+        /// Of an engine's burning gas, how many bits are kept as it slows: the gas spends longer in each metre the slower it
+        /// goes, and kept whole there would be five times the bits to a metre at a flame's tip as at its nozzle. So some are
+        /// spent early, by chance, as many as leave so many to a metre as the speed to this power was less; and each that is
+        /// kept burns for those that were not (see the mover). Nought: none spent. One: as many to a metre everywhere.
+        /// </summary>
+        const float JetKept = 0.5f;
         const double StillAir = 0.9;         // how much of the time the air is still, as it comes (see Wind)
         const float Downhill = 4f;           // metres a second: how fast heavy smoke lying on the ground would run down a slope that was all but sheer (see the mover)
 
@@ -470,10 +478,14 @@ namespace VolumetricExplosions
                 return;
             }
             float thin = Thin;
-            // (Six of its own sizes a second at the nozzle: seen from a few metres off that is many pixels a frame, which the
-            // game's smoothing between frames makes streaks of; by the flame's end it is under two, and its lumps are seen.)
+            // Thirty of its own sizes a second at the nozzle, and a quarter of that by the flame's end: half its own size in a
+            // frame there, which the game's smoothing between frames makes streaks of, as the eye makes of gas going that
+            // fast; and by the flame's end slow enough that its lumps are seen, and seen to go. (Six, until 0.6.4: the
+            // pattern took eight seconds to go the length of a big engine's flame, and the flame's owner said of it "the
+            // fire moves very slowly". It was made slow to keep that smoothing from blurring it away; but a flame whose
+            // pattern creeps is not seen as a fast one drawn sharp. It is seen as a slow one.)
             float size = Mathf.Clamp(1.1f * jetNozzle, 0.3f, 3f);
-            jetScroll += Time.deltaTime * 6f * size;
+            jetScroll += Time.deltaTime * Settings.JetRuns * size;
             Vector3 axis = ToGrid(jetAxisL), from = ToGrid(jetFromL) - slid;
             boxMaterial.SetVector(jetNote, new Vector4(axis.x, axis.y, axis.z, jetScroll));
             boxMaterial.SetVector(jetFromNote, new Vector4(from.x, from.y, from.z, jetNozzle));
@@ -482,7 +494,7 @@ namespace VolumetricExplosions
             float reach = jetLong * Mathf.Lerp(1f, 0.45f, thin);
             boxMaterial.SetVector(jetLookNote, new Vector4(look.tongues * (1f - thin), look.soot * (1f - thin), look.diamonds * (1f - thin) * (1f - thin), size));
             // (the pattern is carried half as fast, and is half as drawn out, a third of the flame's reach down it)
-            boxMaterial.SetVector(jetFlowNote, new Vector4(Mathf.Max(0.33f * reach, 0.5f), look.streaks * (1f - thin), look.streaksFar * (1f - thin), Mathf.Lerp(look.soft, 1f, thin)));
+            boxMaterial.SetVector(jetFlowNote, new Vector4(Mathf.Max(Settings.JetRunsOn * reach, 0.5f), look.streaks * (1f - thin), look.streaksFar * (1f - thin), Mathf.Lerp(look.soft, 1f, thin)));
             // (its lumps open out with the jet, though by less than the gas does: a third as much)
             boxMaterial.SetVector(jetEndNote, new Vector4(reach, look.endTorn * (1f - thin), look.endCool * (1f - thin), 0.3f * Mathf.Lerp(0.035f, 0.36f, thin)));
             // (drawn out nearly four times along the jet at the nozzle; and the air has torn its edge as far as it will by half its reach)
@@ -1054,6 +1066,7 @@ namespace VolumetricExplosions
             turnsWrapped = -1;
             for (int k = 0; k < Octaves && (rounds >> k) != (turnsCounted >> k); k++) turnsWrapped = k;
             turnsCounted = rounds;
+            if (riding) Jolt(dt);
             if (count > 0 && Settings.TestFreeze < 0.5f)
             {
                 stepGoing = airGoing;
@@ -1213,6 +1226,8 @@ namespace VolumetricExplosions
             // (A patch that goes along with a ship: nothing in it lasts long enough to fall, and the air it is in goes by at the ship's speed.)
             float dt = stepDt, g = riding ? 0f : gravity, hold = grip, still = calm, rush = hurry;
             float byX = ridesGoing.x, byY = ridesGoing.y, byZ = ridesGoing.z;
+            float joltX = jolt.x, joltY = jolt.y, joltZ = jolt.z;
+            bool jolted = joltX != 0f || joltY != 0f || joltZ != 0f;
             float ph = time * 0.22f, tm = time, goneX = windGoneX, goneZ = windGoneZ;
             float k1 = 6.2832f / (scale * 1.7f + 3f), k2 = 6.2832f / (scale * 0.6f + 1.2f), k3 = 6.2832f / (scale * 0.21f + 0.7f);
             float cx = camL.x, cy = camL.y, cz = camL.z, sx = sunL.x, sy = sunL.y, sz = sunL.z;
@@ -1257,6 +1272,8 @@ namespace VolumetricExplosions
                 ref P q = ref a[i];
                 q.age += q.heat < 0.1f && q.age > 5f ? dt * rush : dt;
                 if (q.age >= q.life) { q.life = -1f; continue; }
+                // (the patch has changed its own speed since the last step, with the ship it goes along with: what is in it has not, see Jolt)
+                if (jolted) { q.vx -= joltX; q.vy -= joltY; q.vz -= joltZ; }
                 // (young smoke handed on to the patch of the ship's trail: it fades here as its copy there comes on, see Hand)
                 if ((q.flags & HandedOn) != 0)
                 {
@@ -1466,7 +1483,23 @@ namespace VolumetricExplosions
                     q.vy += (airY - q.vy) * follow;
                     q.vz += (airZ - q.vz) * follow;
                     // (Thin air stops a blast later, but not without limit: the gas spreads its push over more of it as it goes.)
-                    float keep = 1f / (1f + q.kloss * (hold < 0.55f ? 0.55f : hold) * dt);
+                    float keep;
+                    if ((q.flags & JetGas) != 0)
+                    {
+                        // An engine's burning gas slows as a jet does. A jet is slowed by the air it draws in at its sides,
+                        // and it draws in the more the faster it goes: its speed falls off as one over how far it has
+                        // come, once it is past the first stretch (so many nozzles long) where the air has not reached
+                        // its middle. In time that is a slowing as the cube of the speed: fast gas is slowed hard and
+                        // slow gas hardly at all, so the first of a flame is over in a moment and its end lingers. (Slowed
+                        // as a blast's puffs are, by so much of its speed a second whatever the speed, it kept most of its
+                        // speed to its end; and a flame all of whose gas is a sixth of a second old turns with the ship
+                        // like a rod, which is what its owner called it.)
+                        float u2 = q.kx * q.kx + q.ky * q.ky + q.kz * q.kz;
+                        keep = 1f / Root(1f + 2f * q.kloss * u2 * (hold < 0.55f ? 0.55f : hold) * dt);
+                        // (fewer of its bits are kept the slower it goes: each that is, burns for those that are not. JetKept is a half: the root.)
+                        q.flame /= Root(keep);
+                    }
+                    else keep = 1f / (1f + q.kloss * (hold < 0.55f ? 0.55f : hold) * dt);
                     q.kx *= keep; q.ky *= keep; q.kz *= keep;
                     // It spreads by mixing with the air round it: quickly while small, ever more slowly as it widens.
                     q.r += (q.grow / q.r + 0.012f * q.turb) * dt;
@@ -1557,7 +1590,11 @@ namespace VolumetricExplosions
                 if (q.r > 80f) q.r = 80f;
                 // (Gas that cools fast, an engine's in a vacuum, cools by what a frame's time is worth whatever the frame rate: reckoned
                 // the short way, it was hotter, and its plume twice as long, at thirty frames a second as at sixty.)
-                float cools = q.cool * dt;
+                // (An engine's burning gas in air cools by how far it has come, not by how long it has been out: it is the air it
+                // has drawn in on the way that cools it. And a little by the clock besides, as if it were still going six metres
+                // a second, so that what has all but stopped does not glow on. By the clock alone, with its far end slow, a flame
+                // was white-hot nearly to its tip and a fifth longer.)
+                float cools = (q.flags & (JetGas | Ballistic)) == JetGas ? q.cool * (push + 6f) * dt : q.cool * dt;
                 q.heat *= cools < 0.08f ? 1f / (1f + cools) : (float)Math.Exp(-cools);
                 if (q.heat < 0.002f) q.heat = 0f;
                 // (in the way of something coming, and big: to be split before it gets here, see Wakes.cs)
@@ -1716,6 +1753,9 @@ namespace VolumetricExplosions
         float ventedAt;
         readonly bool riding;                                     // this patch goes along with a ship (see Frame)
         Vector3 ridesGoing;                                       // and how fast, over the ground, in its own axes
+        Vector3 jolt;                                             // by how much the patch's own speed over the ground changed in the last step (see Jolt)
+        Vector3d rodeB, rodeGoingB;                               // where its middle was over the ground a step ago, and how fast it was going, in the body's own axes
+        bool rode;
 
         /// <summary>Whether this patch goes along with a ship, and with what.</summary>
         public bool Riding => riding;
@@ -1739,6 +1779,32 @@ namespace VolumetricExplosions
             wantX = back * Vector3.right; wantY = back * Vector3.up; wantZ = back * Vector3.forward;
             wantTurned = true;
         }
+
+        /// <summary>
+        /// A patch that goes along with a ship is fixed to a point on it, and that point's speed over the ground changes: as
+        /// the ship gathers speed, and above all as it turns, when its tail swings one way and its nose the other. What is
+        /// in the patch is gas in the air, and none of that is the gas's business: it goes on as it was going. So by as much
+        /// as the patch's own speed has changed in a step, everything in it is going the other way, as the patch sees it.
+        /// (Without this the patch carried its gas along with every swing of the tail: a flame turned with its ship as one
+        /// piece.) Found from where the patch's middle is over the ground, step by step, in the body's own axes, which no
+        /// shifting of the scene's coordinates disturbs. A jump (the ship put somewhere else, the scene loaded) is not a
+        /// change of speed, and is let pass.
+        /// </summary>
+        void Jolt(float dt)
+        {
+            jolt = Vector3.zero;
+            if (!frame.Riding || dt < 1e-4f || dt > 0.2f) { rode = false; return; }
+            Vector3d nowB = body.GetRelSurfacePosition(frame.origin);
+            if (!rode) { rodeB = nowB; rodeGoingB = Vector3d.zero; rode = true; settled = 0; return; }
+            Vector3d goingB = (nowB - rodeB) / dt;
+            Vector3d changeB = goingB - rodeGoingB;
+            rodeB = nowB; rodeGoingB = goingB;
+            // (the first step has no speed before it to set against; and more than this in one step is no ship's doing)
+            if (settled < 2) { settled++; return; }
+            if (changeB.sqrMagnitude > 12.0 * 12.0) { settled = 0; return; }
+            jolt = frame.DirToLocal(body.BodyFrame.LocalToWorld(changeB.xzy).xzy);
+        }
+        int settled;
 
         /// <summary>
         /// What is under a patch that goes along with a ship, looked for afresh every frame: the ground or the sea, as a

@@ -22,7 +22,7 @@ namespace VolumetricExplosions
     [KSPAddon(KSPAddon.Startup.Flight, false)]
     public sealed class Addon : MonoBehaviour
     {
-        public const string Version = "0.6.3";
+        public const string Version = "0.6.4";
 
         static GameObject[] ours;            // built once, reused for every flight
         static Transform shelf;              // an inactive parent that keeps the templates from playing
@@ -124,6 +124,14 @@ namespace VolumetricExplosions
         /// <summary>For measuring how steady the picture is (development build; never read from the file): move the samples along each ray by this part of a step, make the grid's cells this much bigger, move the grid by this part of a cell, draw only part of the picture (see the shader), and (1) leave the smoke where each grid has it instead of carrying it on between grids.</summary>
         public static float TestCloudGrids = 0f, TestCloudRepeat = 0f, TestCloudMass = 0f;      // (development build, for tuning clouds made of thermals: how much longer between grids than usual; the billows' repeat as a share of the thermal's radius; how much thicker)
         public static float TestLattice = 0f, TestCell = 1f, TestShift = 0f, TestView = 0f, TestSmoke = 0f;
+        // An engine's flame (see Site.Flame, the mover at JetGas, and TuneJet): its gas leaves at so many of the flame's lengths a
+        // second; the first so much of the flame is the stretch it is not slowed in; how uneven it comes out (0: as even as
+        // before 0.6.4); how far aside the whole jet wavers, against how far it goes on; and its drawn pattern runs down it
+        // at so many of its own sizes a second at the nozzle, and half as fast so much of the flame's length down. (Fields
+        // here so that a development build can try others while it runs: dev_fx_set.)
+        public static float JetPace = 9f, JetCore = 0.25f, JetUneven = 1f, JetWavers = 0.05f, JetRuns = 30f, JetRunsOn = 0.33f;
+        // (and the line its pattern is drawn along comes round to the nozzle's so many of the gas's own times late: the time the gas would take over the flame's length at the speed it leaves at)
+        public static float JetLags = 1.2f;
         public static float TestGround;                // (for seeing what the sounding of the ground is worth: 1 takes the ground as one tilted plane, as it used to be taken)
         public static float TestWind = -1f, TestWindSpeed = 4f;      // (for testing one thing against another in the same wind: which way it blows, in degrees round from east through north, and how hard, in metres a second ten metres up. Less than nought: the wind of the place and time, as usual)
         public static float TestTurns;                 // (for seeing what it is worth that each bit of smoke goes through its billows' rounds at its own pace: 1 puts all of it on the same round, as it used to be)
