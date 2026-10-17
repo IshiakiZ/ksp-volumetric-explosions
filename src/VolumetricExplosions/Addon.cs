@@ -22,7 +22,7 @@ namespace VolumetricExplosions
     [KSPAddon(KSPAddon.Startup.Flight, false)]
     public sealed class Addon : MonoBehaviour
     {
-        public const string Version = "0.7.0";
+        public const string Version = "0.7.1";
 
         static GameObject[] ours;            // built once, reused for every flight
         static Transform shelf;              // an inactive parent that keeps the templates from playing

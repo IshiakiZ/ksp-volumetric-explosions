@@ -390,7 +390,7 @@ namespace VolumetricExplosions
         }
 
         // ---- how a fire in the open is drawn (see firePattern in tools/shaderpack/volume.glsl)
-        static readonly int fireNote = Shader.PropertyToID("_VolFire");
+        static readonly int fireNote = Shader.PropertyToID("_VolFire"), fireGoneNote = Shader.PropertyToID("_VolFireGone");
 
         /// <summary>
         /// A fire's flames in the open (not an engine's: see TuneJet): their pattern rises through the burning gas at a couple of
@@ -407,7 +407,20 @@ namespace VolumetricExplosions
             if (biggest <= 0f) biggest = 0.6f;
             float size = Mathf.Clamp(biggest, 0.3f, 2.5f);
             boxMaterial.SetVector(fireNote, new Vector4(time * 1.8f, 1f / size, vacuum ? 0.3f : 0.9f, Settings.TestFire >= 1f ? 0f : 1f));
+            // A fire that burns where it is, fed from its fuel as fast as its gas rises off it, stands where it is from one grid to the
+            // next; flame that goes somewhere (a fireball rising, burning wreckage flying, a burning ship going by) is carried on with
+            // its gas between grids, as smoke is (see _VolFireGone in volume.glsl). (Carried on as smoke is, a pool's fire rose off
+            // its pool between one grid and the next, and dropped back on to it with the next, which came four times a second when
+            // the game was busy: "the fire levitates a bit, resets, levitates a bit".)
+            bool goes = fireCount == 0 || fragCount > 0 || time - fireballAt < 4f || time - blazeSeen < 1f || Settings.TestFire >= 1f;
+            flameCarried = Mathf.MoveTowards(flameCarried, goes ? 1f : 0f, 2f * Time.deltaTime);
+            // (And its flames' pattern is read where the smoke as a whole has gone by now, which goes on smoothly from frame to frame:
+            // see firePattern. From where the shader has each bit of smoke, the grid's "was" carried on since it was made, that is so
+            // much further on as the smoke as a whole has gone since then, and back by as far as the box has been carried along with it.)
+            Vector3d further = airGoneTurned - shownGoneTurned;
+            boxMaterial.SetVector(fireGoneNote, new Vector4(slid.x - (float)further.x, slid.y - (float)further.y, slid.z - (float)further.z, flameCarried));
         }
+        float flameCarried = 1f;      // (how far a fire's flame is carried on with its gas between grids, 0 to 1: see TuneFire)
 
         // How bright an engine's flame is at a quarter, half, three quarters and full heat, against a fire in the open. Steeply
         // more the hotter: what gas gives off in light the eye sees goes with its heat many times over, so the white-hot core is

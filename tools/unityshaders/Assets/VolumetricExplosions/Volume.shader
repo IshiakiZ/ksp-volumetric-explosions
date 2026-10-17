@@ -116,6 +116,7 @@ Shader "VolumetricExplosions/Volume"
             float4 _VolJetAt6;
             float4 _VolJetAt7;
             float4 _VolFire;     // A fire in the open (not an engine's): x how far its flames' pattern has risen through the burning gas, metres; y one over the size of its tongues, per metre; z how far thin flame is torn into tongues (0 to 1); w 1 to draw it so (0: as a glow, as until 2026-10-10)
+            float4 _VolFireGone;     // xyz: what takes where the smoke now here was when the grid was made (the grid's "was", carried on as it is since) to where its fire's pattern is read: see firePattern; w: how far its flame is carried on with its gas between grids (1 as smoke is; 0 a fire that burns where it is, fed as fast as it rises: it stands still)
             float4 _VolTint;     // rgb: the hue of the dust here
             float4 _VolHot1;     // rgb: the colour of flame at a quarter of full heat,
             float4 _VolHot2;     // at half,
@@ -365,6 +366,11 @@ Shader "VolumetricExplosions/Volume"
             // folds. The pattern is carried with the burning gas (read where the gas "was", as the billows are) and rises through it as the
             // flames lick upward, stretched up a little as they are; at a size that goes with the fire (see TuneFire). Two sizes of lump,
             // 0 to 1, about 0.45 on the whole.
+            // (Read where the smoke as a whole has gone by this frame, not where each bit of it was when the grid in use was made: that place
+            // is carried on with the gas between one grid and the next, and put back with each new grid, and a fire's gas rises fast. When
+            // the game was busy and its grids came four times a second, the flames rose with the gas and dropped back four times a second:
+            // "the fire levitates a bit, resets, levitates a bit". The mod says how far the smoke as a whole has gone since the grid was
+            // made, every frame: _VolFireGone.)
             float firePattern(float3 was, float level)
             {
                 float3 q = float3(was.x, was.y * 0.62, was.z) * _VolFire.y;
@@ -566,6 +572,16 @@ Shader "VolumetricExplosions/Volume"
                     }
                     float4 amount = SampleLod(_Amount, at, 0.0);
                     float smoke = amount.r * 0.99611 + amount.g * 0.0038911, flame = amount.b * 0.99611 + amount.a * 0.0038911;
+                    // (A fire that burns where it is, fed from its fuel as fast as its gas rises off it, is the same from one grid to the next:
+                    // carried on with its gas between them, as smoke is, it rose off its fuel and dropped back on to it with each new grid. So
+                    // its flame, and how hot that is, are read where it is carried on to by less, or not at all: see _VolFireGone.w.)
+                    float3 atFire = at;
+                    if (_VolFireGone.w < 0.999)
+                    {
+                        atFire = p + 0.5 - gone * (perSize * _VolFireGone.w);
+                        float2 still = SampleLod(_Amount, atFire, 0.0).ba;
+                        flame = still.x * 0.99611 + still.y * 0.0038911;
+                    }
                     // (How much of the smoke here is to be seen, where an engine's trail begins: see begun. It is what the smoke hides
                     // that is cut down by it, further on, not how much smoke there is taken to be: thin smoke is cut into by the billows
                     // far more than thick (see below), and smoke taken to be half as thick, in the midst of as much as there is, was
@@ -744,17 +760,18 @@ Shader "VolumetricExplosions/Volume"
                         float thin = exp(-sigma * _VolPeak.w);
 
                         // Flame: licked into tongues, flickering, and coloured by how hot it is.
-                        float burning, fireN = -1.0;
+                        float burning, fireN = -1.0, fireHot = 0.0;
                         if (_VolFire.w > 0.5 && _VolJetLook.w <= 0.0 && flame > 0.0)
                         {
                             // A fire in the open (see firePattern): where the flame is thick it burns whole; where it thins (its edge, the tops
                             // of its tongues) the pattern cuts it into tongues with sharp edges (the steep step from nothing to flame is what
                             // makes a fire read as one: a soft ramp is a glow), brighter in the lumps of the pattern; and its cooler, thinner
                             // parts are dark with the soot it makes, pockets in the flame and smoke rolling off its tips.
-                            fireN = firePattern(was, level);
+                            fireN = firePattern(was + gone + _VolFireGone.xyz, level);
                             // (and as it cools on its way up, it thins: so low down, where it is hot, it burns whole and steady, higher up it
                             // breaks into tongues, and above them it is gone: a pool fire's continuous flame, its tongues, and its plume)
-                            float hotHere = SampleLod(_Volume, at, 0.0).a;
+                            float hotHere = SampleLod(_Volume, atFire, 0.0).a;
+                            fireHot = hotHere;
                             // (Most of a fire's flame burns whole: only where it is thin is it torn. Cut more keenly, as first tried, a young
                             // fireball, which should be luminous all through, was smoke with a few bright patches in it.)
                             float body = (1.0 - exp(-flame * _VolParams.w * 2.0)) * smoothstep(0.05, 0.35, hotHere);
@@ -824,7 +841,7 @@ Shader "VolumetricExplosions/Volume"
                             continue;
                         }
                         float4 air = SampleLod(_Volume, at, 0.0);
-                        float heat = jetN >= 0.0 ? air.a * 1.2 * clamp(1.0 + (jetN - 0.45) * lerp(_VolJetFlow.y, _VolJetFlow.z, jetFar), 0.15, 1.2) * jetCooled + 0.9 * diamonds : fireN >= 0.0 ? air.a * 1.2 * (0.5 + 0.85 * fireN) : air.a * 1.2 * (0.72 + 0.56 * lerp(lump, 0.5, _VolPeak.y));
+                        float heat = jetN >= 0.0 ? air.a * 1.2 * clamp(1.0 + (jetN - 0.45) * lerp(_VolJetFlow.y, _VolJetFlow.z, jetFar), 0.15, 1.2) * jetCooled + 0.9 * diamonds : fireN >= 0.0 ? fireHot * 1.2 * (0.5 + 0.85 * fireN) : air.a * 1.2 * (0.72 + 0.56 * lerp(lump, 0.5, _VolPeak.y));
                         float3 hot = heat < 0.25 ? _VolHot1.rgb * (heat * 4.0) : heat < 0.5 ? lerp(_VolHot1.rgb, _VolHot2.rgb, heat * 4.0 - 1.0) : heat < 0.75 ? lerp(_VolHot2.rgb, _VolHot3.rgb, heat * 4.0 - 2.0) : lerp(_VolHot3.rgb, _VolHot4.rgb, min(heat * 4.0 - 3.0, 1.0));
                         // (A fire's light goes with its heat far more steeply than its colour does (a black body's light in what the eye sees
                         // grows many times over between a dull red and a yellow heat): its hottest parts, low in it and in the lumps of the
