@@ -4,6 +4,7 @@ Shader "VolumetricExplosions/Shadow"
     Properties
     {
         _Volume ("Volume", 3D) = "" {}
+        _Flow ("Flow", 3D) = "" {}
     }
     SubShader
     {
@@ -64,7 +65,10 @@ Shader "VolumetricExplosions/Shadow"
             float4 _ShadowGridZ;
             float4 _ShadowSun;     // xyz: towards the sun, in the grid box's own axes (and its sizes); w: how dark a shadow may be (0: none)
             float4 _ShadowSunWorld;     // xyz: towards the sun, in the scene's axes
+            float4 _VolFlow;     // as the smoke's own (volume.glsl): x twice how far the fastest smoke on the grid has gone since the grid was made, m; z the farthest it is carried on, m
+            float4 _VolSize;     // xyz: the size of the grid's box, m
             Texture3D _Volume; SamplerState sampler_Volume;
+            Texture3D _Flow; SamplerState sampler_Flow;     // which way the smoke was going when the grid was made, as a share of the fastest (0.5: not at all)
             Texture2D _CameraDepthTexture; SamplerState sampler_CameraDepthTexture;
 
             struct v2f
@@ -126,6 +130,12 @@ Shader "VolumetricExplosions/Shadow"
                 float t0 = max(max(lo.x, lo.y), max(lo.z, 0.0)), t1 = min(min(hi.x, hi.y), hi.z);
                 if (t1 <= t0) discard;
                 float3 e = clamp(p + d * (t0 + 1e-3 * (t1 - t0)), ((float3)(-0.5)), ((float3)(0.5)));
+                // Carried on, as the smoke itself is between one grid and the next (volume.glsl): the grid is a moment old, so it is
+                // read where the smoke now on the way to the sun was when the grid was made, and the shadow goes along with the smoke.
+                float4 going = SampleLod(_Flow, e + 0.5, 0.0);
+                float3 gone = (going.xyz - 0.5) * _VolFlow.x;
+                gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
+                e = clamp(e - gone / max(_VolSize.xyz, ((float3)(1e-3))), ((float3)(-0.5)), ((float3)(0.5)));
                 float4 air = SampleLod(_Volume, e + 0.5, 0.0);
                 float before = (air.r * 0.99611 + air.g * 0.0038911) * 16.0;
                 // (as the smoke's own light reckons it: a part of the sunlight finds its way round inside a cloud)

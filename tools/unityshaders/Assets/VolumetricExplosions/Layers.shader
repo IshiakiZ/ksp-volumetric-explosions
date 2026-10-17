@@ -7,6 +7,8 @@ Shader "VolumetricExplosions/Layers"
         _VolAtlasDepth ("VolAtlasDepth", 2D) = "" {}
         _VolFull ("VolFull", 2D) = "" {}
         _VolFullDepth ("VolFullDepth", 2D) = "" {}
+        _CameraDepthTexture ("CameraDepthTexture", 2D) = "" {}
+        _WeatherCloudsPic ("WeatherCloudsPic", 2D) = "" {}
     }
     SubShader
     {
@@ -65,24 +67,30 @@ Shader "VolumetricExplosions/Layers"
             float4 _VolCamera;     // x: 1 if the camera drawing this has a depth picture of the scene, w: what the depths kept with the smoke were multiplied by (for this camera)
             float4 _VolLayers;     // x: how many patches were drawn into the atlas for this camera, y: 1 if the ships' patches were drawn into the full-sized picture, z: slots to a row of the atlas, w: 1 if a slot is half the screen's size each way (0: the screen's size)
             float4 _VolSlots;     // xy: the size of a slot, in pixels; z: (testing) 1 lays the patches over one another in the order they were drawn, as the game used to (no sorting by depth); 2 shows each patch in a colour of its own; 3 the same laid in the old order; 4 the nearest two patches' depths and spreads as colours; 5 sorted and laid over one another as until 2026-10-10
+            float4 _WeatherClouds;     // x: 1 if a weather mod's clouds were laid on before the smoke in this camera's drawing (Natural Weather 0.4 and on)
             Texture2D _VolAtlas; SamplerState sampler_VolAtlas;     // the patches' smoke, each in its slot: its colour times how much it hides, and how much it hides
             Texture2D _VolAtlasDepth; SamplerState sampler_VolAtlasDepth;     // r: how far along the ray what it hides lies, on the whole, g: how widely that is spread along it, each times how much it hides (and times _VolCamera.w)
             Texture2D _VolFull; SamplerState sampler_VolFull;     // the same, at the screen's full size, for the ships' patches
             Texture2D _VolFullDepth; SamplerState sampler_VolFullDepth;
             Texture2D _CameraDepthTexture; SamplerState sampler_CameraDepthTexture;
+            Texture2D _WeatherCloudsPic; SamplerState sampler_WeatherCloudsPic;     // those clouds: their light, and how much shows through them
+            Texture2D _WeatherCloudsDist; SamplerState sampler_WeatherCloudsDist;     // and how far off along the ray each is, on the whole, in kilometres
 
             struct v2f
             {
                 float4 pos : SV_POSITION;
+                float2 vs_TEXCOORD0 : TEXCOORD0;
             };
 
             v2f vert(float3 in_POSITION0 : POSITION)
             {
                 v2f OUT = (v2f)0;
                 // (a sheet over that part of the screen: its corners are 0 and 1 each way)
+                OUT.vs_TEXCOORD0 = ((float2)(0.0));
                 if (_VolSheet.z <= _VolSheet.x) { OUT.pos = float4(2.0, 2.0, 2.0, 1.0); return OUT; }
-                float2 corner = lerp(_VolSheet.xy, _VolSheet.zw, in_POSITION0.xy);
-                OUT.pos = float4(corner.x, corner.y * _ProjectionParams.x, 0.0, 1.0);
+                float2 at = lerp(_VolSheet.xy, _VolSheet.zw, in_POSITION0.xy);
+                OUT.pos = float4(at.x, at.y * _ProjectionParams.x, 0.0, 1.0);
+                OUT.vs_TEXCOORD0 = at * 0.5 + 0.5;
                 return OUT;
             }
 
@@ -152,7 +160,7 @@ Shader "VolumetricExplosions/Layers"
                 int2 c00 = clamp(base, ((int2)(0)), last), c10 = clamp(base + int2(1, 0), ((int2)(0)), last), c01 = clamp(base + int2(0, 1), ((int2)(0)), last), c11 = clamp(base + int2(1, 1), ((int2)(0)), last);
                 float4 share = float4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
                 bool weighed = !small || _VolCamera.x < 0.5;
-                [loop] for (int i = 0; i < 15; i++)
+                { [loop] for (int i = 0; i < 15; i++)
                 {
                     if (i >= inAtlas) break;
                     int2 origin = int2(i - (i / perRow) * perRow, i / perRow) * slot;
@@ -185,7 +193,7 @@ Shader "VolumetricExplosions/Layers"
                     spreads[n] = deep.y / (max(smoke.a, 1e-4) * scale);
                     kinds[n] = i;
                     n++;
-                }
+                } }
                 if (_VolLayers.y > 0.5)
                 {
                     float4 smoke = TexelFetch(_VolFull, pixel, 0);
@@ -200,12 +208,39 @@ Shader "VolumetricExplosions/Layers"
                     }
                 }
                 if (n == 0) discard;
+
+                // Clouds laid on before the smoke. Natural Weather lays its clouds on in their turn among the see-through things, after
+                // the sky and before this, so that smoke in front of a cloud is drawn over it (until its 0.4.0 the clouds were laid on
+                // after everything, over smoke however near). Smoke that lies behind a cloud is then dimmed here by the cloud in front of
+                // it: its light and how much it hides alike, since what it would hide is the cloud itself, already in the picture. How
+                // much of a patch's smoke lies behind the cloud goes by where along the ray each lies, as between two patches below
+                // (a cloud is taken as spread over a sixth of its distance, sixty metres at the least). Exact where either is thin or
+                // either is wholly in front.
+                if (_WeatherClouds.x > 0.5)
+                {
+                    // (read where the screen's point is as the sheet is laid, not by the pixel's row: the weather draws its pictures the
+                    // same way, so the two agree on any system, whichever way up a system counts its rows)
+                    float2 onScreen = IN.vs_TEXCOORD0;
+                    float cover = clamp(1.0 - SampleLod(_WeatherCloudsPic, onScreen, 0.0).a, 0.0, 1.0);
+                    float cloudAt = SampleLod(_WeatherCloudsDist, onScreen, 0.0).r * 1000.0;
+                    if (cover > 0.002 && cloudAt > 0.0)
+                    {
+                        float cloudSpread = max(cloudAt / 6.0, 60.0);
+                        { [loop] for (int i = 0; i < n; i++)
+                        {
+                            float wide = sqrt(spreads[i] * spreads[i] + cloudSpread * cloudSpread);
+                            float behind = 1.0 / (1.0 + exp(-clamp(1.702 * (depths[i] - cloudAt) / wide, -30.0, 30.0)));
+                            colours[i] *= 1.0 - cover * behind;
+                        } }
+                    }
+                }
+
                 if (test == 2 || test == 3)
-                    [loop] for (int i = 0; i < n; i++) colours[i].rgb = colours[i].a * (kinds[i] == 15 ? ((float3)(1.0)) : hue(kinds[i]));
+                    { [loop] for (int i = 0; i < n; i++) colours[i].rgb = colours[i].a * (kinds[i] == 15 ? ((float3)(1.0)) : hue(kinds[i])); }
 
                 // Nearest first (for the test views: the picture itself needs no order). (Insertion: there are seldom more than two or three here.)
                 if (test != 1 && test != 3)
-                    [loop] for (int i = 1; i < n; i++)
+                    { [loop] for (int i = 1; i < n; i++)
                     {
                         float4 c = colours[i];
                         float d = depths[i], w = spreads[i];
@@ -217,16 +252,16 @@ Shader "VolumetricExplosions/Layers"
                             j--;
                         }
                         colours[j + 1] = c; depths[j + 1] = d; spreads[j + 1] = w; kinds[j + 1] = k;
-                    }
+                    } }
                 else
                     // (testing: the order they were drawn in, which is the farthest box first, as the game sorts them, and the ships'
                     // patches last of all; reversed here, to be laid nearest first like the rest)
-                    [loop] for (int i = 0; i < n / 2; i++)
+                    { [loop] for (int i = 0; i < n / 2; i++)
                     {
                         float4 c = colours[i]; float d = depths[i], w = spreads[i]; int k = kinds[i];
                         colours[i] = colours[n - 1 - i]; depths[i] = depths[n - 1 - i]; spreads[i] = spreads[n - 1 - i]; kinds[i] = kinds[n - 1 - i];
                         colours[n - 1 - i] = c; depths[n - 1 - i] = d; spreads[n - 1 - i] = w; kinds[n - 1 - i] = k;
-                    }
+                    } }
 
                 // (testing: how far behind the nearest patch's smoke the next lies, red, 0 to 10 metres; how widely the nearest is spread along
                 // the ray, green, and the next, blue, 0 to 5 metres; how much the nearest hides, as the picture's own alpha)
@@ -241,7 +276,7 @@ Shader "VolumetricExplosions/Layers"
                 {
                     // (testing: each laid over the next in the order they were drawn, as the game used to)
                     float4 laid = colours[n - 1];
-                    [loop] for (int i = n - 2; i >= 0; i--) laid = colours[i] + laid * (1.0 - colours[i].a);
+                    { [loop] for (int i = n - 2; i >= 0; i--) laid = colours[i] + laid * (1.0 - colours[i].a); }
                     result = float4(max(laid.rgb, ((float3)(0.0))), clamp(laid.a, 0.0, 1.0));
                     return result;
                 }
@@ -251,7 +286,7 @@ Shader "VolumetricExplosions/Layers"
                     // two smokes in one stretch of air where their depths are closer than their spreads together)
                     float4 result_ = colours[n - 1];
                     float behind = depths[n - 1], behindSpread = spreads[n - 1];
-                    [loop] for (int i = n - 2; i >= 0; i--)
+                    { [loop] for (int i = n - 2; i >= 0; i--)
                     {
                         float4 c = colours[i];
                         float d = depths[i];
@@ -267,7 +302,7 @@ Shader "VolumetricExplosions/Layers"
                         result_ = over;
                         behind = d;
                         behindSpread = spreads[i];
-                    }
+                    } }
                     result = float4(max(result_.rgb, ((float3)(0.0))), clamp(result_.a, 0.0, 1.0));
                     return result;
                 }
@@ -285,11 +320,11 @@ Shader "VolumetricExplosions/Layers"
                 // smoke a little in front of the cloud's depth on the whole was laid over it, more or less whole, in spots.)
                 float3 light = ((float3)(0.0));
                 float through = 1.0;
-                [loop] for (int i = 0; i < n; i++)
+                { [loop] for (int i = 0; i < n; i++)
                 {
                     through *= 1.0 - colours[i].a;
                     float seen = 1.0;
-                    [loop] for (int j = 0; j < n; j++)
+                    { [loop] for (int j = 0; j < n; j++)
                     {
                         if (j == i) continue;
                         // (never sharper than a few tenths of a metre, more further off, where a pixel is wider and depths are kept less finely)
@@ -297,9 +332,9 @@ Shader "VolumetricExplosions/Layers"
                         float wide = sqrt(spreads[i] * spreads[i] + spreads[j] * spreads[j] + least * least);
                         float ahead = clamp(1.702 * (depths[i] - depths[j]) / wide, -30.0, 30.0);
                         seen *= 1.0 - colours[j].a / (1.0 + exp(-ahead));      // (the share of the other's smoke in front of this one's, a bell curve's sum)
-                    }
+                    } }
                     light += colours[i].rgb * seen;
-                }
+                } }
                 result = float4(max(light, ((float3)(0.0))), clamp(1.0 - through, 0.0, 1.0));
                 return result;
             }

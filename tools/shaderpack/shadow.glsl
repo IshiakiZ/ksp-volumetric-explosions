@@ -34,7 +34,10 @@ uniform vec4 _ShadowGridY;
 uniform vec4 _ShadowGridZ;
 uniform vec4 _ShadowSun;       // xyz: towards the sun, in the grid box's own axes (and its sizes); w: how dark a shadow may be (0: none)
 uniform vec4 _ShadowSunWorld;  // xyz: towards the sun, in the scene's axes
+uniform vec4 _VolFlow;         // as the smoke's own (volume.glsl): x twice how far the fastest smoke on the grid has gone since the grid was made, m; z the farthest it is carried on, m
+uniform vec4 _VolSize;         // xyz: the size of the grid's box, m
 uniform sampler3D _Volume;
+uniform sampler3D _Flow;       // which way the smoke was going when the grid was made, as a share of the fastest (0.5: not at all)
 uniform sampler2D _CameraDepthTexture;
 in vec3 vs_TEXCOORD0;
 in vec4 vs_TEXCOORD1;
@@ -66,6 +69,12 @@ void main()
     float t0 = max(max(lo.x, lo.y), max(lo.z, 0.0)), t1 = min(min(hi.x, hi.y), hi.z);
     if (t1 <= t0) discard;
     vec3 e = clamp(p + d * (t0 + 1e-3 * (t1 - t0)), vec3(-0.5), vec3(0.5));
+    // Carried on, as the smoke itself is between one grid and the next (volume.glsl): the grid is a moment old, so it is
+    // read where the smoke now on the way to the sun was when the grid was made, and the shadow goes along with the smoke.
+    vec4 going = textureLod(_Flow, e + 0.5, 0.0);
+    vec3 gone = (going.xyz - 0.5) * _VolFlow.x;
+    gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
+    e = clamp(e - gone / max(_VolSize.xyz, vec3(1e-3)), vec3(-0.5), vec3(0.5));
     vec4 air = textureLod(_Volume, e + 0.5, 0.0);
     float before = (air.r * 0.99611 + air.g * 0.0038911) * 16.0;
     // (as the smoke's own light reckons it: a part of the sunlight finds its way round inside a cloud)

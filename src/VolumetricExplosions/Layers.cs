@@ -46,6 +46,8 @@ namespace VolumetricExplosions
                         : SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.ARGBHalf) ? RenderTextureFormat.ARGBHalf : RenderTextureFormat.Default;
         }
 
+        readonly Matrix4x4[] seen = new Matrix4x4[2];      // what took a place in the scene to its place on each camera's picture, the last time it drew
+        readonly int[] seenFrame = { -10, -10 };
         readonly CommandBuffer[] commands = new CommandBuffer[2];
         readonly Camera[] attached = new Camera[2];
         readonly List<Site> world = new List<Site>(), ships = new List<Site>(), inRange = new List<Site>();
@@ -147,6 +149,13 @@ namespace VolumetricExplosions
             Matrix4x4 view = camera.projectionMatrix * camera.worldToCameraMatrix;
             Vector4 rect = new Vector4(2f, 2f, -2f, -2f);
 
+            // (whether this camera's picture is smoothed between frames, and what takes a place in the scene to its place
+            // on the picture now, without the smoothing's shake, and took it there a frame ago)
+            bool follows = Settings.Follow && Assets.Motion != null && (camera.depthTextureMode & DepthTextureMode.MotionVectors) != 0;
+            Matrix4x4 seesNow = camera.nonJitteredProjectionMatrix * camera.worldToCameraMatrix;
+            Matrix4x4 seesBefore = seenFrame[which] == Time.frameCount - 1 ? seen[which] : seesNow;
+            seen[which] = seesNow; seenFrame[which] = Time.frameCount;
+
             inRange.Clear();
             foreach (Site s in world) if (s.Within(camera)) inRange.Add(s);
             int slots = inRange.Count;
@@ -165,6 +174,19 @@ namespace VolumetricExplosions
                     c.DrawMesh(Assets.Cube, s.BoxMatrix, s.Marching, 0, 0);
                     Covers(ref rect, view, s.BoxMatrix, camera);
                 }
+                // Where this camera's picture is smoothed between frames (it then keeps a picture of how far each pixel has
+                // moved): the smoke writes into that picture where it is going, each patch over its own smoke, so that the
+                // smoothing follows smoke that moves instead of smearing it (see tools/shaderpack/motion.glsl).
+                if (follows)
+                {
+                    c.SetRenderTarget(BuiltinRenderTextureType.MotionVectors);
+                    for (int k = 0; k < slots; k++)
+                    {
+                        Site s = inRange[k];
+                        Material m = s.Follows(atlas, atlasDepth, new Vector4((k % perRow) * slotWide, (k / perRow) * slotTall, half ? 1f : 0f, 0f), seesNow, seesBefore, Time.deltaTime);
+                        if (m != null) c.DrawMesh(Assets.Cube, s.BoxMatrix, m, 0, 0);
+                    }
+                }
             }
             int shipsIn = 0;
             foreach (Site s in ships) if (s.Within(camera)) shipsIn++;
@@ -180,6 +202,18 @@ namespace VolumetricExplosions
                     s.Marching.SetVector(slotNote, Vector4.zero);
                     c.DrawMesh(Assets.Cube, s.BoxMatrix, s.Marching, 0, 0);
                     Covers(ref rect, view, s.BoxMatrix, camera);
+                }
+                // (and the ships' flames say where they are going: with the ship. Left to the ground's motion behind them,
+                // a flame over ground that streams past was smeared along the ground's way.)
+                if (follows)
+                {
+                    c.SetRenderTarget(BuiltinRenderTextureType.MotionVectors);
+                    foreach (Site s in ships)
+                    {
+                        if (!s.Within(camera)) continue;
+                        Material m = s.Follows(full, fullDepth, Vector4.zero, seesNow, seesBefore, Time.deltaTime);
+                        if (m != null) c.DrawMesh(Assets.Cube, s.BoxMatrix, m, 0, 0);
+                    }
                 }
             }
             if (slots + shipsIn == 0) { NotFor(); return; }
@@ -300,6 +334,7 @@ namespace VolumetricExplosions
             sheetRenderer = sheet.AddComponent<MeshRenderer>();
             sheetRenderer.sharedMaterial = material;
             sheetRenderer.shadowCastingMode = ShadowCastingMode.Off;
+            sheetRenderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;      // (see Site.TuneShadow)
             sheetRenderer.receiveShadows = false;
             NotFor();
         }

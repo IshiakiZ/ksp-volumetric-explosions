@@ -162,7 +162,7 @@ namespace VolumetricExplosions
             float jitter = 0.1f + 0.2f * size;
             o.x = at.x + Random.Range(-jitter, jitter); o.y = at.y + Random.Range(-jitter, jitter); o.z = at.z + Random.Range(-jitter, jitter);
             o.vx = going.x * 0.1f + Random.Range(-0.4f, 0.4f); o.vy = going.y * 0.1f + Random.Range(-0.3f, 0.5f); o.vz = going.z * 0.1f + Random.Range(-0.4f, 0.4f);
-            o.tint = (byte)Mathf.Clamp(tr.tint, 0, 7);
+            o.tint = (byte)Mathf.Clamp(tr.tint, 0, FireKinds - 1);
             o.tile = Random.value < 0.4f ? Wispy() : Lumpy();
             bool burning = tr.fire > 0.01f && Random.value < Mathf.Clamp01(tr.fire * 1.5f);
             float smoke = Mathf.Clamp01(tr.smoke);

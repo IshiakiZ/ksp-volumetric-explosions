@@ -515,7 +515,7 @@ Shader "VolumetricExplosions/Volume"
                 float3 colour = ((float3)(0.0));
                 float through = 1.0;
                 float deep = 0.0, deep2 = 0.0;      // the depth of each step along the ray (and its square), weighed by how much it hid of what is behind (see result1)
-                [loop] for (int i = 0; i < 288; i++)
+                { [loop] for (int i = 0; i < 288; i++)
                 {
                     if (through < 0.02) break;
                     if (k >= kLast)
@@ -886,7 +886,7 @@ Shader "VolumetricExplosions/Volume"
                         // And out of the smoke, as long as the grid's cells again.
                         if (clear >= coarse && Mod(k, coarse) < 0.5) { fine = false; stride = coarse; }
                     }
-                }
+                } }
                 // The walk stops when no more than a fiftieth of what is behind the smoke would still get through. That fiftieth
                 // is not let through: smoke thick enough to have stopped the walk hides everything, and all smoke hides a
                 // fiftieth more than the walk made it, so that there is no step where the one becomes the other. (Let through,

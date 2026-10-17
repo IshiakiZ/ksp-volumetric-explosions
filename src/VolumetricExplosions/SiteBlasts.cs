@@ -1084,6 +1084,80 @@ namespace VolumetricExplosions
                 glows[n++] = Glow(lamps[k].x, lamps[k].y, lamps[k].z, lamps[k].flash * (0.55f + 0.6f * s), v, v * 0.95f, v * 0.85f);
             }
             glowFront.SetParticles(glows, n);
+            // (kept as they are, to be dimmed by the smoke in front of each just before the frame is drawn: see SeeFlashes)
+            Array.Copy(glows, flashes, n);
+            flashCount = n;
+        }
+
+        /// <summary>
+        /// A blast's flash is drawn after all the smoke (it is the first thing seen of a blast, before there is any smoke),
+        /// so nothing used to hide it: in a crash, where one thing goes up after another, each later flash glared through
+        /// the black cloud of the earlier ones standing in front of it (the user saw "flashes showing above the smoke").
+        /// Now each flash is dimmed by as much smoke and flame as lies on the straight line from the camera to it, in
+        /// every patch of air: walked through the grids the shader draws from (see Optical). A flash in the open, or in
+        /// front of the smoke, is as bright as ever; one behind a thick cloud is gone. Once a frame, when every patch has
+        /// been put where it is drawn (Air.BeforeDrawing).
+        /// </summary>
+        internal void SeeFlashes(Vector3 eye, List<Site> all)
+        {
+            if (flashCount == 0 || glowFront == null || Settings.TestFlash == 1f) return;
+            float least = 1f;
+            for (int i = 0; i < flashCount; i++)
+            {
+                ParticleSystem.Particle p = flashes[i];
+                Vector3 at = t.TransformPoint(p.position);
+                float deep = 0f;
+                for (int k = 0; k < all.Count; k++) deep += all[k].Optical(eye, at);
+                float seen = Mathf.Exp(-deep);
+                least = Mathf.Min(least, seen);
+                Color32 c = p.startColor;
+                p.startColor = new Color32((byte)(c.r * seen + 0.5f), (byte)(c.g * seen + 0.5f), (byte)(c.b * seen + 0.5f), c.a);
+                flashesSeen[i] = p;
+            }
+            glowFront.SetParticles(flashesSeen, flashCount);
+            if (Settings.TestFlash == 2f && Time.time - flashSaid > 1f)
+            {
+                flashSaid = Time.time;
+                Addon.Log("flashes: " + flashCount + ", the most hidden let through " + least.ToString("F3"));
+            }
+        }
+
+        float flashSaid = -10f;
+
+        /// <summary>
+        /// How much this patch's smoke and flame block on the straight line between two places in the scene, as an optical
+        /// depth (what each metre of it blocks, added up over the metres): read from the grid last handed to the shader
+        /// (what it hides per metre, the same numbers the volume is drawn from, without the shader's fine detail), where
+        /// its box is now. Nothing if the line misses the box.
+        /// </summary>
+        internal float Optical(Vector3 from, Vector3 to)
+        {
+            if (box == null || boxRenderer == null || !boxRenderer.enabled) return 0f;
+            Transform b = box.transform;
+            Vector3 a = b.InverseTransformPoint(from), d = b.InverseTransformPoint(to) - a;
+            // (where the line is inside the box, which is -0.5 to 0.5 each way in its own units)
+            float t0 = 0f, t1 = 1f;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                float o = a[axis], dd = d[axis];
+                if (Mathf.Abs(dd) < 1e-7f) { if (o < -0.5f || o > 0.5f) return 0f; continue; }
+                float ta = (-0.5f - o) / dd, tb = (0.5f - o) / dd;
+                if (ta > tb) { float swap = ta; ta = tb; tb = swap; }
+                if (ta > t0) t0 = ta;
+                if (tb < t1) t1 = tb;
+                if (t0 >= t1) return 0f;
+            }
+            const int Steps = 48;
+            float metres = Vector3.Distance(from, to) * (t1 - t0) / Steps, sum = 0f;
+            const float SmokeUnit = Thickest / 65535f, FlameUnit = ThickestFlame / 65535f;
+            for (int n = 0; n < Steps; n++)
+            {
+                Vector3 q = a + d * (t0 + (t1 - t0) * (n + 0.5f) / Steps);
+                int i = Mathf.Clamp((int)((q.x + 0.5f) * G), 0, G - 1), j = Mathf.Clamp((int)((q.y + 0.5f) * G), 0, G - 1), k = Mathf.Clamp((int)((q.z + 0.5f) * G), 0, G - 1);
+                Color32 cell = cellsB[i + G * (j + G * k)];
+                sum += ((cell.r << 8) | cell.g) * SmokeUnit + ((cell.b << 8) | cell.a) * FlameUnit;
+            }
+            return sum * metres;
         }
 
         static ParticleSystem.Particle Glow(float x, float y, float z, float size, float r, float g, float b) => new ParticleSystem.Particle

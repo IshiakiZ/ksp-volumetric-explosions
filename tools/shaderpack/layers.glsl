@@ -2,11 +2,15 @@
 #version 150
 uniform vec4 _VolSheet;      // the part of the screen any patch's smoke can be on, as the camera's projection gives it (-1 to 1): x0, y0, x1, y1 (x1 not beyond x0: nothing for this camera)
 in vec3 in_POSITION0;
+out vec2 vs_TEXCOORD0;       // where on the screen, 0 to 1 each way, as a weather mod's pictures of the screen are laid out (see the clouds below)
 void main()
 {
     // (a sheet over that part of the screen: its corners are 0 and 1 each way)
+    vs_TEXCOORD0 = vec2(0.0);
     if (_VolSheet.z <= _VolSheet.x) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-    gl_Position = vec4(mix(_VolSheet.xy, _VolSheet.zw, in_POSITION0.xy), 0.0, 1.0);
+    vec2 at = mix(_VolSheet.xy, _VolSheet.zw, in_POSITION0.xy);
+    gl_Position = vec4(at, 0.0, 1.0);
+    vs_TEXCOORD0 = at * 0.5 + 0.5;
 }
 #endif
 #ifdef FRAGMENT
@@ -39,6 +43,10 @@ uniform sampler2D _VolAtlasDepth; // r: how far along the ray what it hides lies
 uniform sampler2D _VolFull;       // the same, at the screen's full size, for the ships' patches
 uniform sampler2D _VolFullDepth;
 uniform sampler2D _CameraDepthTexture;
+uniform vec4 _WeatherClouds;           // x: 1 if a weather mod's clouds were laid on before the smoke in this camera's drawing (Natural Weather 0.4 and on)
+uniform sampler2D _WeatherCloudsPic;   // those clouds: their light, and how much shows through them
+uniform sampler2D _WeatherCloudsDist;  // and how far off along the ray each is, on the whole, in kilometres
+in vec2 vs_TEXCOORD0;
 out vec4 SV_Target0;
 
 // How far ahead the ray of one of a half-sized slot's pixels stopped (see volume.glsl: the nearest or the farthest of the
@@ -136,6 +144,33 @@ void main()
         }
     }
     if (n == 0) discard;
+
+    // Clouds laid on before the smoke. Natural Weather lays its clouds on in their turn among the see-through things, after
+    // the sky and before this, so that smoke in front of a cloud is drawn over it (until its 0.4.0 the clouds were laid on
+    // after everything, over smoke however near). Smoke that lies behind a cloud is then dimmed here by the cloud in front of
+    // it: its light and how much it hides alike, since what it would hide is the cloud itself, already in the picture. How
+    // much of a patch's smoke lies behind the cloud goes by where along the ray each lies, as between two patches below
+    // (a cloud is taken as spread over a sixth of its distance, sixty metres at the least). Exact where either is thin or
+    // either is wholly in front.
+    if (_WeatherClouds.x > 0.5)
+    {
+        // (read where the screen's point is as the sheet is laid, not by the pixel's row: the weather draws its pictures the
+        // same way, so the two agree on any system, whichever way up a system counts its rows)
+        vec2 onScreen = vs_TEXCOORD0;
+        float cover = clamp(1.0 - textureLod(_WeatherCloudsPic, onScreen, 0.0).a, 0.0, 1.0);
+        float cloudAt = textureLod(_WeatherCloudsDist, onScreen, 0.0).r * 1000.0;
+        if (cover > 0.002 && cloudAt > 0.0)
+        {
+            float cloudSpread = max(cloudAt / 6.0, 60.0);
+            for (int i = 0; i < n; i++)
+            {
+                float wide = sqrt(spreads[i] * spreads[i] + cloudSpread * cloudSpread);
+                float behind = 1.0 / (1.0 + exp(-clamp(1.702 * (depths[i] - cloudAt) / wide, -30.0, 30.0)));
+                colours[i] *= 1.0 - cover * behind;
+            }
+        }
+    }
+
     if (test == 2 || test == 3)
         for (int i = 0; i < n; i++) colours[i].rgb = colours[i].a * (kinds[i] == 15 ? vec3(1.0) : hue(kinds[i]));
 

@@ -238,7 +238,7 @@ namespace VolumetricExplosions
                 o.life = stays * Random.Range(0.6f, 1.3f);
                 float tone = e.shade * Random.Range(0.82f, 1.22f);
                 o.ar = tone; o.ag = tone * (1f - 0.05f * e.warm); o.ab = tone * (1f - 0.14f * e.warm);
-                o.tint = (byte)Mathf.Clamp(e.tint, 0, 7);
+                o.tint = (byte)Mathf.Clamp(e.tint, 0, FireKinds - 1);
                 o.flags = Exhausted;
                 if (straight)
                 {
@@ -495,7 +495,7 @@ namespace VolumetricExplosions
                     int at = n < pad.lamp.Length ? pad.lamp[n] : -1;
                     if (at < 0 || at >= lampCount || !lamps[at].quiet || lamps[at].owner != owner)
                     {
-                        at = AddLamp(glowAt.x, glowAt.y, glowAt.z, glows, strength, 0.6f, (byte)Mathf.Clamp(pad.tint, 0, 7), true, 0f, 0f);
+                        at = AddLamp(glowAt.x, glowAt.y, glowAt.z, glows, strength, 0.6f, (byte)Mathf.Clamp(pad.tint, 0, FireKinds - 1), true, 0f, 0f);
                         lamps[at].quiet = true;
                         lamps[at].owner = owner;
                         if (n < pad.lamp.Length) pad.lamp[n] = at;
@@ -533,7 +533,7 @@ namespace VolumetricExplosions
                         // (the engines' smoke, paler for what of the trench it carries out with it)
                         float tone = Mathf.Lerp(pad.shade, 0.78f, 0.3f) * Random.Range(0.85f, 1.15f);
                         o.ar = tone; o.ag = tone * (1f - 0.04f * pad.warm); o.ab = tone * (1f - 0.1f * pad.warm);
-                        o.tint = (byte)Mathf.Clamp(pad.tint, 0, 7);
+                        o.tint = (byte)Mathf.Clamp(pad.tint, 0, FireKinds - 1);
                         o.flags = Exhausted;
                         o.tile = Lumpy();
                         Born(i);

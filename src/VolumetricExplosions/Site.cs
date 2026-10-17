@@ -101,6 +101,8 @@ namespace VolumetricExplosions
         bool groundBare, groundWet;
         ParticleSystem sparks, shards, ringFlat, ringAir;
         readonly ParticleSystem.Particle[] glows = new ParticleSystem.Particle[160];
+        readonly ParticleSystem.Particle[] flashes = new ParticleSystem.Particle[160], flashesSeen = new ParticleSystem.Particle[160];
+        int flashCount;
 
         readonly Thermal[] thermals = new Thermal[24];
         readonly Lamp[] lamps = new Lamp[12];
@@ -178,6 +180,7 @@ namespace VolumetricExplosions
                 box.transform.SetParent(t, false);
                 box.AddComponent<MeshFilter>().sharedMesh = Assets.Cube;
                 boxRenderer = box.AddComponent<MeshRenderer>();
+                boxRenderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;      // (see the shadow's box, TuneShadow)
                 boxMaterial = new Material(Assets.Volume) { renderQueue = 3000 };
                 volume = new Texture3D(G, G, G, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
                 amounts = new Texture3D(G, G, G, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
@@ -251,6 +254,7 @@ namespace VolumetricExplosions
             if (turns != null) UnityEngine.Object.Destroy(turns);
             foreach (Texture3D rest in rests) if (rest != null) UnityEngine.Object.Destroy(rest);
             if (boxMaterial != null) UnityEngine.Object.Destroy(boxMaterial);
+            if (motionMaterial != null) UnityEngine.Object.Destroy(motionMaterial);
             if (shownMaterial != null) UnityEngine.Object.Destroy(shownMaterial);
             if (shadeMaterial != null) UnityEngine.Object.Destroy(shadeMaterial);
             if (small != null) { small.Release(); UnityEngine.Object.Destroy(small); }
@@ -378,8 +382,9 @@ namespace VolumetricExplosions
                 int key = Mathf.Min(4, (int)h), at = (flameKind * 6 + key) * 3;
                 float mix = h - key;
                 // (An engine's flame is far brighter than a fire in the open: several times as bright as white paper in the sun.)
-                // (and where the air is thin the gas is thin, and what is seen of it is its light alone: brighter for what there is of it)
-                float gain = riding ? JetShines[n - 1] * Plumes[flameKind & 7].shines * Mathf.Lerp(1f, 3f, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.25f, 0.6f, Thin))) : 1f;
+                // (and where the air is thin the gas is thin, and what is seen of it is its light alone: brighter for what there is of it;
+                // not a re-entry glow's, whose brightness its maker gives by how hot the air is made)
+                float gain = riding ? JetShines[n - 1] * Plumes[Mathf.Min((int)flameKind, FireKinds - 1)].shines * (flameKind == PlasmaKind ? 1f : Mathf.Lerp(1f, 3f, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.25f, 0.6f, Thin)))) : 1f;
                 boxMaterial.SetVector("_VolHot" + n, new Vector4(gain * Mathf.Lerp(Flames[at], Flames[at + 3], mix), gain * Mathf.Lerp(Flames[at + 1], Flames[at + 4], mix), gain * Mathf.Lerp(Flames[at + 2], Flames[at + 5], mix), 0f));
             }
         }
@@ -447,6 +452,7 @@ namespace VolumetricExplosions
             /* methane          */ new Plume { dense = 0.25f, hot = 1.6f, cool = 0.45f, edge = 0.5f,  shines = 1.6f, tongues = 0.4f,  soot = 0f,     diamonds = 0.5f,  count = 4f, body = 4f,   clear = 0.8f, soft = 0.5f, fades = 0.7f, endTorn = 0.4f, endCool = 0.4f,  streaks = 1f,    streaksFar = 2.5f },
             /* fuels that keep  */ new Plume { dense = 0.3f,  hot = 1.6f, cool = 0.55f, edge = 0.5f,  shines = 1f,   tongues = 0.4f,  soot = 0.02f,  diamonds = 0.15f, count = 4f, body = 3f,   clear = 0.7f, soft = 0.5f, fades = 0.8f, endTorn = 0.3f, endCool = 0.4f,  streaks = 1f,    streaksFar = 2.5f },
             /* a reactor's      */ new Plume { dense = 0.15f, hot = 1f,   cool = 0.7f,  edge = 0.3f,  shines = 1.5f, tongues = 0.2f,  soot = 0f,     diamonds = 0f,    count = 4f, body = 3f,   clear = 0.5f, soft = 1f,   fades = 1f,   endTorn = 0f,   endCool = 0.3f,  streaks = 0.6f,  streaksFar = 1f },
+            /* re-entry glow    */ new Plume { dense = 0.3f,  hot = 1.2f, cool = 0.5f,  edge = 0.5f,  shines = 2.4f, tongues = 0.8f,  soot = 0f,     diamonds = 0f,    count = 4f, body = 2.5f, clear = 0.8f, soft = 0.6f, fades = 1f,   endTorn = 0.6f, endCool = 0.4f,  streaks = 1.4f,  streaksFar = 3f },
         };
 
         // ---- how a ship's flames are drawn (see jetPattern in tools/shaderpack/volume.glsl)
@@ -489,7 +495,7 @@ namespace VolumetricExplosions
             Vector3 axis = ToGrid(jetAxisL), from = ToGrid(jetFromL) - slid;
             boxMaterial.SetVector(jetNote, new Vector4(axis.x, axis.y, axis.z, jetScroll));
             boxMaterial.SetVector(jetFromNote, new Vector4(from.x, from.y, from.z, jetNozzle));
-            Plume look = Plumes[jetKind & 7];
+            Plume look = Plumes[Mathf.Clamp(jetKind, 0, FireKinds - 1)];
             // (how far the flame reaches in this air: see Flame)
             float reach = jetLong * Mathf.Lerp(1f, 0.45f, thin);
             boxMaterial.SetVector(jetLookNote, new Vector4(look.tongues * (1f - thin), look.soot * (1f - thin), look.diamonds * (1f - thin) * (1f - thin), size));
@@ -544,6 +550,16 @@ namespace VolumetricExplosions
                 shadeMaterial.SetTexture("_Volume", volume);
                 drawn.sharedMaterial = shadeMaterial;
                 drawn.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                // The box is drawn among the solid things, and Unity puts a solid thing that has moved since the last frame
+                // into its picture of motion (by the thing's own outline, not by what the material draws). This box is moved
+                // and made larger every frame as the cloud grows, so the game's smoothing (TUFX's and Scatterer's temporal
+                // antialiasing) took everything within its outline on the screen for moving with it, and pulled the ground,
+                // the roads and the buildings there from the wrong place: a box round the smoke, often stretched far away
+                // from the sun, whose picture jumped a pixel at a time (the user: "as the smoke is generating and expanding,
+                // the areas around the smoke shift"; there since the shadow was made; measured, some forty such jumps in
+                // twelve seconds, eight with the shadow off, and as many with the shadow drawing nothing at all). It has no
+                // motion of its own to give.
+                drawn.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
                 drawn.receiveShadows = false;
             }
             if (!shade.activeSelf) shade.SetActive(true);
@@ -582,6 +598,11 @@ namespace VolumetricExplosions
             shadeMaterial.SetVector(shadowZ, into.GetRow(2));
             shadeMaterial.SetVector(shadowSun, new Vector4(sunBox.x, sunBox.y, sunBox.z, 0.7f * day));
             shadeMaterial.SetVector(shadowSunWorld, new Vector4(sunWorld.x, sunWorld.y, sunWorld.z, 0f));
+            // (carried on between one grid and the next as the smoke itself is: see the shader)
+            shadeMaterial.SetTexture("_Volume", volume);
+            shadeMaterial.SetTexture("_Flow", flow);
+            shadeMaterial.SetVector("_VolFlow", boxMaterial.GetVector("_VolFlow"));
+            shadeMaterial.SetVector("_VolSize", size);
         }
 
         // ---- the lamps of the scene round about that light this patch's smoke at night (see Air.SceneLights)
@@ -655,6 +676,61 @@ namespace VolumetricExplosions
         public bool Shown => box != null && boxRenderer.enabled;
         public Vector3 BoxCentre => box.transform.position;
         public Material Marching => boxMaterial;
+
+        Material motionMaterial;
+#if DEV
+        public string FollowSays => "going along at " + shownDrift.magnitude.ToString("F2") + " m/s (slowing by " + shownSlows.ToString("F2") + " a second), its grid's speeds scaled by " + shownFastest.ToString("F1") + " m/s, " + (time - shownTime).ToString("F3") + " s since its grid, a frame of " + Time.deltaTime.ToString("F4") + " s";
+#endif
+
+        /// <summary>
+        /// What writes where this patch's smoke is going into the game's picture of motion (Layers.ForCamera;
+        /// tools/shaderpack/motion.glsl), set for this frame: where the patch's smoke is kept (its slot in the atlas, or the
+        /// ships' picture), how far the patch as a whole has gone since the last frame, what its grid's numbers of the
+        /// air's own motion mean, and what takes a place in the scene to its place on the picture, now and a frame ago.
+        ///
+        /// How far it has gone: as far as what it is fixed to has moved in the scene (the ground, which the game moves
+        /// about under a craft that flies fast, or the ship a patch of flame rides with), and for smoke its own drift
+        /// besides. A flame's gas streams through its patch far faster than can be followed: its patch is followed, not its gas.
+        /// </summary>
+        public Material Follows(Texture smokeKept, Texture depthKept, Vector4 slot, Matrix4x4 now, Matrix4x4 before, float dt)
+        {
+            if (Assets.Motion == null || box == null || boxMaterial == null || flow == null) return null;
+            if (motionMaterial == null) motionMaterial = new Material(Assets.Motion) { renderQueue = 3000 };
+            Transform b = box.transform;
+            Vector3 fixedTo = b.parent != null ? b.parent.position : b.position;
+            if (Time.frameCount != followFrame)
+            {
+                followMoved = followFrame == Time.frameCount - 1 ? fixedTo - followWas : Vector3.zero;
+                // (a jump is no motion: the scene begun afresh, or the patch put elsewhere)
+                if (followMoved.sqrMagnitude > 200f * 200f) followMoved = Vector3.zero;
+                followWas = fixedTo; followFrame = Time.frameCount;
+            }
+            Vector3 gone = followMoved;
+            if (!riding)
+            {
+                // (as the box itself is carried on between grids: TuneVolume)
+                float since = Settings.TestSmoke == 1f ? 0f : Mathf.Clamp(time - shownTime, 0f, 0.3f);
+                gone += (b.parent != null ? b.parent.TransformVector(FromGrid(shownDrift)) : FromGrid(shownDrift)) * (Mathf.Exp(-shownSlows * since) * dt);
+            }
+            motionMaterial.SetTexture("_VolAtlas", smokeKept);
+            motionMaterial.SetTexture("_VolAtlasDepth", depthKept);
+            motionMaterial.SetTexture("_Flow", flow);
+            motionMaterial.SetVector("_VolSlot", slot);
+            motionMaterial.SetVector("_MotGoes", new Vector4(gone.x, gone.y, gone.z, dt));
+            motionMaterial.SetVector("_MotFlow", new Vector4(riding ? 0f : 2f * shownFastest, Settings.FollowFrom, Settings.FollowLeast, 0f));
+            motionMaterial.SetVector("_MotAxisX", b.right);
+            motionMaterial.SetVector("_MotAxisY", b.up);
+            motionMaterial.SetVector("_MotAxisZ", b.forward);
+            motionMaterial.SetVector("_MotNowX", now.GetRow(0));
+            motionMaterial.SetVector("_MotNowY", now.GetRow(1));
+            motionMaterial.SetVector("_MotNowW", now.GetRow(3));
+            motionMaterial.SetVector("_MotWasX", before.GetRow(0));
+            motionMaterial.SetVector("_MotWasY", before.GetRow(1));
+            motionMaterial.SetVector("_MotWasW", before.GetRow(3));
+            return motionMaterial;
+        }
+        Vector3 followWas, followMoved;
+        int followFrame = -10;
         public Matrix4x4 BoxMatrix => box.transform.localToWorldMatrix;
         public float Away => camL.magnitude;
 
@@ -1272,8 +1348,10 @@ namespace VolumetricExplosions
                 ref P q = ref a[i];
                 q.age += q.heat < 0.1f && q.age > 5f ? dt * rush : dt;
                 if (q.age >= q.life) { q.life = -1f; continue; }
-                // (the patch has changed its own speed since the last step, with the ship it goes along with: what is in it has not, see Jolt)
-                if (jolted) { q.vx -= joltX; q.vy -= joltY; q.vz -= joltZ; }
+                // (the patch has changed its own speed since the last step, with the ship it goes along with: what is in it has not, see Jolt;
+                // but a re-entry glow is held where it is by the air rushing past the ship, and slows with it: without that, a ship
+                // slowing at ten gravities left its glow drifting on ahead of it)
+                if (jolted && q.tint != PlasmaKind) { q.vx -= joltX; q.vy -= joltY; q.vz -= joltZ; }
                 // (young smoke handed on to the patch of the ship's trail: it fades here as its copy there comes on, see Hand)
                 if ((q.flags & HandedOn) != 0)
                 {
@@ -1673,9 +1751,15 @@ namespace VolumetricExplosions
             }
         }
 
+        /// <summary>How many kinds of fire there are (see Flames, Plumes), and the one that is air made to glow at re-entry (see Plasma).</summary>
+        internal const int FireKinds = 9;
+        internal const byte PlasmaKind = 8;
+
         // Flame colours as they look on the screen, coolest to hottest, six steps for each kind of fire:
         // fuel, solid propellant and burning metal, monopropellant, electrical, hydrogen; and, for engines' flames alone,
-        // methane, the fuels that keep (a small upper-stage engine's), and gas heated by a reactor.
+        // methane, the fuels that keep (a small upper-stage engine's), and gas heated by a reactor; and (since 0.7.0) air made
+        // to glow by a craft coming into it fast: white and pale gold where hottest, orange, then the pink-violet of nitrogen's
+        // own light where it is thin and cooling (see Plasma).
         static readonly float[] Flames =
         {
             0f, 0f, 0f,   0.55f, 0.10f, 0.02f,   1.00f, 0.36f, 0.06f,   1.00f, 0.62f, 0.16f,   1.00f, 0.84f, 0.42f,   1.00f, 0.95f, 0.74f,
@@ -1686,6 +1770,7 @@ namespace VolumetricExplosions
             0f, 0f, 0f,   0.14f, 0.08f, 0.30f,   0.38f, 0.26f, 0.66f,   0.66f, 0.50f, 0.90f,   0.90f, 0.78f, 1.00f,   1.00f, 0.93f, 1.00f,
             0f, 0f, 0f,   0.30f, 0.14f, 0.26f,   0.62f, 0.36f, 0.54f,   0.86f, 0.62f, 0.76f,   0.98f, 0.86f, 0.92f,   1.00f, 0.96f, 0.98f,
             0f, 0f, 0f,   0.30f, 0.06f, 0.04f,   0.62f, 0.18f, 0.10f,   0.85f, 0.38f, 0.22f,   1.00f, 0.62f, 0.42f,   1.00f, 0.82f, 0.66f,
+            0f, 0f, 0f,   0.42f, 0.06f, 0.24f,   0.85f, 0.22f, 0.30f,   1.00f, 0.45f, 0.24f,   1.00f, 0.68f, 0.38f,   1.00f, 0.88f, 0.70f,
         };
 
         /// <summary>Which of two families a kind of fire is of, the yellow or the blue: one patch of air shows its fire in the colours of one kind, and those of a family are near enough alike to share one.</summary>

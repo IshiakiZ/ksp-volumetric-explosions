@@ -22,8 +22,9 @@ ON A MAC, ONE MORE STEP (if a browser downloaded this)
 
 WHERE IT WORKS
   Made on a Mac, and tried on Windows 11 on the game's own Direct3D 11: the smoke is
-  drawn as a volume there too. On Linux it should work as on the Mac; nobody has run
-  it there. (On Windows and Linux the mod does its heaviest sums with its own code:
+  drawn as a volume there too. 0.7.0's one new shader (the smoke's motion, so that a
+  game that smooths its picture keeps the smoke sharp) is built for Direct3D but has not
+  been looked at there. On Linux it should work as on the Mac; nobody has run it there. (On Windows and Linux the mod does its heaviest sums with its own code:
   the small library that does them faster is in this download for the Mac only.)
 
 SETTINGS

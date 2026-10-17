@@ -660,6 +660,8 @@ namespace VolumetricExplosions
             long lap = System.Diagnostics.Stopwatch.GetTimestamp();
             foreach (Site s in sites) s.Place();
             foreach (Scorch m in marks) m.Place();
+            Vector3 eyeAt = depthCamera[0] != null ? depthCamera[0].transform.position : camera.transform.position;
+            foreach (Site s in sites) s.SeeFlashes(eyeAt, sites);
             Halves();
             if (Layered) layers.Frame(sites, depthCamera, depthCamera[0] != null ? depthCamera[0].transform.position : camera.transform.position);
             else layers.Off();
@@ -815,6 +817,68 @@ namespace VolumetricExplosions
         }
 
 #if DEV
+        // (for finding a fault: what the game's picture of how far each pixel has moved since the last frame, which the
+        // smoothing between frames goes by, has in it. "arm" starts taking a copy of it each frame; anything else reads
+        // the copy: how many of its dots say something moved, where on the screen they lie, and how far at the most.)
+        static RenderTexture motionCopy;
+        static CommandBuffer motionGrab;
+        static Camera motionCam;
+        public static string Motion(string arg)
+        {
+            Camera cam = FlightCamera.fetch != null ? FlightCamera.fetch.mainCamera : null;
+            if (cam == null) return "no camera";
+            if (arg == "off")
+            {
+                if (motionCam != null && motionGrab != null) motionCam.RemoveCommandBuffer(CameraEvent.BeforeImageEffects, motionGrab);
+                motionCam = null;
+                return "off";
+            }
+            if (arg == "arm")
+            {
+                if (motionCopy == null) { motionCopy = new RenderTexture(Mathf.Max(8, cam.pixelWidth / 4), Mathf.Max(8, cam.pixelHeight / 4), 0, RenderTextureFormat.ARGBFloat) { filterMode = FilterMode.Point }; motionCopy.Create(); }
+                if (motionGrab == null) { motionGrab = new CommandBuffer { name = "VolumetricExplosions: a copy of the motion picture (test)" }; motionGrab.Blit(BuiltinRenderTextureType.MotionVectors, motionCopy); }
+                if (motionCam != cam) { if (motionCam != null) motionCam.RemoveCommandBuffer(CameraEvent.BeforeImageEffects, motionGrab); cam.AddCommandBuffer(CameraEvent.BeforeImageEffects, motionGrab); motionCam = cam; }
+                return "armed on " + cam.name + "; it keeps " + cam.depthTextureMode;
+            }
+            if (motionCopy == null) return "arm first";
+            RenderTexture was = RenderTexture.active;
+            RenderTexture.active = motionCopy;
+            var read = new Texture2D(motionCopy.width, motionCopy.height, TextureFormat.RGBAFloat, false, true);
+            read.ReadPixels(new Rect(0, 0, motionCopy.width, motionCopy.height), 0, 0);
+            read.Apply();
+            RenderTexture.active = was;
+            Color[] px = read.GetPixels();
+            Destroy(read);
+            int w = motionCopy.width, h = motionCopy.height, moved = 0, x0 = w, x1 = -1, y0 = h, y1 = -1;
+            float most = 0f; double sum = 0.0, sumX = 0.0, sumY = 0.0;
+            for (int i = 0; i < px.Length; i++)
+            {
+                float m = Mathf.Sqrt(px[i].r * px[i].r + px[i].g * px[i].g);
+                if (m < 2e-4f) continue;
+                moved++; sum += m; sumX += px[i].r; sumY += px[i].g; if (m > most) most = m;
+                int x = i % w, y = i / w;
+                if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+            }
+            string said = moved + " of " + px.Length + " dots say something moved";
+            if (moved > 0) said += ": between " + (x0 / (float)w).ToString("F2") + ", " + (y0 / (float)h).ToString("F2") + " and " + (x1 / (float)w).ToString("F2") + ", " + (y1 / (float)h).ToString("F2") + " of the picture (from its lower left); by " + (most * cam.pixelWidth).ToString("F2") + " pixels at the most, " + (sum / moved * cam.pixelWidth).ToString("F2") + " on the whole (" + (sumX / moved * cam.pixelWidth).ToString("F2") + " across and " + (sumY / moved * cam.pixelHeight).ToString("F2") + " up, on the whole)";
+            // (and where each patch's box lies on the screen, to set beside it)
+            if (Instance != null)
+                foreach (Site s in Instance.sites)
+                {
+                    Vector4 r = new Vector4(2f, 2f, -2f, -2f);
+                    Matrix4x4 m = cam.projectionMatrix * cam.worldToCameraMatrix * s.BoxMatrix;
+                    for (int n = 0; n < 8; n++)
+                    {
+                        Vector4 c = m * new Vector4((n & 1) - 0.5f, ((n >> 1) & 1) - 0.5f, (n >> 2) - 0.5f, 1f);
+                        if (c.w <= 0.01f) continue;
+                        r.x = Mathf.Min(r.x, c.x / c.w); r.y = Mathf.Min(r.y, c.y / c.w); r.z = Mathf.Max(r.z, c.x / c.w); r.w = Mathf.Max(r.w, c.y / c.w);
+                    }
+                    said += " | a patch's box: " + (r.x * 0.5f + 0.5f).ToString("F2") + ", " + (r.y * 0.5f + 0.5f).ToString("F2") + " to " + (r.z * 0.5f + 0.5f).ToString("F2") + ", " + (r.w * 0.5f + 0.5f).ToString("F2") + (s.Riding ? " (rides)" : "");
+                    said += "; " + s.FollowSays;
+                }
+            return said;
+        }
+
         Site moverSite;
         Vector3 moverFrom;
         float moverStarted = -1f;
@@ -1319,6 +1383,8 @@ namespace VolumetricExplosions
                 box.transform.localScale = new Vector3(2f * radius * longer, Mathf.Clamp(0.5f * radius, 1.2f, 5f), 2f * radius);
                 box.AddComponent<MeshFilter>().sharedMesh = Assets.Cube;
                 var renderer = box.AddComponent<MeshRenderer>();
+                // (a mark drawn on the ground has no motion of its own for the game's smoothing to take: see Site.TuneShadow)
+                renderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
                 thrown = new Material(Assets.Mark) { renderQueue = 2460 };
                 thrown.SetTexture("_MarkTex", Assets.Scorch.mainTexture);
                 thrown.SetTexture("_MarkEmbers", Assets.Embers.mainTexture);
@@ -1378,6 +1444,7 @@ namespace VolumetricExplosions
             var renderer = on.AddComponent<MeshRenderer>();
             renderer.sharedMaterial = material;
             renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;      // (see Site.TuneShadow)
             renderer.receiveShadows = false;
             return sheet;
         }

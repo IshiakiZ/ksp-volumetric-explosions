@@ -3,7 +3,7 @@
 The game's flat explosion sprites replaced by a small simulation of fire, smoke and dust, drawn as a true volume and
 lit by the sun, the sky and the fire. It changes nothing but the look.
 
-![A blast on the launch pad, with the mod](src/VolumetricExplosions/img/volumetric-explosions.gif)
+![A rocket with solid boosters and a fuel-and-oxidizer core strikes the ground by the launch pad and blows up](src/VolumetricExplosions/img/volumetric-explosions.gif)
 
 ![The game's own explosion and this mod's](src/VolumetricExplosions/img/explosions-compare.jpg)
 
@@ -41,7 +41,7 @@ long it hangs), `wind`, and `enabled = false` for the game's own explosions.
 
 ## Works on
 
-Windows 11 (Direct3D 11 and OpenGL) and Mac: tried. Linux: never run.
+Mac: tried. Windows 11 (Direct3D 11 and OpenGL): 0.6 tried; this version built for it, not run there. Linux: never run.
 
 **More:** [the long description](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/The-long-description) (everything in full,
 and what was tried on each system) and the rest of the [wiki](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki).
