@@ -37,6 +37,7 @@ namespace VolumetricExplosions
         {
             Settings.Load();
             if (!Settings.Enabled) { Log("switched off in settings.cfg"); enabled = false; return; }
+            Records.LoadKinds();
             giveUpAt = Time.realtimeSinceStartup + 20f;
         }
 

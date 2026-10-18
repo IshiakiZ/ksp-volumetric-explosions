@@ -22,6 +22,10 @@ For Kerbal Space Program 1.12.x. It needs no other mod.
 * **Smoke that behaves like smoke:** it rises and rolls, drifts on the wind, lies on the ground, goes round buildings
   and is pushed about by craft.
 * **Shock fronts, pieces and burn marks,** shadows under the smoke, and fires that burn on where fuel was spilt.
+* **Other mods' resources** count as the stock ones they are like, and for what each is worth beside it: liquid
+  hydrogen as fuel (with a clear flame, and nearly three times kerosene's fire for its weight), liquid oxygen as
+  oxidiser, argon as xenon, and so on. `PluginData/resources.cfg` lists every resource of the Community Resource
+  Pack; one not listed is guessed at by its name. With RealBattery, a battery's charge counts for all it holds.
 * **Engines' flames and smoke,** with [Engine Flames](https://github.com/IshiakiZ/ksp-engine-flames) and
   [Rocket Smoke](https://github.com/IshiakiZ/ksp-rocket-smoke), which are made in the same air.
 
