@@ -89,6 +89,17 @@ namespace VolumetricExplosions
             return taken;
         }
 
+#if DEV
+        /// <summary>(For the development build: how many resources are listed, and what one of them counts as: "LqdHydrogen".)</summary>
+        public static string KindsSaid(string name)
+        {
+            string say = kinds.Count + " resources listed";
+            if (!string.IsNullOrEmpty(name) && kinds.TryGetValue(name.Trim().ToLowerInvariant(), out Counts c)) say += "; " + name + " counts as " + c.kind + " x" + c.factor.ToString(CultureInfo.InvariantCulture);
+            else if (!string.IsNullOrEmpty(name)) say += "; " + name + " is not listed";
+            return say;
+        }
+#endif
+
         /// <summary>Count the resource as its listed kind, if it has one, times its factor. (As Sort does: electricity in units, everything else in kilograms.)</summary>
         static bool Listed(Death d, string name, double kg, double units)
         {

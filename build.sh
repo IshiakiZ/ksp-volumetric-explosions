@@ -62,7 +62,7 @@ case "$MODE" in
     echo "ok: Volumetric Explosions installed to $FX (restart KSP to load it)"
     ;;
   shaders)
-    for name in volume enlarge mark shock; do python3 tools/shaderpack/make_bundle.py "$KSP_DIR" "$SRC/Shaders/$name.bundle" "$name"; done
+    for name in volume volumerelease enlarge mark shock; do python3 tools/shaderpack/make_bundle.py "$KSP_DIR" "$SRC/Shaders/$name.bundle" "$name"; done
     ;;
   package)
     build

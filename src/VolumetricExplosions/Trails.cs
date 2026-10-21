@@ -76,7 +76,7 @@ namespace VolumetricExplosions
             {
                 Plan plan = Plan.Where(world);
                 if (plan.vacuum || plan.underwater) return;
-                var site = new Site(plan);
+                var site = Site.Make(plan);
                 site.Dispose();
             }
             catch (System.Exception ex) { Addon.Log("could not warm up: " + ex.Message); }
@@ -179,24 +179,32 @@ namespace VolumetricExplosions
             float tone = Mathf.Clamp(tr.shade, 0.02f, 0.9f) * Random.Range(0.8f, 1.2f);
             float brown = Mathf.Clamp01(tr.warm);
             o.ar = tone; o.ag = tone * (1f - 0.12f * brown); o.ab = tone * (1f - 0.28f * brown);
+            // (How far it is a plume, rising off a thing that is still or slow, and not a trail strung out behind a thing that flies. Off a
+            // piece lying in the grass, with no more rise than smoke left behind in the air has, the puffs piled up where they were laid:
+            // a dark ball of smoke hanging over each burning piece, its column thin above it. A plume leaves narrow, hot and unseen at
+            // first, climbing at a couple of metres a second, and widens as it climbs: as Smoulder lays it for a burning wreck.)
+            float slow = Mathf.Clamp01(1f - going.magnitude / 8f);
             if (burning)
             {
-                o.r = size * Random.Range(0.8f, 1.4f) * (1f + 0.6f * tr.fire) + 0.05f;
+                o.r = size * Random.Range(0.8f, 1.4f) * (1f + 0.6f * tr.fire) * Mathf.Lerp(1f, 0.6f, slow) + 0.05f;
                 o.heat = Random.Range(0.7f, 0.95f) * Mathf.Lerp(0.8f, 1f, tr.fire);
                 o.cool = 3f;
                 o.flame = 1f;
-                o.grow = 0.08f;
-                o.rise = 0.7f;
+                o.grow = 0.08f + 0.1f * slow * (0.5f + size);
+                o.rise = Mathf.Lerp(0.7f, Random.Range(2.2f, 3.4f) * Mathf.Clamp(0.7f + 0.6f * size, 0.8f, 1.6f), slow);
+                o.ky += slow * Random.Range(1f, 2.2f);
                 o.mass = Random.Range(0.6f, 1.3f) * o.r * o.r * 4f * Mathf.Max(0.3f, smoke);
                 o.life = Random.Range(2.5f, 6f) * tr.lasts / 8f * lasting;
             }
             else
             {
                 // smoke alone: a wisp off a small piece is thin and soon gone; a smouldering one heavier and longer
-                o.r = size * Random.Range(1f, 1.8f) + 0.12f;
-                o.heat = 0f; o.flame = 0f;
-                o.grow = 0.12f + 0.1f * (1f - smoke);
-                o.rise = 0.25f + 0.4f * smoke;
+                o.r = (size * Random.Range(1f, 1.8f) + 0.12f) * Mathf.Lerp(1f, 0.6f, slow);
+                o.heat = slow * Random.Range(0.38f, 0.46f) * Mathf.Clamp01(smoke * 3f); o.flame = 0f;
+                o.cool = Random.Range(1.3f, 1.8f);
+                o.grow = 0.12f + 0.1f * (1f - smoke) + 0.08f * slow * (0.5f + size);
+                o.rise = Mathf.Lerp(0.25f + 0.4f * smoke, Random.Range(1.6f, 2.8f) * Mathf.Lerp(0.5f, 1f, smoke), slow);
+                o.ky += slow * Random.Range(0.6f, 1.4f) * smoke;
                 o.mass = Random.Range(0.4f, 1f) * o.r * o.r * 4f * Mathf.Lerp(0.12f, 1f, smoke);
                 o.life = Random.Range(1.5f, 4f) * Mathf.Lerp(0.6f, 1.6f, smoke) * tr.lasts / 8f * lasting;
                 o.fadeIn = 0.15f;

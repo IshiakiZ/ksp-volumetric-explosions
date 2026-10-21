@@ -39,7 +39,7 @@ def signature(found):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3: raise SystemExit(__doc__)
-    found = fields(open(sys.argv[1]).read())
+    found = fields(open(sys.argv[1], encoding="utf-8").read())     # (UTF-8 on every system: Windows reads cp1252 otherwise)
     lines = ["// Made by tools/native/genp.py from Site.cs: do not edit.", "#pragma once", "#include <stdint.h>", "typedef struct P {"]
     lines += ["    %s %s;" % (KINDS[kind], name) for kind, name in found]
     lines += ["} P;", "#define P_SIGNATURE 0x%08Xu" % signature(found), ""]

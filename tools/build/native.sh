@@ -16,8 +16,10 @@ native() {  # native <folder to put it in> [file name without ending]
   command -v cc >/dev/null 2>&1 || { echo "note: no C compiler found (on a Mac: xcode-select --install); Volumetric Explosions is built without its library"; return 0; }
   python3 tools/native/genp.py src/VolumetricExplosions/Site.cs "$TMP/p.h"
   case "$(uname -s)" in
-    Darwin) cc -O3 -arch x86_64 -mmacosx-version-min=10.13 -dynamiclib -fvisibility=hidden -fno-math-errno -I "$TMP" -o "$out/$name.dylib" src/VolumetricExplosions/Native/vfxgrid.c ;;
-    Linux)  cc -O3 -shared -fPIC -fvisibility=hidden -fno-math-errno -I "$TMP" -o "$out/$name.so" src/VolumetricExplosions/Native/vfxgrid.c -lm ;;
+    # (with it, the asynchronous read of pictures from the graphics card for OpenGL, which Keystone's Readback uses: asyncread.c;
+    # and the patches' grids sent to the card without the game's thread waiting, on OpenGL: volumesend.c)
+    Darwin) cc -O3 -arch x86_64 -mmacosx-version-min=10.13 -dynamiclib -fvisibility=hidden -fno-math-errno -I "$TMP" -o "$out/$name.dylib" src/VolumetricExplosions/Native/vfxgrid.c src/VolumetricExplosions/Native/asyncread.c src/VolumetricExplosions/Native/volumesend.c ;;
+    Linux)  cc -O3 -shared -fPIC -fvisibility=hidden -fno-math-errno -I "$TMP" -o "$out/$name.so" src/VolumetricExplosions/Native/vfxgrid.c src/VolumetricExplosions/Native/asyncread.c src/VolumetricExplosions/Native/volumesend.c -lm -ldl -lpthread ;;
     *)      echo "note: Volumetric Explosions' library is not built on this kind of system" ;;
   esac
 }

@@ -34,6 +34,8 @@ namespace VolumetricExplosions
         public float smokeShade;           // how light the smoke is, 0.03 soot to 0.8 steam
         public int tint;                   // flame colours: 0 fuel, 1 solid propellant and burning metal, 2 monopropellant, 3 electric, 4 hydrogen
         public float vapour;               // kilograms of cold cloud that does not burn
+        public float charge;               // kilograms of propellant that went off, before water put out what would have burnt (for the water a blast throws up)
+        public float drowned;              // how much of a crash into the sea's fire the water put out (0 to 0.75): it burst as it drove into the water
         public float sparks, chunks, dirt; // how many of each to throw
         public bool whiteTrails;           // burning propellant leaves white trails, not dark ones
         public float burn;                 // seconds a fire stays burning on the ground afterwards
@@ -183,7 +185,17 @@ namespace VolumetricExplosions
                 soot *= 0.35f;
                 if (fromPair + burnsInAir < 5.0 && p.tint == 0) p.tint = 1;
             }
+            p.charge = (float)fire;
             if (p.underwater) { vapour += fire; fire = 0; }
+            // (A craft that strikes the sea fast bursts as it drives into the water, not on it: most of what would have burnt
+            // is under the surface when it goes, and comes up as a column of spray and steam with a smaller fire over it. The
+            // faster, the more: from 25 m/s, three quarters by 100. A blast on a craft afloat, or one that only touched the
+            // water, keeps its fire.)
+            else if (p.water && p.height < 3f && (p.cause == Cause.Crash || p.cause == Cause.Collision) && p.impact > 25f)
+            {
+                p.drowned = Mathf.Clamp((p.impact - 25f) / 100f, 0f, 0.75f);
+                vapour += fire * p.drowned; fire *= 1.0 - p.drowned;
+            }
             if (p.vacuum) soot = 0f;                                       // nothing for smoke to form in or hang in
 
             p.fire = (float)fire;

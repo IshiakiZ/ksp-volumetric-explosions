@@ -36,10 +36,48 @@ namespace VolumetricExplosions
             p[count] = default;
             p[count].lit = 1f;
             p[count].sky = 1f;
-            p[count].seed = (uint)Random.Range(1, int.MaxValue);
-            p[count].roll = Random.Range(0f, 360f);
-            p[count].spin = Random.Range(-22f, 22f);
+            p[count].seed = (LuckBits() & 0x7FFFFFFEu) | 1u;
+            p[count].roll = Luck(0f, 360f);
+            p[count].spin = Luck(-22f, 22f);
             return count++;
+        }
+
+        /// <summary>
+        /// (Born, for gas laid this moment at a nozzle in the patch that goes along with its ship: nothing has carried it yet, so
+        /// its billows begin where it is, and its round is the one the patch's new smoke takes. Looked up in the grid round it,
+        /// as other new smoke's is, the billows cost more than all the rest of laying it, for what the gas streaming through
+        /// replaces within the frame. `turn`, `pace` and `octave` as Fresh gives them, once for each nozzle.)
+        /// </summary>
+        void BornFresh(int i, float turn, float pace, int octave)
+        {
+            p[i].born = p[i].r;
+            p[i].turn = turn; p[i].pace = pace; p[i].octave = octave; p[i].rate = Settings.TestTurns >= 1f ? 1f / UsualRound : PerRound[octave];
+            float x = p[i].x, y = p[i].y, z = p[i].z;
+            p[i].ax = x; p[i].ay = y; p[i].az = z;
+            p[i].bx = x; p[i].by = y; p[i].bz = z;
+            p[i].ex = x; p[i].ey = y; p[i].ez = z;
+            p[i].cx = x; p[i].cy = y; p[i].cz = z;
+            p[i].dx = x; p[i].dy = y; p[i].dz = z;
+            p[i].fx = x; p[i].fy = y; p[i].fz = z;
+            draw[i] = new ParticleSystem.Particle
+            {
+                position = new Vector3(x, y, z),
+                startLifetime = 1000f,
+                remainingLifetime = 1000f * (1f - (p[i].tile + 0.5f) / (Assets.Tiles * Assets.Tiles)),
+                randomSeed = p[i].seed,
+                startSize = 0f,
+                startColor = new Color32(0, 0, 0, 0),
+            };
+        }
+
+        /// <summary>(The round new gas takes where nothing has carried it yet: as RestAt has it before it looks into the grid.)</summary>
+        void Fresh(out float turn, out float pace, out int octave)
+        {
+            bool oneRound = Settings.TestTurns >= 1f;
+            pace = time - lastBlast < 1.5f && !oneRound ? 1f / QuickestRound : 0.4f;
+            octave = OctaveFor(pace);
+            turn = time * (oneRound ? 1f / UsualRound : PerRound[octave]);
+            turn -= Mathf.Floor(turn);
         }
 
         /// <summary>Give the particle its place in the list that is drawn. The tile it shows is picked through its "age".</summary>
@@ -120,6 +158,7 @@ namespace VolumetricExplosions
                 {
                     detailRepeat = Mathf.Clamp(scale * 0.55f + 3.5f, 4f, 26f);
                     fullLength = Mathf.Clamp(0.13f * scale, 0.8f, 4f);
+                    seaBorn = pl.water && (pl.ground || pl.underwater);
                 }
             }
             bool onGround = pl.ground && hasGround;
@@ -135,7 +174,7 @@ namespace VolumetricExplosions
             if (count > 0 && !vacuum) Shove(c, Mathf.Max(R, pl.reach * 0.7f));
             if (R > 0.3f) Fireball(pl, c, v0, R, q, onGround);
             if (pl.vapour > 0.5f) Vapour(pl, c, v0, q, onGround);
-            if (pl.water && (pl.ground || pl.underwater)) Splash(pl, c, v0, q);
+            if (pl.water && (pl.ground || pl.underwater)) { Splash(pl, c, v0, q); SeaBlow(pl, c); }
             else if (pl.dirt > 0f) Dust(pl, c, v0, q);
             Sparks(pl, c, v0, q, onGround);
 
@@ -152,7 +191,7 @@ namespace VolumetricExplosions
                 Chunks(pl, c, v0, q, onGround);
             }
             if (pl.burn > 0f && onGround) AddFire(pl, c, R, q);
-            if (Settings.Shockwave && air > 0.12f && R > 2f && time - lastRing > 0.5f) Shock(c, R, onGround);
+            if (Settings.Shockwave && air > 0.12f && R > 2f && time - lastRing > 0.5f) Shock(c, R, onGround, pl.fire, onGround && !pl.water && !pl.paved ? pl.dirt : 0f, pl.dust);
         }
 
         /// <summary>A blast shoves aside the smoke that was already hanging there.</summary>
@@ -247,7 +286,12 @@ namespace VolumetricExplosions
                     o.drag = 3.5f;
                     o.grow = mixes;
                     o.turb = 0.5f + 0.1f * speed;
-                    o.rise = 0.5f * Mathf.Sqrt(R);
+                    // (Lifted by its own heat as a fuel fireball is: gas at some 1500 K is a fifth as dense as the air round it, and a body of
+                    // it rises at about the root of g times its radius times that, 14 m/s for one 50 m across (the mover takes this times
+                    // its heat, and it eases as it cools): within a second a fireball stands up off the ground and climbs into a rolling
+                    // cap, its stem of cooler smoke under it. At 0.5 of the root of R, as until 2026-10-18 (TestFire 2 or TestRise 1), it rose at a
+                    // third of that and lay on the ground as a dome for its first seconds.)
+                    o.rise = (Settings.TestFire == 2f || Settings.TestRise == 1f ? 0.5f : 1.4f) * Mathf.Sqrt(R);
                 }
                 // The middle is hottest and stays hot longest; the outside cools first into smoke, the top and the patches of the
                 // pattern above soonest (see patchWay).
@@ -314,7 +358,7 @@ namespace VolumetricExplosions
                 o.swell = Swell(way, speed, o.kloss, o.r);
                 o.grow = mixes;
                 o.turb = 0.5f + 0.1f * speed;
-                o.rise = 0.3f * Mathf.Sqrt(R);
+                o.rise = (Settings.TestFire == 2f || Settings.TestRise == 1f ? 0.3f : 0.8f) * Mathf.Sqrt(R);      // (the rind rises with the fireball it wraps: see above)
                 o.mass = Random.Range(0.8f, 2.2f) * pl.soot * o.r * o.r * 2.5f;
                 o.life = smokeLasts * Random.Range(0.4f, 1.1f);
                 if (speckled) o.fadeIn = burns * Random.Range(0.45f, 0.9f);
@@ -367,11 +411,14 @@ namespace VolumetricExplosions
                 o.r = (0.25f + 0.05f * reach) * Random.Range(0.7f, 1.4f);
                 if (vacuum)
                 {
+                    // (In a vacuum what is let out boils at once where it is liquid, and the boiling freezes the rest: a cloud of fine
+                    // drops and crystals flies out from the burst in straight lines, never billowing, thinning as it spreads, bright
+                    // where the sun is on it. Vented propellant in orbit stays in sight for many seconds (a Shuttle's water dump was
+                    // seen 2.5 km long, Pike 1990); until 0.8.0 this cloud was gone in a second or two.)
                     float speed = far / 0.35f;
                     o.vx = v0.x + way.x * speed; o.vy = v0.y + way.y * speed; o.vz = v0.z + way.z * speed;
                     o.flags = Ballistic;
                     o.grow = speed * 0.45f;
-                    o.life = Random.Range(0.7f, 1.8f);
                 }
                 else
                 {
@@ -387,7 +434,23 @@ namespace VolumetricExplosions
                     o.life = Random.Range(2.5f, 7f) * Mathf.Max(0.3f, Settings.Smoke);
                 }
                 o.mass = Random.Range(0.4f, 1.0f) * o.r * o.r * 4f;
-                float tone = Random.Range(0.7f, 0.9f);
+                if (vacuum)
+                {
+                    // (How thick the cloud is, and so how long it is seen: what flashes off a liquid in a vacuum freezes, some two
+                    // thirds of it, into grains of the order of fifty micrometres, each hiding as much as its own cross-section:
+                    // 3 / (4 x 800 kg/m3 x 25 um), 37.5 m2 for each kilogram, and through the middle of a cloud R across a column of
+                    // 3A / (2 pi R2). The shading takes each puff as hiding its mass over its radius squared, and the puffs a line
+                    // crosses add up to all of them over the cloud's radius squared: 18 for each kilogram, all told, shared out among
+                    // the puffs. So a tonne let go is a white ball, solid for its first seconds, thinning as it spreads with the
+                    // square of its size, and gone when its column is a fiftieth: some twenty seconds for a tonne, forty for ten.
+                    // Until 2026-10-19 it was a sixth as thick and lived three to eight seconds: a haze gone almost at once.)
+                    float all = 18f * 0.66f * pl.vapour;
+                    o.mass = all / Mathf.Max(1, n) * Random.Range(0.6f, 1.4f);
+                    float fastest = reach * 1.1f / 0.35f;
+                    o.life = Mathf.Clamp(Mathf.Sqrt(all / 0.02f) / Mathf.Max(fastest, 1f) * Random.Range(0.8f, 1.2f), 3f, 90f);
+                }
+                // (ice crystals in sunlight are near white; a cold cloud in air a little greyer)
+                float tone = vacuum ? Random.Range(0.88f, 1f) : Random.Range(0.7f, 0.9f);
                 o.ar = tone; o.ag = tone; o.ab = tone * 1.04f;
                 o.tile = Random.value < 0.5f ? Wispy() : Lumpy();
                 Born(i);
@@ -398,7 +461,12 @@ namespace VolumetricExplosions
         void Dust(Plan pl, Vector3 c, Vector3 v0, float q)
         {
             float reach = pl.reach;
-            int n = (int)(q * pl.dirt * Mathf.Clamp(35f * Mathf.Pow(reach, 1.5f), 40f, 2500f));
+            // (A fuel blast is a burning, not a detonation: it throws up less of the ground than the size of its fireball would say,
+            // and what it does throw up is darkened by its soot. With all of it the ground's dust, as until 2026-10-18, a fuel crash
+            // on sand was a dome of tan dust lit orange by the fire inside it, and hid the fire.)
+            float fiery = Settings.TestFire == 2f ? 0f : Mathf.Clamp01(pl.radius / Mathf.Max(pl.reach, 0.1f));
+            float sooted = 0.7f * fiery * pl.soot;
+            int n = (int)(q * pl.dirt * Mathf.Lerp(1f, 0.4f, fiery) * Mathf.Clamp(35f * Mathf.Pow(reach, 1.5f), 40f, 2500f));
             // "Along the ground" and "up" are as the ground lies under the blast: on a slope the low skirt of dust goes out up the slope and down it.
             Quaternion lay = Quaternion.FromToRotation(Vector3.up, blastUp);
             Vector3 ahead = new Vector3(v0.x, 0f, v0.z);
@@ -417,7 +485,7 @@ namespace VolumetricExplosions
                 o.x = c.x + way.x * 0.3f * reach * Random.value; o.z = c.z + way.z * 0.3f * reach * Random.value;
                 o.y = GroundAt(o.x, o.z) + 0.2f;
                 float tone = Random.Range(0.75f, 1.15f);
-                o.ar = pl.dust.r * tone; o.ag = pl.dust.g * tone; o.ab = pl.dust.b * tone;
+                o.ar = Mathf.Lerp(pl.dust.r, pl.smokeShade, sooted) * tone; o.ag = Mathf.Lerp(pl.dust.g, pl.smokeShade, sooted) * tone; o.ab = Mathf.Lerp(pl.dust.b, pl.smokeShade, sooted) * tone;
                 if (vacuum)
                 {
                     // Speed for a throw of that length at that angle.
@@ -459,13 +527,59 @@ namespace VolumetricExplosions
             }
         }
 
+        // (since 0.8.0: the water itself, where Natural Ocean draws it: see SeaBlow)
+        static System.Reflection.MethodInfo seaStruck;
+        static bool seaLooked;
+
+        /// <summary>
+        /// (Since 0.8.0.) A blast on or in the sea dents the water itself where Natural Ocean draws it: the crater it digs, its walls
+        /// falling back, the rings it sends out and the white water it leaves, as that mod does for a craft striking the sea
+        /// (NaturalOcean.Spray.Struck, found by name: nothing of it is needed). The blow it is given: the blast's charge in TNT
+        /// (4.2 MJ a kilogram), all of it for one in the water, as a blow straight down; for a fireball over the water a
+        /// twentieth, the push of its front reflected off the water (the most of a burst in the air goes into the air). (Filmed
+        /// 2026-10-18 from 160 m: a hump that seemed to rise over the fireball in its first half second was the shock front's
+        /// bending of the view behind it, the same with the water given a fiftieth; the water's own dent not told apart there.)
+        /// </summary>
+        void SeaBlow(Plan pl, Vector3 c)
+        {
+            if (Settings.TestRing == 1f) return;
+            if (!seaLooked)
+            {
+                seaLooked = true;
+                foreach (AssemblyLoader.LoadedAssembly a in AssemblyLoader.loadedAssemblies)
+                {
+                    Type t = a.assembly != null ? a.assembly.GetType("NaturalOcean.Spray", false) : null;
+                    if (t == null) continue;
+                    seaStruck = t.GetMethod("Struck", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static, null,
+                        new[] { typeof(CelestialBody), typeof(Vector3d), typeof(float), typeof(float), typeof(Vector3), typeof(float) }, null);
+                    if (seaStruck != null) break;
+                }
+            }
+            if (seaStruck == null || body == null) return;
+            float tnt = Mathf.Max(0.1f * Mathf.Max(pl.charge, pl.fire), 0.5f);
+            float energy = tnt * 4.2e6f * (pl.underwater || pl.drowned > 0.3f ? 1f : 0.05f);
+            const float Speed = 60f;
+            float tonnes = energy / (0.5f * 1000f * Speed * Speed);
+            Vector3d world = frame.ToWorld(c);
+            try { seaStruck.Invoke(null, new object[] { body, world, tonnes, Speed, -(Vector3)frame.up * Speed, 0f }); }
+            catch (Exception) { seaStruck = null; }
+        }
+
         /// <summary>On water: a column of spray straight up, a crown thrown outward, and mist left drifting.</summary>
+        /// <remarks>(2026-10-17) Sized by what went off, not by the pieces: a blast under the water had its fire put out, and
+        /// with it its size, and threw up a mound of a few metres where the same charge in the air was a fireball of
+        /// twenty. As much water as the fireball would have been wide, and under the water the column is most of it: a
+        /// shallow blast's gas comes up through the surface as a dome and bursts through it as a column of spray, tall and
+        /// white (Cole, Underwater Explosions; footage of mines and depth charges), with no fire; at the surface the same
+        /// column stands over the fireball.</remarks>
         void Splash(Plan pl, Vector3 c, Vector3 v0, float q)
         {
             float level = hasGround ? GroundAt(c.x, c.z) : c.y;
             float depth = Mathf.Max(0f, level - c.y);
             if (depth > 30f) return;                                                        // too deep to break the surface
-            float reach = Mathf.Max(pl.reach, pl.radius) * (1f - depth / 40f);
+            float charged = pl.charge > 0.5f ? Settings.Size * 1.75f * Mathf.Pow(pl.charge, 0.29f) : 0f;
+            float reach = Mathf.Max(Mathf.Max(pl.reach, pl.radius), Mathf.Min(charged, 45f)) * (1f - depth / 40f);
+            bool under = pl.underwater || pl.drowned > 0.3f;
             int n = (int)(q * Mathf.Clamp(45f * Mathf.Pow(reach, 1.5f), 60f, 3000f));
             float g = Mathf.Max(0.5f, gravity);
             for (int k = 0; k < n; k++)
@@ -480,10 +594,10 @@ namespace VolumetricExplosions
                 o.y = level + 0.2f;
                 if (kind < 0.8f)
                 {
-                    // Water: thrown, and it falls back.
-                    bool column = kind < 0.35f;
+                    // Water: thrown, and it falls back. (Under the water most of it goes up the column, and higher.)
+                    bool column = kind < (under ? 0.6f : 0.35f);
                     float tilt = column ? Random.Range(1.25f, 1.55f) : Random.Range(0.7f, 1.2f);
-                    float high = reach * (column ? Random.Range(1.5f, 4.5f) : Random.Range(0.5f, 1.6f));
+                    float high = reach * (column ? Random.Range(1.5f, under ? 5.5f : 4.5f) : Random.Range(0.5f, 1.6f));
                     float speed = Mathf.Sqrt(2f * g * high) / Mathf.Sin(tilt);
                     o.vx = Mathf.Cos(turn) * Mathf.Cos(tilt) * speed + v0.x * 0.3f; o.vy = Mathf.Sin(tilt) * speed; o.vz = Mathf.Sin(turn) * Mathf.Cos(tilt) * speed + v0.z * 0.3f;
                     o.flags = Ballistic | DiesOnGround;
@@ -557,7 +671,7 @@ namespace VolumetricExplosions
             }
         }
 
-        void Shock(Vector3 c, float R, bool onGround)
+        void Shock(Vector3 c, float R, bool onGround, float fire, float dirt, Color dust)
         {
             lastRing = time;
             if (Assets.Shock != null && sound > 0f)
@@ -566,7 +680,16 @@ namespace VolumetricExplosions
                 // the fireball faster than sound and slows to the speed of sound, weakening as it spreads.
                 int at = waveCount < waves.Length ? waveCount++ : 0;
                 if (onGround) c.y = GroundAt(c.x, c.z);
-                waves[at] = new Wave { x = c.x, y = c.y, z = c.z, ground = onGround, start = 0.6f * R, radius = 0.6f * R, reach = Mathf.Clamp(R * 30f, 120f, 900f), power = Mathf.Min(0.12f, 0.05f + 0.004f * R) };
+                var wave = new Wave { x = c.x, y = c.y, z = c.z, ground = onGround, start = 0.6f * R, radius = 0.6f * R, reach = Mathf.Clamp(R * 30f, 120f, 900f), power = Mathf.Min(0.12f, 0.05f + 0.004f * R) };
+                try { Condense(ref wave, c, fire, R); }
+                catch (Exception) { wave.cloud = 0f; }
+                // (since 0.8.0: the ring of dust it lifts off bare ground as it sweeps over it, see RingDust)
+                float size = Mathf.Pow(0.1f * Mathf.Max(fire, 0f), 1f / 3f);
+                if (onGround && dirt > 0f && !vacuum && size >= 1.5f && Settings.TestRing != 1f)
+                {
+                    wave.dust = dirt; wave.dustSize = size; wave.dustFrom = 0.9f * R; wave.dustReach = Mathf.Max(22f * size, 1.5f * R); wave.dustColour = dust;
+                }
+                waves[at] = wave;
                 return;
             }
             ParticleSystem ring;
@@ -585,6 +708,89 @@ namespace VolumetricExplosions
             ring.Emit(new ParticleSystem.EmitParams { position = c, startSize = R * 11f, startLifetime = 0.26f + 0.012f * R, startColor = new Color32(255, 255, 255, (byte)(onGround ? 255 : 110)) }, 1);
         }
 
+        /// <summary>
+        /// Whether a front leaves a cloud behind it for a moment (a Wilson cloud), and how. Behind the squeezed air of a front
+        /// comes air thinned below what it was, for about three times as long; air thinned that quickly cools, about 0.8 of a
+        /// degree for each kilopascal; and where that takes it below its dew point the water in it turns to cloud, and back
+        /// again as the air comes back. How far out that happens goes with the blast's size and how damp the air is: in air
+        /// near its dew point (fog, under a low cloud's base, over the sea at night) a big blast throws a white dome round
+        /// itself that is gone within a second; in dry air there is none. A blast is sized here by its charge in kilograms of
+        /// TNT, taken as a tenth of the propellant that burns (as is reckoned for liquid propellants going off on a launch pad),
+        /// and the thinning behind its front as Kinney and Graham give it, 35/Z kilopascals at the most (Z the distance over the
+        /// cube root of the charge). The shader draws it, from what is worked out here (see tools/shaderpack/shock.glsl).
+        /// </summary>
+        void Condense(ref Wave w, Vector3 c, float fire, float R)
+        {
+            float size = Mathf.Pow(0.1f * fire, 1f / 3f);
+#if DEV
+            CondenseSaid = "no cloud: size " + size.ToString("F2") + " m";
+#endif
+            if (size < 1f || vacuum) return;
+            Vector3d at = t.TransformPoint(c), up = t.up;
+            double ut = Planetarium.GetUniversalTime();
+            float higher = 8f * size;
+            float rh = Damp(at, ut), rhAbove = Damp(at + up * higher, ut);
+            float kelvin = (float)FlightGlobals.getExternalTemperature(at, body), celsius = kelvin - 273.15f;
+#if DEV
+            CondenseSaid += ", damp " + rh.ToString("F2") + " (" + rhAbove.ToString("F2") + " " + higher.ToString("F0") + " m up), " + celsius.ToString("F1") + " C";
+#endif
+            if (rh <= 0.05f && rhAbove <= 0.05f) return;
+            // (too cold to hold water enough to show)
+            if (celsius < -25f) return;
+            float gap = DewGap(rh, celsius), gapAbove = DewGap(rhAbove, celsius - 0.0098f * higher);
+            // (the cooling goes with the air's own temperature: put against the gap, as the shader reckons it at 15 degrees)
+            float k = 288f / Mathf.Max(kelvin, 150f);
+            w.dew = gap * k;
+            w.lapse = (gap - gapAbove) / higher * k;
+            // Where the cloud may still form at the furthest: where the thinning still cools the air as far as the dampest
+            // air in reach is from its dew point. Close in the front heats the air more than its wake ever cools it: from
+            // about three and a half of the blast's sizes out (the shader).
+            float least = Mathf.Max(0f, Mathf.Min(w.dew, w.dew - w.lapse * 40f * size));
+            float furthest = Mathf.Min(25f, 28.5f / Mathf.Max(least, 0.7f));
+#if DEV
+            CondenseSaid += ", dew gap " + w.dew.ToString("F2") + " K, out to " + furthest.ToString("F1") + " sizes";
+#endif
+            if (furthest < 3.6f) return;
+            w.cloud = size;
+            w.fire = 0.9f * R;
+            w.gone = (furthest + 4.5f) * size;
+#if DEV
+            CondenseSaid = "size " + size.ToString("F2") + " m, damp " + rh.ToString("F2") + " (" + rhAbove.ToString("F2") + " " + higher.ToString("F0") + " m up), " + celsius.ToString("F1") +
+                " C, dew gap " + w.dew.ToString("F2") + " K (" + (w.lapse * 100f).ToString("F2") + " K less each 100 m up), cloud out to " + furthest.ToString("F1") + " sizes, gone at " + w.gone.ToString("F0") + " m";
+#endif
+        }
+
+#if DEV
+        public static string CondenseSaid = "";
+        public static string Condensed() => CondenseSaid;
+#endif
+
+        /// <summary>How damp the air is at a place, by the weather mod if there is one (Sources.Damp), else about as it mostly is.</summary>
+        float Damp(Vector3d world, double ut)
+        {
+            if (Sources.Damp != null)
+            {
+                try { return Mathf.Clamp01(Sources.Damp(world, ut)); }
+                catch (Exception) { }
+            }
+            // (no weather mod: only air with water in it, damper over the sea and at night, drier higher up)
+            if (!body.atmosphereContainsOxygen) return 0f;
+            double alt = body.GetAltitude(world), lat = body.GetLatitude(world), lon = body.GetLongitude(world);
+            bool sea = body.ocean && body.TerrainAltitude(lat, lon, true) <= 0.0;
+            float rh = sea ? 0.78f : 0.62f;
+            if (!sunUp) rh += 0.08f;
+            if (alt > 2500.0) rh *= Mathf.Clamp01(1f - (float)(alt - 2500.0) / 9000f);
+            return rh;
+        }
+
+        /// <summary>How far above its dew point air is, in kelvin, at a relative humidity and a temperature in degrees (Magnus's formula).</summary>
+        static float DewGap(float rh, float celsius)
+        {
+            const float a = 17.62f, b = 243.12f;
+            float g = Mathf.Log(Mathf.Clamp(rh, 0.01f, 1f)) + a * celsius / (b + celsius);
+            return Mathf.Max(0f, celsius - b * g / (a - g));
+        }
+
         // ================================================================== things that go on after the blast
 
         void Waves(float dt)
@@ -598,11 +804,82 @@ namespace VolumetricExplosions
                 // As it passes the camera, the camera is jolted.
                 float away = (camL - new Vector3(w.x, w.y, w.z)).magnitude;
                 if (before < away && w.radius >= away && Air.Instance != null) Air.Instance.Jolt(Mathf.Min(1.5f, 60f * Strength(w)));
-                if (w.radius >= w.reach) waves[n] = waves[--waveCount];
+                if (w.dust > 0f && before < w.dustReach) RingDust(ref w, Mathf.Max(before, w.dustFrom), Mathf.Min(w.radius, w.dustReach));
+                if (w.radius >= Mathf.Max(Mathf.Max(w.reach, w.gone), w.dust > 0f ? w.dustReach : 0f)) waves[n] = waves[--waveCount];
             }
         }
 
         public int WaveCount => waveCount;
+
+        /// <summary>
+        /// (Since 0.8.0.) The dust a front lifts off bare ground as it sweeps over it, between where it was a step ago and where it is
+        /// now. Behind a blast's front the air rushes outwards for a moment (the blast wind: some 15 m/s where the front squeezes the
+        /// air by a hundredth of an atmosphere, more nearer in), and that lifts the loose dust it passes over: films of big blasts on
+        /// open ground show a low ring of dust racing out from under the fireball at the front's speed, far beyond the crater's own
+        /// skirt (see Dust), and lying as a haze on the ground after. Lifted out to where the front still squeezes the air by some 3
+        /// kPa (about 22 times the cube root of the charge in kilograms of TNT: 130 m for 200 kg, 220 m for a tonne), thinner the
+        /// further out, as the push falls; the ground's own colour, low, carried out a little way by that wind and settling over
+        /// several seconds. Not off paving or water, nor where the air is too thin to carry a front (see Burst).
+        /// </summary>
+        /// <summary>
+        /// (Since 0.8.0.) The ground's height at a place in the site's axes as far out as a blast's ring of dust goes: the lattice's
+        /// where it reaches (see Land), else the planet's own terrain there (no buildings), which beyond the lattice's edge is better
+        /// than the edge's height held on, on a slope. Whether that place is under water.
+        /// </summary>
+        float GroundFar(float x, float z, float fallback, out bool wet)
+        {
+            wet = false;
+            if (land != null && land.Covers(x, z)) return GroundAt(x, z);
+            if (body == null || body.pqsController == null) return hasGround ? GroundAt(x, z) : fallback;
+            Vector3d world = frame.ToWorld(new Vector3(x, 0f, z));
+            double lat = body.GetLatitude(world), lon = body.GetLongitude(world);
+            double alt = body.TerrainAltitude(lat, lon, true);
+            if (body.ocean && alt < 0.0) { wet = true; alt = 0.0; }
+            return frame.ToLocal(body.GetWorldSurfacePosition(lat, lon, alt)).y;
+        }
+
+        void RingDust(ref Wave w, float from, float to)
+        {
+            if (to <= from) return;
+            float q = Mathf.Clamp(Settings.Quality * Air.Room(), 0.3f, 1.5f);
+            // (puffs as wide as the dust has spread where they lie, wider further out, and as many as cover the ground the front
+            // swept over this step, eight tenths of it: as many as the same number for every metre out had left the outer ring
+            // one puff to every forty metres round it, and nothing of it was seen beyond eighty metres of a tonne's blast)
+            float mid = 0.5f * (from + to), wide = 1.2f + 0.05f * mid;
+            float want = q * w.dust * 0.8f * (to * to - from * from) / (wide * wide) + w.dustCarry;
+            int n = Mathf.Min((int)want, 400);
+            w.dustCarry = Mathf.Min(want - n, 400f);
+            for (int k = 0; k < n; k++)
+            {
+                float rr = Random.Range(from, to), turn = Random.Range(0f, Mathf.PI * 2f);
+                float cx = Mathf.Cos(turn), cz = Mathf.Sin(turn);
+                float px = w.x + cx * rr, pz = w.z + cz * rr;
+                float floor = GroundFar(px, pz, w.y, out bool wet);
+                if (wet) continue;                                                                    // (over water: no dust)
+                int i = Add();
+                if (i < 0) break;
+                ref P o = ref p[i];
+                // (how hard the blast wind blows there: full within eight of the blast's sizes, a third of that at the ring's end)
+                float strength = Mathf.Clamp01(Mathf.Pow(8f * w.dustSize / Mathf.Max(rr, 1f), 1.2f));
+                o.x = px; o.z = pz;
+                o.y = floor + Random.Range(0.3f, 1.2f) * (0.6f + 0.15f * w.dustSize);
+                float wind = Mathf.Clamp(40f * strength, 4f, 40f) * Random.Range(0.6f, 1.2f);
+                o.kx = cx * wind; o.kz = cz * wind; o.ky = wind * Random.Range(0.08f, 0.3f);
+                o.kloss = 1.6f; o.drag = 2f;
+                o.r = (1.2f + 0.05f * rr) * Random.Range(0.8f, 1.3f);
+                o.grow = 0.25f + 0.004f * rr;
+                o.turb = 0.4f + 0.04f * wind;
+                o.rise = -Random.Range(0.02f, 0.15f);
+                o.mass = Random.Range(0.3f, 0.8f) * o.r * o.r * 1.2f * (0.35f + 0.65f * strength);
+                o.fadeIn = Random.Range(0.05f, 0.15f);
+                o.life = Random.Range(5f, 12f) * Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.5f, 1f, Mathf.Clamp01(air));
+                float tone = Random.Range(0.8f, 1.1f);
+                o.ar = w.dustColour.r * tone; o.ag = w.dustColour.g * tone; o.ab = w.dustColour.b * tone;
+                o.swell = Swell(new Vector3(cx, 0.2f, cz), wind, o.kloss, o.r);
+                o.tile = Random.value < 0.5f ? Wispy() : Lumpy();
+                Born(i);
+            }
+        }
 
         /// <summary>How far a front pushes the picture aside where it is now, in heights of the screen: weaker the further it has spread, gone at the end of its reach.</summary>
         static float Strength(Wave w) => w.power * Mathf.Min(1f, 2.2f * w.start / w.radius + 0.25f) * Mathf.Pow(Mathf.Max(0f, 1f - w.radius / w.reach), 0.7f);
@@ -614,8 +891,26 @@ namespace VolumetricExplosions
             {
                 Wave w = waves[n];
                 float push = Strength(w) * Settings.Bend;
-                if (push < 0.0005f) continue;
-                into.Add(new Air.Front { middle = t.TransformPoint(new Vector3(w.x, w.y, w.z)), up = t.up, radius = w.radius, push = push, ground = w.ground });
+                bool cloud = w.cloud > 0f && w.radius < w.gone;
+                if (push < 0.0005f && !cloud) continue;
+                var front = new Air.Front { middle = t.TransformPoint(new Vector3(w.x, w.y, w.z)), up = t.up, radius = w.radius, push = push, ground = w.ground };
+                if (cloud)
+                {
+                    // (and the light on it, as on the smoke: see TuneVolume)
+                    front.cloud = new Vector4(w.cloud, w.dew, w.lapse, w.fire);
+                    front.sun = (Vector3)(frame.east * sunL.x + frame.up * sunL.y + frame.north * sunL.z);
+                    front.sunLight = new Vector3(sunR, sunG, sunB);
+                    front.sky = new Vector3(Mathf.Max(ambR, 0.16f * sunR), Mathf.Max(ambG, 0.17f * sunG), Mathf.Max(ambB, 0.2f * sunB));
+                    // (and the fire's light from inside it: its strongest lamp near the middle, as the smoke takes it)
+                    float most = 0f;
+                    for (int k = 0; k < lampCount; k++)
+                    {
+                        float dx = lamps[k].x - w.x, dy = lamps[k].y - w.y, dz = lamps[k].z - w.z;
+                        if (dx * dx + dy * dy + dz * dz < 9f * w.fire * w.fire + 100f) most = Mathf.Max(most, lamps[k].power);
+                    }
+                    front.fire = new Vector3(fireR, fireG, fireB) * Mathf.Min(0.25f * most, 1f);
+                }
+                into.Add(front);
             }
         }
 
@@ -648,7 +943,8 @@ namespace VolumetricExplosions
             int at = lampCount < lamps.Length ? lampCount++ : 0;
             if (at == 0 && lampCount == lamps.Length)
                 for (int n = 1; n < lampCount; n++) if (lamps[n].power < lamps[at].power) at = n;
-            lamps[at] = new Lamp { x = x, y = y, z = z, r = r, peak = peak, power = peak, life = life, tint = tint, steady = steady, flash = flash, climb = climb };
+            lampSeed = (lampSeed + 7.31f) % 997f;
+            lamps[at] = new Lamp { x = x, y = y, z = z, r = r, peak = peak, power = peak, life = life, tint = tint, steady = steady, flash = flash, climb = climb, seed = lampSeed };
             return at;
         }
 
@@ -660,8 +956,18 @@ namespace VolumetricExplosions
                 ref Lamp l = ref lamps[n];
                 l.age += dt;
                 if (l.age >= l.life) { lamps[n] = lamps[--lampCount]; continue; }
-                float left = 1f - l.age / l.life, flicker = Mathf.PerlinNoise(time * 11f, n * 3.7f);
-                l.power = l.steady ? l.peak * Mathf.Min(1f, left * 2.8f) * (0.75f + 0.25f * flicker) : l.peak * left * left * (0.88f + 0.12f * flicker);
+                // (each lamp its own pattern of flicker: by its place in the list, as it was, it jumped to another's whenever a lamp went out)
+                float left = 1f - l.age / l.life, flicker = Mathf.PerlinNoise(time * 11f, l.seed);
+                if (l.steady && !l.quiet && Settings.TestFireLight != 1f)
+                {
+                    // A fire burning on the ground puffs: its flame swells and gathers itself again, and its light with it, the more
+                    // slowly the wider it is (about 1.5 / √D times a second, D its width in metres: once in two and a half seconds
+                    // for fifteen metres, one and a half times a second for one); over that, the quick flicker of its tongues.
+                    // (Until 0.8.0 only the quick flicker, the same for a candle as for a burning tank farm.)
+                    float wide = Mathf.Max(0.5f, 1.25f * l.r), puff = Mathf.PerlinNoise(time * 2.5f / Mathf.Sqrt(wide), l.seed + 31.7f);
+                    l.power = l.peak * Mathf.Min(1f, left * 2.8f) * (0.6f + 0.36f * puff + 0.14f * flicker);
+                }
+                else l.power = l.steady ? l.peak * Mathf.Min(1f, left * 2.8f) * (0.75f + 0.25f * flicker) : l.peak * left * left * (0.88f + 0.12f * flicker);
                 l.y += l.climb * dt;
                 l.climb *= 1f / (1f + 0.25f * dt);
                 if (l.vx != 0f || l.vy != 0f || l.vz != 0f)
@@ -718,10 +1024,39 @@ namespace VolumetricExplosions
                 int at = (lamps[which].tint * 6 + 3) * 3;
                 light.transform.localPosition = new Vector3(lamps[which].x, lamps[which].y, lamps[which].z);
                 light.color = new Color(Flames[at], Flames[at + 1], Flames[at + 2]);
-                light.intensity = Mathf.Min(8f, lamps[which].power * 1.4f);
+                // (As bright beside what else lights the scene as a fire is: in the open by day what it adds near it is little beside
+                // the sun's light; by night beside the space centre's floodlights it is many of them. The game's lights are not
+                // reckoned in real amounts, and the eye (Natural Light's) opens to what it sees: so it is made stronger as the sun
+                // goes, by its light here (after the weather's clouds). Until 0.8.0 it was as strong by night as by day, and a
+                // burning pool lit next to nothing round it at night.)
+                float daylight = Mathf.Sqrt(Mathf.Max(0f, 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB));
+                float gain = Settings.TestFireLight == 1f ? 1f : Mathf.Lerp(2.5f, 1f, Mathf.Clamp01(daylight * 1.6f));
+                light.intensity = Mathf.Min(8f, lamps[which].power * 1.4f * gain);
                 light.range = Mathf.Max(22f, lamps[which].r * 8f);
+                // (the strongest fire's light drawn for every dot it reaches, always: left to the game, at night beside the
+                // space centre's floodlights it was made one of the cheap kind, worked out at the corners of what it lights,
+                // and on the great flat pieces of the ground and the paving that is nothing to be seen)
+                light.renderMode = slot == 0 && Settings.TestFireLight != 1f ? LightRenderMode.ForcePixel : LightRenderMode.Auto;
             }
         }
+
+#if DEV
+        /// <summary>(What this patch's lights on the scene are doing: on or off, how strong, how far they reach, where, of which kind; and its lamps.)</summary>
+        public string LightsSaid()
+        {
+            var say = new System.Text.StringBuilder();
+            for (int slot = 0; slot < lights.Length; slot++)
+            {
+                Light l = lights[slot];
+                if (l == null) { say.Append("light ").Append(slot).Append(": none; "); continue; }
+                say.Append("light ").Append(slot).Append(l.enabled ? " on" : " off").Append(", intensity ").Append(l.intensity.ToString("F2")).Append(", range ").Append(l.range.ToString("F0"))
+                   .Append(", ").Append(l.renderMode).Append(", at ").Append(l.transform.localPosition.ToString("F1")).Append(", mask ").Append(l.cullingMask).Append("; ");
+            }
+            say.Append(lampCount).Append(" lamps:");
+            for (int n = 0; n < lampCount; n++) say.Append(" [").Append(lamps[n].power.ToString("F2")).Append(" r ").Append(lamps[n].r.ToString("F1")).Append(lamps[n].quiet ? " quiet" : "").Append(lamps[n].steady ? " steady" : "").Append("]");
+            return say.ToString();
+        }
+#endif
 
         /// <summary>Spilled propellant goes on burning on the ground, and that is where the column of smoke comes from.</summary>
         void AddFire(Plan pl, Vector3 c, float R, float q)
@@ -944,12 +1279,19 @@ namespace VolumetricExplosions
                 float off = Vector3.Dot(way, blastUp);
                 way += blastUp * (Mathf.Abs(off) * Random.Range(0.4f, 1f) + (onGround ? 0.25f : 0f) - off);
                 way.Normalize();
-                float speed = Mathf.Min(120f, Mathf.Sqrt(2f * g * R * Random.Range(0.8f, 3.2f)) + 3f);
+                // (Thrown out of the fireball and well clear of it, at three to seven of its radii a second (up to 120 m/s), each
+                // trailing a streak as thick as the fire's own lumps: the "octopus" of a big explosion in footage, burning pieces
+                // arcing out with their smoke behind them. Thrown as high as one to three radii, as they first were, at about
+                // twenty-five metres a second, and trailing half a metre, they never left the fireball, and were not seen at all.)
+                float speed = Mathf.Min(120f, R * Random.Range(3f, 7f) + 6f);
                 frags[fragCount++] = new Frag
                 {
                     x = c.x, y = c.y + 0.3f, z = c.z, vx = v0.x * 0.7f + way.x * speed, vy = v0.y * 0.7f + way.y * speed, vz = v0.z * 0.7f + way.z * speed,
-                    life = Mathf.Clamp(2f * speed / g + 1.5f, 3f, 14f), size = Mathf.Clamp(0.16f + 0.03f * R, 0.2f, 0.6f) * Random.Range(0.7f, 1.3f),
+                    life = Mathf.Clamp(2f * speed / g + 1.5f, 3f, 14f), size = Mathf.Clamp(0.25f + 0.05f * R, 0.35f, 1.5f) * Random.Range(0.7f, 1.3f),
                     tint = (byte)pl.tint, white = pl.whiteTrails,
+                    // (its trail begun only once it is out of the fireball: laid inside it, the trail's first puffs, cooling to
+                    // smoke at once, were dark spots on the fire's face)
+                    due = Mathf.Min(1.5f, 1.05f * R / Mathf.Max(speed, 1f)),
                 };
             }
         }
@@ -972,11 +1314,15 @@ namespace VolumetricExplosions
                     f.x += f.vx * dt; f.y += f.vy * dt; f.z += f.vz * dt;
                     if (hasGround && f.y < GroundAt(f.x, f.z) + 0.1f)
                     {
-                        // It lands and burns out where it lies.
+                        // It lands and burns out where it lies. (Since 0.8.0: throwing up a puff of what it strikes, as hard as it came
+                        // down; burning for three to ten seconds, its smoke thinning as its fire dies, where it had burnt out in two to five;
+                        // and out at once in water.)
+                        float struck = Mathf.Sqrt(f.vx * f.vx + f.vy * f.vy + f.vz * f.vz);
                         f.y = GroundAt(f.x, f.z) + 0.1f;
-                        f.down = true;
+                        if (Settings.TestRing != 1f) Strike(f.x, f.y, f.z, f.vx, f.vz, struck, f.size);
+                        f.down = true; f.downAt = f.age;
                         f.vx = f.vy = f.vz = 0f;
-                        f.life = Mathf.Min(f.life, f.age + Random.Range(1.5f, 5f));
+                        f.life = groundWet ? f.age : Settings.TestRing == 1f ? Mathf.Min(f.life, f.age + Random.Range(1.5f, 5f)) : f.age + Random.Range(3f, 10f);
                     }
                 }
                 f.due -= dt;
@@ -990,11 +1336,58 @@ namespace VolumetricExplosions
                 }
                 while (f.due <= 0f)
                 {
-                    f.due += f.down ? every * 2.5f : laid;
+                    f.due += f.down ? every * (2.5f + 0.6f * (f.age - f.downAt)) : laid;
                     if (!Trail(f.x, f.y, f.z, f.vx, f.vy, f.vz, f.size, f.tint, f.white, lasts)) break;
                 }
             }
             TakeTrails(dt);                 // (and the trails other mods say are in it: see Trails)
+        }
+
+        /// <summary>
+        /// (Since 0.8.0.) A piece coming down throws up what it strikes: a puff of the ground's dust off bare ground, a splash of spray off
+        /// water, grit off paving, more and higher the harder it lands; off airless ground the dust flies out on its own paths and
+        /// falls back, as the rovers' and landers' films show of anything striking the Moon.
+        /// </summary>
+        void Strike(float x, float y, float z, float vx, float vz, float struck, float size)
+        {
+            if (struck < 4f) return;
+            int n = Mathf.Clamp((int)(struck * size * 0.25f * Mathf.Clamp(Settings.Quality * Air.Room(), 0.3f, 1.5f)), 1, 8);
+            Color what = groundWet ? new Color(0.86f, 0.88f, 0.9f) : groundBare ? groundDust : new Color(0.5f, 0.49f, 0.47f);
+            for (int k = 0; k < n; k++)
+            {
+                int i = Add();
+                if (i < 0) return;
+                ref P o = ref p[i];
+                float turn = Random.Range(0f, Mathf.PI * 2f), outward = struck * Random.Range(0.05f, 0.15f);
+                o.x = x; o.y = y + 0.15f; o.z = z;
+                float tone = Random.Range(0.85f, 1.1f);
+                o.ar = what.r * tone; o.ag = what.g * tone; o.ab = what.b * tone;
+                if (vacuum)
+                {
+                    float up = struck * Random.Range(0.1f, 0.35f);
+                    o.vx = Mathf.Cos(turn) * outward * 2f; o.vy = up; o.vz = Mathf.Sin(turn) * outward * 2f;
+                    o.flags = Ballistic | DiesOnGround;
+                    o.r = 0.15f + 0.3f * size * Random.Range(0.6f, 1.2f);
+                    o.grow = 0.1f * outward;
+                    o.mass = Random.Range(0.15f, 0.45f) * o.r * o.r * 6f;
+                    o.life = 20f;
+                    o.tile = Specks();
+                }
+                else
+                {
+                    o.kx = Mathf.Cos(turn) * outward + vx * 0.1f; o.kz = Mathf.Sin(turn) * outward + vz * 0.1f; o.ky = struck * Random.Range(0.08f, 0.2f);
+                    o.kloss = 3f; o.drag = 3f;
+                    o.r = 0.2f + size * Random.Range(0.6f, 1.2f);
+                    o.grow = groundWet ? 0.5f : 0.3f;
+                    o.turb = 0.5f;
+                    o.rise = groundWet ? -0.6f : -0.1f;
+                    o.mass = Random.Range(0.4f, 0.9f) * o.r * o.r * 3f;
+                    o.life = groundWet ? Random.Range(1f, 2.2f) : Random.Range(2f, 5f) * Mathf.Max(0.3f, Settings.Smoke);
+                    o.fadeIn = 0.05f;
+                    o.tile = groundWet ? Specks() : Random.value < 0.5f ? Wispy() : Lumpy();
+                }
+                Born(i);
+            }
         }
 
         /// <summary>One puff of the trail a burning thing leaves: flame that turns to smoke where it was.</summary>
@@ -1067,11 +1460,17 @@ namespace VolumetricExplosions
         void Glows()
         {
             int n = 0;
+            // (The glare is the light a fire throws into the air round it, and what the eye's own lens spreads round a light far
+            // brighter than what is round it: at night and at dusk, a fire's. By day a fire is hardly brighter than the sunlit
+            // ground and smoke round it, and no glare is seen. At its full strength by day, as it was, every fire stood in a soft
+            // yellow ball of its own light, and where that ball met the ground each burning pool was a smooth glowing pillow:
+            // "a glowing volumetric orb ... doesn't really look like fire" (the owner, 2026-10-17).)
+            float glare = Settings.TestGlare == 1f ? 1f : Mathf.Lerp(1f, 0.12f, daylight);
             for (int k = 0; k < lampCount && n < glows.Length; k++)
             {
                 if (lamps[k].quiet) continue;
                 int at = (lamps[k].tint * 6 + 3) * 3;
-                float v = Mathf.Min(1f, lamps[k].power * 0.3f) * 255f;
+                float v = Mathf.Min(1f, lamps[k].power * 0.3f) * 255f * glare;
                 glows[n++] = Glow(lamps[k].x, lamps[k].y, lamps[k].z, lamps[k].r * 3.6f, Flames[at] * v, Flames[at + 1] * v, Flames[at + 2] * v);
             }
             glowBack.SetParticles(glows, n);

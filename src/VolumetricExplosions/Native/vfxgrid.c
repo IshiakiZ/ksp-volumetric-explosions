@@ -133,10 +133,17 @@ EXPORT int vfx_signature(void) { return (int)P_SIGNATURE; }
 EXPORT int vfx_size_of_p(void) { return (int)sizeof(P); }
 EXPORT int vfx_size_of_grid(void) { return (int)sizeof(Grid); }
 
-EXPORT void vfx_free(void *work)
+// ---- work areas kept for the patches to come
+// (A work area is some 23 MB, nearly all of it to be cleared as it is made: 0.5 to 5.5 ms of the game's thread at every
+// new patch, and a rocket's climb begins one every three or four seconds (2026-10-18). Each grid clears or writes every
+// part of a work area that it reads, as one patch's grids follow one another in the same area, so one whose patch has
+// ended is as good as new: two are kept. Only the game's thread makes and frees them.)
+#define KEPT 2
+static void *keptWork[KEPT];
+static int keptCount;
+
+static void release(Work *w)
 {
-    Work *w = (Work *)work;
-    if (w == NULL) return;
     for (int c = 0; c < 5; c++) free(w->field[c]);
     for (int level = 1; level < LEVELS; level++) for (int c = 0; c < 5; c++) free(w->wide[level][c]);
     free(w->spare0); free(w->spare1); free(w->layer[0]); free(w->layer[1]);
@@ -145,8 +152,23 @@ EXPORT void vfx_free(void *work)
     free(w);
 }
 
+EXPORT void vfx_free(void *work)
+{
+    Work *w = (Work *)work;
+    if (w == NULL) return;
+    if (keptCount < KEPT) { keptWork[keptCount++] = w; return; }
+    release(w);
+}
+
+// The kept work areas let go (the scene is going).
+EXPORT void vfx_drop(void)
+{
+    while (keptCount > 0) release((Work *)keptWork[--keptCount]);
+}
+
 EXPORT void *vfx_new(void)
 {
+    if (keptCount > 0) return keptWork[--keptCount];
     Work *w = (Work *)calloc(1, sizeof(Work));
     if (w == NULL) return NULL;
     int ok = 1;

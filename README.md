@@ -21,11 +21,14 @@ For Kerbal Space Program 1.12.x. It needs no other mod.
   flash and pale smoke, a battery a blue-white flash. So does where: thin air, a vacuum, night.
 * **Smoke that behaves like smoke:** it rises and rolls, drifts on the wind, lies on the ground, goes round buildings
   and is pushed about by craft.
-* **Shock fronts, pieces and burn marks,** shadows under the smoke, and fires that burn on where fuel was spilt.
-* **Other mods' resources** count as the stock ones they are like, and for what each is worth beside it: liquid
-  hydrogen as fuel (with a clear flame, and nearly three times kerosene's fire for its weight), liquid oxygen as
-  oxidiser, argon as xenon, and so on. `PluginData/resources.cfg` lists every resource of the Community Resource
-  Pack; one not listed is guessed at by its name. With RealBattery, a battery's charge counts for all it holds.
+* **Shock fronts, pieces and burn marks,** shadows under the smoke, and fires that burn on where fuel was spilt; a big
+  blast's front lifting a ring of dust off bare ground, pieces throwing up dust or spray where they land, burn marks
+  as real ones look, lopsided and streaked with soot, no two alike (0.8.0).
+* **Its own bang** (0.8.0): a crack close by, a boom and a long rumble far off, as big as what went off, heard when its
+  sound gets to you.
+* **Other mods' resources** count as the stock ones they are like, for what each is worth beside it (liquid hydrogen as
+  fuel with a clear flame, liquid oxygen as oxidiser, argon as xenon, and so on): `PluginData/resources.cfg` lists all of
+  the Community Resource Pack's. With RealBattery, a battery's charge counts for all it holds. (By Rjoande.)
 * **Engines' flames and smoke,** with [Engine Flames](https://github.com/IshiakiZ/ksp-engine-flames) and
   [Rocket Smoke](https://github.com/IshiakiZ/ksp-rocket-smoke), which are made in the same air.
 
@@ -49,7 +52,7 @@ long it hangs), `wind`, and `enabled = false` for the game's own explosions.
 
 ## Works on
 
-Mac: tried. Windows 11 (Direct3D 11 and OpenGL): 0.6 tried; this version built for it, not run there. Linux: never run.
+Mac: tried. Windows 11 (Direct3D 11 and OpenGL): this version tried (launches, crashes, the fire's mended light). Linux: never run.
 
 **More:** [the long description](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/The-long-description) (everything in full,
 and what was tried on each system) and the rest of the [wiki](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki).

@@ -53,6 +53,7 @@ namespace VolumetricExplosions
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate IntPtr Begin();
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void End(IntPtr work);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int Maker(IntPtr work, ref Grid grid);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void Plain();
 
         [DllImport("libSystem.dylib", EntryPoint = "dlopen")] static extern IntPtr MacOpen(string path, int mode);
         [DllImport("libSystem.dylib", EntryPoint = "dlsym")] static extern IntPtr MacFind(IntPtr library, string name);
@@ -79,9 +80,12 @@ namespace VolumetricExplosions
 #endif
 
         static bool tried;
+        static IntPtr library;
+        static int system;
         static Begin begin;
         static End end;
         static Maker maker;
+        static Plain drop;
 
         /// <summary>Whether grids can be made by the library. (Why not, if not, is in the log.)</summary>
         public static bool Ready
@@ -101,8 +105,26 @@ namespace VolumetricExplosions
             if (work != IntPtr.Zero && end != null) end(work);
         }
 
+        /// <summary>The work areas the library keeps for the patches to come, let go (the scene is going).</summary>
+        public static void Drop()
+        {
+            if (drop != null) try { drop(); } catch (Exception) { }
+        }
+
         /// <summary>Make a grid. Nought if it was made.</summary>
         public static int Make(IntPtr work, ref Grid grid) => maker(work, ref grid);
+
+        /// <summary>
+        /// Another of the library's functions, by its name, for another mod: Keystone's Readback takes the library's asynchronous
+        /// read of pictures from the graphics card (asyncread.c) from here, looked up by name. Nothing if the library is not loaded
+        /// (then that mod reads as it did without it).
+        /// </summary>
+        public static IntPtr Symbol(string name)
+        {
+            if (!Ready || library == IntPtr.Zero || string.IsNullOrEmpty(name)) return IntPtr.Zero;
+            try { return system == 0 ? FindOnMac(library, name) : system == 1 ? FindOnLinux(library, name) : FindOnWindows(library, name); }
+            catch (Exception) { return IntPtr.Zero; }
+        }
 
         static void Load()
         {
@@ -141,6 +163,8 @@ namespace VolumetricExplosions
                     return;
                 }
                 begin = first; end = last; maker = make;
+                drop = Call<Plain>(library, system, "vfx_drop");         // (a library older than 2026-10-18 keeps none: nothing to let go)
+                Native.library = library; Native.system = system;
                 Addon.Log("grids are made by " + Path.GetFileName(path));
             }
             catch (Exception ex)

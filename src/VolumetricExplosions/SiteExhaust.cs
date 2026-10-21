@@ -19,9 +19,9 @@ namespace VolumetricExplosions
         public float running;          // 0 to 1: how hard it is burning
         public float amount;           // of smoke: 1 is a solid booster's, 0 none
         public float shade;            // how light the smoke is: 0.03 soot, 0.85 steam
-        public float warm;             // how brown the smoke is: 0 grey, 1 the brown of burnt kerosene
+        public float warm;             // how brown the smoke is: 0 grey, 1 the brown of burnt kerosene (a thermal's, since 0.8.0: above nought, dust lifted by a whirlwind, as much of the ground's colour)
         public float lasts;            // seconds the smoke hangs, in thick still air
-        public int tint;               // the flame's colours, as a blast's: 0 fuel, 1 solid propellant, 2 monopropellant, 4 hydrogen
+        public int tint;               // the flame's colours, as a blast's: 0 fuel, 1 solid propellant, 2 monopropellant, 4 hydrogen; for engines also 5 methane, 6 the fuels that keep, 7 a reactor's, and (Level 5) 9 a jet's afterburner, 10 a kerosene engine's igniter
         public float fire;             // how bright its flame is, drawn as burning gas: 0 none of it (the smoke alone), 1 an engine's of its kind at full thrust (since 0.6.0: before, 1 was a kerosene engine's, whatever the kind)
         public Transform rides;        // what the nozzle is on (its ship): the flame is worked out in a patch of air that goes along with this, and so is the smoke while it is young (since 0.5.0). Without it there is no flame, and the smoke is laid straight into the air the ship leaves it in.
         public int kind;               // (since 0.5.0) what it is, one of ExhaustKind: an engine's jet, something burning with no jet, dust thrown up, a spray. Nought (unset): worked out from the rest (see ExhaustKind)
@@ -71,8 +71,8 @@ namespace VolumetricExplosions
         public static event System.Action Asked;
 
         /// <summary>Whether smoke said here will be drawn at all: the mod is running, and can draw smoke as a volume. (As flat sprites a rocket's smoke would be no better than the game's own.)</summary>
-        /// <summary>What this way in understands, for mods built against an older one to ask (not there before 0.6.0). 2: it knows for itself how thick and bright each kind of engine's flame is, and Exhaust.fire is against that kind's own usual (before, against kerosene's). 3 (0.7.0): it knows ExhaustKind.Plasma, a craft's re-entry glow.</summary>
-        public static int Level => 3;
+        /// <summary>What this way in understands, for mods built against an older one to ask (not there before 0.6.0). 2: it knows for itself how thick and bright each kind of engine's flame is, and Exhaust.fire is against that kind's own usual (before, against kerosene's). 3 (0.7.0): it knows ExhaustKind.Plasma, a craft's re-entry glow. 4 (0.8.0): it takes the weather's dampness (Damp). 5 (0.8.0): it knows two more fires, a jet's afterburner (tint 9) and a kerosene engine's green igniter (tint 10); and a thermal given warm above nought is dust lifted by a whirlwind (a dust devil: faster, narrower, the ground's colour).</summary>
+        public static int Level => 5;
         public static bool Ready => Air.Instance != null && Assets.Volume != null && Settings.Volume;
 
         /// <summary>Whether it was taken: not where there is no air to hold smoke, nor when there is no room left.</summary>
@@ -88,6 +88,14 @@ namespace VolumetricExplosions
         /// TestWind still wins over both.)
         /// </summary>
         public static System.Func<Vector3d, double, Breeze> Wind;
+
+        /// <summary>
+        /// (Since 0.8.0.) How damp a weather mod says the air is at a place (world space) and time: its relative humidity, 0 to 1
+        /// (1: all the water it can hold, as in fog or inside a cloud). Asked twice for each big blast, at its middle and a little
+        /// above, on the game's thread. Null, as installed: the air is taken to be about as damp as it mostly is, damper over the
+        /// sea and at night. A big blast's shock in air near its dew point leaves a cloud behind it for a moment (see Site.Shock).
+        /// </summary>
+        public static System.Func<Vector3d, double, float> Damp;
 
         internal static void Ask()
         {
@@ -119,7 +127,7 @@ namespace VolumetricExplosions
             return say.ToString();
         }
 #endif
-        struct Vent { public int id, lamp; public Vector3 last, laid, going, along; public float due, fire, seen, fed, kept, wide, flame, young; public bool begun; public int shot, puffed; }
+        struct Vent { public int id, lamp; public Vector3 last, laid, going, along; public float due, fire, seen, fed, kept, wide, flame, young; public bool begun; public int shot, puffed; public double r3a, r3b, r3c; }
         // A grid shows the smoke as it was when the grid was begun, and is in use from a frame or two after that until the
         // next is ready: on average this long after. A rocket doing three hundred metres a second goes twenty metres in
         // that time, and its smoke used to begin that far behind it, and further. So an engine's smoke is laid ahead of
@@ -164,6 +172,24 @@ namespace VolumetricExplosions
             for (int n = 0; n < cutCount; n++)
                 say.Append("\n  cut ").Append(n).Append(": from ").Append(Vector3.Dot(cuts[n].from - rim, cuts[n].back).ToString("F1")).Append(" m behind the nozzle and ").Append((cuts[n].from - rim - cuts[n].back * Vector3.Dot(cuts[n].from - rim, cuts[n].back)).magnitude.ToString("F1"))
                    .Append(" m off its line, soft ").Append(cuts[n].soft.ToString("F1")).Append(", far ").Append(cuts[n].far.ToString("F0")).Append(", much ").Append(cuts[n].much.ToString("F2")).Append(", wide ").Append(cuts[n].wide.ToString("F1")).Append(", early ").Append(laidEarly.ToString("F2"));
+            // (all its puffs along the trail, which climbs along the patch's y: how far they reach, how old they are, and how many in
+            // each 50 m from 400 m over the nozzle to 2 km under it, to find a stretch that holds none)
+            if (count > 0)
+            {
+                float lo = float.MaxValue, hi = float.MinValue, young = float.MaxValue, old = float.MinValue;
+                var bins = new int[48];
+                for (int i = 0; i < count; i++)
+                {
+                    float along = p[i].y - rim.y;
+                    lo = Mathf.Min(lo, along); hi = Mathf.Max(hi, along);
+                    young = Mathf.Min(young, p[i].age); old = Mathf.Max(old, p[i].age);
+                    int b = Mathf.FloorToInt((400f - along) / 50f);
+                    if (b >= 0 && b < bins.Length) bins[b]++;
+                }
+                say.Append("\n  puffs from ").Append(hi.ToString("F0")).Append(" to ").Append(lo.ToString("F0")).Append(" m over the nozzle, ages ").Append(young.ToString("F2")).Append(" to ").Append(old.ToString("F2"))
+                   .Append("; in each 50 m from 400 over it to 2000 under:");
+                foreach (int b in bins) say.Append(' ').Append(b);
+            }
             int shown = 0;
             for (int i = count - 1; i >= 0 && shown < 10; i -= Mathf.Max(1, count / 10), shown++)
                 say.Append("\n  puff ").Append(i).Append(": ").Append((new Vector3(p[i].x, p[i].y, p[i].z) - rim).ToString("F1")).Append(" from the nozzle, age ").Append(p[i].age.ToString("F2")).Append(", going ")
@@ -195,7 +221,7 @@ namespace VolumetricExplosions
 
         public bool Feeds(CelestialBody where, Vector3d world)
         {
-            if (where != body || space || vacuum || leaving || riding) return false;
+            if (where != body || space || (vented ? Smokeless : vacuum) || leaving || riding) return false;
             if (count > Settings.MaxParticles * 0.45f) return false;
             frame.Refresh();
             Vector3 at = frame.ToLocal(world);
@@ -208,6 +234,10 @@ namespace VolumetricExplosions
             float far = cloudy ? cloudFar : low ? 45f : Mathf.Clamp(3.5f * fedSpeed, 90f, 2500f);
             return (at - ventFrom).sqrMagnitude < far * far;
         }
+
+        // (since 0.8.0: where each engine's trail was last laid, and by which patch, for the next patch to go on from: see Vents)
+        struct Laid { public Site by; public Vector3 last, laid; public int frame; }
+        static readonly System.Collections.Generic.Dictionary<int, Laid> lastLaid = new System.Collections.Generic.Dictionary<int, Laid>();
 
         /// <summary>Whether this engine has been feeding this patch of air, or was until a moment ago.</summary>
         public bool Has(int id)
@@ -319,8 +349,7 @@ namespace VolumetricExplosions
             float q = Mathf.Clamp(Settings.Quality * Air.Room(), 0.15f, 1.5f);
             Vector3 allGoing = Vector3.zero, allAlong = Vector3.zero, youngRims = Vector3.zero;
             int flames = 0, youngCount = 0;
-            // (thin air holds smoke together for less long, and there is less in it for the smoke to be seen against)
-            float hangs = Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.3f, 1f, Mathf.Clamp01(air * 1.4f));
+            float hangs = Hangs();
             for (int f = 0; f < fedCount; f++)
             {
                 Exhaust e = fed[f];
@@ -337,11 +366,30 @@ namespace VolumetricExplosions
                     if (passes || ventCount >= vents.Length) continue;
                     v = ventCount++;
                     vents[v] = new Vent { id = e.id, last = rim, lamp = -1 };
+                    // (Since 0.8.0: an engine's trail that another patch was laying until a frame ago goes on here from where that patch
+                    // left off, where it had been begun a quarter of a second ahead of the nozzle, as a trail's first patch is. The last
+                    // patch lays nothing more once it is passed, so a frame's travel was left out at every join: 20 to 30 m at 600 m/s,
+                    // a notch every two kilometres that made a fast rocket's far trail a row of dashes.)
+                    if (!e.begins && Settings.TestJoin != 1f && lastLaid.TryGetValue(e.id, out Laid was) && was.by != null && was.by != this && Time.frameCount - was.frame <= 2)
+                    {
+                        was.by.frame.Refresh();
+                        vents[v].last = frame.ToLocal(was.by.frame.ToWorld(was.last));
+                        vents[v].laid = frame.ToLocal(was.by.frame.ToWorld(was.laid));
+                        vents[v].begun = true;
+                    }
                 }
                 ref Vent vent = ref vents[v];
                 Vector3 before = vent.begun ? vent.last : rim;
-                float moved = (rim - before).magnitude;
-                if (moved > 80f) { before = rim; moved = 0f; vent.begun = false; }       // (it has jumped: the game has put the craft somewhere else)
+                Vector3 step = rim - before;
+                float moved = step.magnitude;
+                // (it has jumped: the game has put the craft somewhere else. Not merely far: since 0.8.0, over 80 m and further than its own
+                // speed takes it in the frame, three times over and twenty metres more, or not the way it is going. A fast craft's long
+                // frame went further than the 80 m that was all it took, a rocket at 860 m/s in a tenth of a second, one near orbital
+                // speed at 25 frames a second; each such frame was taken for a jump, the trail begun again ahead, and the stretch
+                // between left bare: Rocket Smoke's trail "drawn as separate lengths", 10-17, its holes found where the puffs ended,
+                // 50 m without one. The way it went is the rendering chat's check, for a real jump shorter than such a frame.)
+                float speedNow = going.magnitude;
+                if (moved > 80f && (moved > 3f * speedNow * dt + 20f || Vector3.Dot(step, going) < 0.5f * moved * speedNow)) { before = rim; moved = 0f; vent.begun = false; }
                 // Which way the nozzle is going and how fast, and so where it will be when the smoke laid now is first seen.
                 float speed = going.magnitude;
                 if (riding)
@@ -369,7 +417,14 @@ namespace VolumetricExplosions
                         }
                         else
                         {
+#if DEV
+                            long flameFrom = System.Diagnostics.Stopwatch.GetTimestamp();
                             Flame(ref vent, e, rim, along, -going, e.fire, dt, q);
+                            Air.FlameTicks += System.Diagnostics.Stopwatch.GetTimestamp() - flameFrom;
+#else
+                            Flame(ref vent, e, rim, along, -going, e.fire, dt, q);
+#endif
+                            Regolith(e, rim, along, dt, q);
                             // (the strongest of the ship's flames gives the pattern its place and its size: see TuneJet)
                             float strength = e.fire * e.nozzle;
                             if (strength > jetStrongest) { jetStrongest = strength; jetFromL = rim; jetNozzle = e.nozzle; jetLong = Mathf.Max(e.flame, 4f * e.nozzle); jetSpeed = JetSpeed(jetLong); jetKind = e.tint; }
@@ -406,6 +461,7 @@ namespace VolumetricExplosions
                 float stretch = (ahead - from).magnitude;
                 vent.last = rim; vent.laid = ahead; vent.begun = true; vent.seen = time; vent.fed = time;
                 vent.going = going; vent.along = along; vent.wide = wide; vent.flame = e.flame; vent.young = e.young;
+                lastLaid[e.id] = new Laid { by = this, last = rim, laid = ahead, frame = Time.frameCount };
 #if DEV
                 if (Settings.TestView == 7f)
                 {
@@ -463,7 +519,8 @@ namespace VolumetricExplosions
                 // (a thermal: a few large puffs a second, however wide it is: the shader's billows carry the finer scales)
                 if (thermal)
                 {
-                    vent.due += dt * (3f + 9f * e.running) * Mathf.Max(0.5f, q); cloudy = true;
+                    // (a dust devil's dust (warm: see ThermalPuff) in more puffs: a column thin and tall that must run together)
+                    vent.due += dt * (3f + 9f * e.running) * Mathf.Max(0.5f, q) * (1f + 1.5f * Mathf.Clamp01(e.warm)); cloudy = true;
                     // (a cloud's billows are as large as its puffs, tens of metres: at a flame's or a trail's few metres they are
                     // finer than a pixel from where a cloud is looked at, and each puff shows as a ball)
                     detailRepeat = Settings.TestCloudRepeat > 0f ? Mathf.Clamp(Settings.TestCloudRepeat * e.nozzle, 4f, 400f) : Mathf.Max(detailRepeat, Mathf.Clamp(0.9f * e.nozzle, 20f, 160f));
@@ -525,6 +582,13 @@ namespace VolumetricExplosions
                     // wide again, and there is the more of it for what the jet raises: see below.)
                     o.r = (even ? widest * Random.Range(0.94f, 1.06f) : wide * Random.Range(0.75f, 1.25f)) * (landed ? 1.5f : 1f);
                     o.grow = 0.5f * wide;
+                    // (High up there is next to no air to hold a trail together: it goes on spreading as the gas does, until it is at
+                    // the air's own pressure, about as the square root of how much thinner that is than what it left the nozzle at:
+                    // in air a thousandth of the ground's, some forty times the nozzle's width, within a second or so of being laid;
+                    // and spreading on from there, it is soon a veil too thin to be seen. In thicker air the jet is that wide by the
+                    // flame's end, and the trail only mixes out into the air round it.)
+                    float balanced = Balanced(e);
+                    o.grow = Mathf.Max(o.grow, 0.5f * (balanced * balanced - o.r * o.r));
                     // (A jet widens as it goes, by a tenth or so of how far it has gone: it takes in the air beside it. So does
                     // each puff of it, for as long as it is still being thrown along: it is three times as wide by the time the
                     // air has stopped it.)
@@ -624,7 +688,12 @@ namespace VolumetricExplosions
             // (the middle of a thermal climbs fastest and highest; its rim, mixing with dry air, least: a dome. And its puffs stall
             // at every height on the way: the dome is full, not a shell.)
             float middle = 1f - 0.7f * aside.sqrMagnitude;
-            float up = Mathf.Lerp(2.5f, 6f, Mathf.Clamp01(e.running)) * (0.5f + 0.5f * middle) * Random.Range(0.8f, 1.2f);
+            // (Since 0.8.0: a thermal said to be warm is dust lifted by a whirlwind, a dust devil (Natural Weather's): its air goes up
+            // the middle of the whirl at ten metres a second and more, in a column as narrow at the top as near the ground, and what
+            // it carries is the ground's own dust.)
+            float whirl = Mathf.Clamp01(e.warm);
+            if (whirl > 0f) middle = Mathf.Lerp(middle, 1f - 0.15f * aside.sqrMagnitude, whirl);
+            float up = Mathf.Lerp(2.5f, 6f, Mathf.Clamp01(e.running)) * (0.5f + 0.5f * middle) * Random.Range(0.8f, 1.2f) * (1f + 2.2f * whirl);
             float share = Random.value;
             float climbs = floor ? depth * Random.Range(0f, 0.06f) : depth * middle * (0.12f + 0.93f * Mathf.Sqrt(share));
             Vector3 push = Vector3.up * up + aside * (0.3f * up) + new Vector3(Random.Range(-0.4f, 0.4f), 0f, Random.Range(-0.4f, 0.4f));
@@ -634,9 +703,10 @@ namespace VolumetricExplosions
             o.kloss = push.y / Mathf.Max(climbs, 1f); o.drag = 0.5f;
             // (fewer and larger than the first working heap's (a tenth to a sixth of the width, 6 to 28 a second): that one cost too
             // much, and the billows, now the size of the puffs, carry the finer shapes)
-            o.r = wide * Random.Range(0.13f, 0.22f);
+            // (a whirl's puffs as wide as half the column and more, overlapping: thin dust, one haze, not a string of balls)
+            o.r = wide * Random.Range(0.13f, 0.22f) * (1f + 2.6f * whirl);
             o.grow = 0.002f * wide;
-            o.swell = 0.03f;
+            o.swell = Mathf.Lerp(0.03f, 0.006f, whirl);
             o.turb = Random.Range(0.6f, 1.4f);
             o.rise = 0f;
             // (as thick at the top of its climb as a dense puff of smoke: water goes on condensing as the air rises, where smoke
@@ -644,9 +714,19 @@ namespace VolumetricExplosions
             float widest = o.r + (0.02f + o.swell) * climbs;
             o.mass = Random.Range(0.8f, 1.25f) * 2.0f * e.amount * widest * widest * (Settings.TestCloudMass > 0f ? Settings.TestCloudMass : 1f);
             o.life = stays * Random.Range(0.7f, 1.15f);
+            // (a whirl's dust lives until it has nearly reached the top of its column, slowing only near it: nine tenths of the climb.
+            // Its puffs had died at twelve to twenty seconds, some 40 m up a column said to be 270 m tall)
+            if (whirl > 0f && !floor) o.life = Mathf.Max(o.life, whirl * 2.3f / Mathf.Max(o.kloss, 0.01f));
             o.fadeIn = 2f;
             float tone = e.shade * Random.Range(0.97f, 1.03f);
             o.ar = tone; o.ag = tone; o.ab = tone;
+            // (a dust devil's: the ground's own colour, as much as it is said to be warm; where the ground is not known, a dust's brown)
+            if (whirl > 0f)
+            {
+                Color ground = groundBare ? groundDust : new Color(0.46f, 0.38f, 0.28f);
+                float light = Random.Range(0.9f, 1.1f);
+                o.ar = Mathf.Lerp(tone, ground.r * light * 1.15f, whirl); o.ag = Mathf.Lerp(tone, ground.g * light * 1.15f, whirl); o.ab = Mathf.Lerp(tone, ground.b * light * 1.15f, whirl);
+            }
         }
 
         void Smoulder(ref P o, in Exhaust e, Vector3 on, Vector3 rim, Vector3 going, float speed, Vector3 aside, float wide, float stays, bool scraped)
@@ -692,7 +772,10 @@ namespace VolumetricExplosions
                 o.r = wide * Random.Range(0.6f, 1.0f);
                 o.grow = 0.16f + 0.08f * wide;
                 o.turb = Random.Range(0.8f, 1.5f);
-                o.rise = Random.Range(2.2f, 3.4f) * Mathf.Clamp(0.7f + 0.6f * wide, 0.8f, 1.6f);
+                // (A bigger fire's plume goes up faster: its speed grows as the fifth root of the fire's heat (McCaffrey's plume), and the
+                // heat of a fire burning over an area as the area, so as its width to the two-fifths. Beyond a wreck's size, then, faster
+                // than the wreck's few metres a second: some ten for a pool of fuel 28 m across, whose smoke stands as a column.)
+                o.rise = Random.Range(2.2f, 3.4f) * Mathf.Max(Mathf.Clamp(0.7f + 0.6f * wide, 0.8f, 1.6f), 1.6f * Mathf.Pow(Mathf.Max(wide, 1.5f) / 1.5f, 0.4f));
                 o.heat = Random.Range(0.38f, 0.46f);
                 o.cool = Random.Range(1.3f, 1.8f);
                 o.mass = Random.Range(0.7f, 1.4f) * 2.7f * e.amount * o.r * o.r;
@@ -859,10 +942,10 @@ namespace VolumetricExplosions
                     if ((o.flags & JetGas) != 0)
                     {
                         // (as the mover slows it, see there: and how far it has got by now is that law's own sum, not the speed it ends at times the time)
-                        float by = 2f * o.kloss * was * was * (hold < 0.55f ? 0.55f : hold);
-                        keep = 1f / Mathf.Sqrt(1f + by * since);
-                        o.flame /= Mathf.Sqrt(keep);
-                        float gone = by > 1e-6f ? was * (2f / by) * (Mathf.Sqrt(1f + by * since) - 1f) : was * since;
+                        float by = 2f * o.kloss * was * was * (hold < 0.55f ? 0.55f : hold), root = Mathf.Sqrt(1f + by * since);
+                        keep = 1f / root;
+                        o.flame *= Mathf.Sqrt(root);
+                        float gone = by > 1e-6f ? was * (2f / by) * (root - 1f) : was * since;
                         went = gone;
                         if (was > 1e-4f) { float step = gone / was; o.x += o.kx * step; o.y += o.ky * step; o.z += o.kz * step; }
                         o.r += (0.02f + o.swell) * gone;
@@ -897,6 +980,13 @@ namespace VolumetricExplosions
         /// Where the air is thin there is less to hold the jet together: it opens out and is spent in half the
         /// length, and in a vacuum it fans out from the nozzle's lip, a clear bright lobe that nothing slows or stirs.
         /// </summary>
+        /// <summary>How fast the gas at a jet's rim goes outward, against how fast it goes on, in air this thin (see Flame): in thick air hardly at all, with none to hold it in up to some forty-five degrees.</summary>
+        static float Fans(in Plume look, float thin) =>
+            Mathf.Lerp(0.6f * Mathf.Lerp(0.035f, 0.36f, thin), Mathf.Lerp(0.5f, 1f, Mathf.Clamp01(look.outer)) + 0.6f * Mathf.Max(look.outer - 1f, 0f), thin * thin);
+
+        /// <summary>How far the flame reaches, for its length in thick air, in air this thin (see Flame).</summary>
+        static float Reach(in Plume look, float length, float thin) => length * Mathf.Lerp(1f, Mathf.Lerp(0.45f, 0.95f, Mathf.Clamp01(look.outer)), thin);
+
         void Flame(ref Vent vent, in Exhaust e, Vector3 rim, Vector3 along, Vector3 air, float fire, float dt, float q)
         {
             float length = Mathf.Max(e.flame, 4f * e.nozzle);
@@ -905,8 +995,14 @@ namespace VolumetricExplosions
             // engine's flame is as quick as a big one's, and shorter because it is over sooner).
             float jet = JetSpeed(length);
             float thin = Thin;                                          // 0 at the ground, 1 in a vacuum
-            // (With no air to hold it in, the jet opens out at once and is spent in half the length.)
-            float reach = length * Mathf.Lerp(1f, 0.45f, thin);
+            // (what this kind of flame is like: see Plumes)
+            Plume look = Plumes[Mathf.Clamp(e.tint, 0, FireKinds - 1)];
+            // (With no air to hold it in, the jet opens out at once. A clear flame, hydrogen's, is spent in half the length, its
+            // gas cold as soon as it has spread; a sooty one, kerosene's, or a solid motor's full of burning metal, goes on
+            // glowing as it spreads, a broad cone as long as the flame was in thick air and far fainter: as an upper stage's
+            // plume is seen from the stage itself. Until 0.8.0 every one was the short lobe of the clear ones.)
+            float outer = Mathf.Clamp01(look.outer);
+            float reach = Reach(look, length, thin);
             // It slows as a jet does (see the mover, at JetGas): hardly at all for the first stretch, where the air drawn in at
             // its sides has not reached its middle, and from there on as one over how far it has come. That first stretch is
             // a quarter of the flame in thick air, and longer than the whole flame where there is next to no air to draw in.
@@ -919,13 +1015,14 @@ namespace VolumetricExplosions
             float far = 1f + reach / coreNow, lasts = coreNow / (2f * jet) * (far * far - 1f);
             float opens = Mathf.Lerp(0.035f, 0.36f, thin);              // how much wider it gets for each metre it goes
             float r0 = 0.7f * e.nozzle;
-            // (what this kind of flame is like: see Plumes)
-            Plume look = Plumes[Mathf.Clamp(e.tint, 0, FireKinds - 1)];
             // How fast the gas at the jet's rim goes outward, against how fast it goes on: in thick air hardly at all; with
             // none to hold it in, it fans out from the nozzle's lip, and the plume is a cone, brightest at the nozzle and
             // thinning away from it. (Sent nearly straight on and left to swell, as at first, it was a ball of mist a
             // little way behind the engine.)
-            float fans = Mathf.Lerp(0.6f * opens, 0.5f, thin * thin);
+            // (The thinner the air the wider: the gas at the lip turns outward until its pressure is the air's, through more
+            // than sixty degrees into a vacuum. The sooty fuels' outer gas shows to some forty-five degrees, the clear ones'
+            // hardly beyond the lobe; a solid motor's metal further still.)
+            float fans = Fans(look, thin);
             // (and whatever burns, with no air round it the gas is too thin to be anything but a clear glow: the thickest
             // flame is no thicker there than the clearest is at the ground)
             float dense = Mathf.Lerp(look.dense, Mathf.Min(look.dense, 0.1f) * look.clear, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.3f, 0.9f, thin)));
@@ -937,10 +1034,18 @@ namespace VolumetricExplosions
             float span = stepDt > 1e-4f ? stepDt : dt;
             // (Some thirteen hundred bits to a nozzle at a time, whatever its size: a third as many, as at first, and the
             // jet was too thin to burn as one body, and its outline a row of bulges.)
-            vent.fire += Mathf.Min(jet / (0.08f * r0), 5000f) * span * Mathf.Clamp(q, 0.4f, 1.2f);
+            // (But a nozzle whose jet is narrower than the patch's grid can show is drawn no finer than the grid, however many bits
+            // it is laid in: so a small one, beside the big engines that set how fine the grid is, gets as many as fill the cells its
+            // jet goes through, down to about a third. A cluster of twenty small engines laid twenty big engines' worth of gas,
+            // two and a half thousand bits a frame, and the frame waited on it: 7 ms of 16.)
+            float fineEnough = Mathf.Clamp(1.4f * r0 / Mathf.Max(cellNow, 0.02f), 0.6f, 1f);
+            vent.fire += Mathf.Min(jet / (0.08f * r0), 5000f) * span * Mathf.Clamp(q, 0.4f, 1.2f) * fineEnough * fineEnough;
             int bits = Mathf.Min((int)vent.fire, 500);
             vent.fire -= (int)vent.fire;
             if (bits <= 0) return;
+#if DEV
+            Air.FlameBits += bits;
+#endif
             Vector3 across = Vector3.Cross(along, Mathf.Abs(along.y) < 0.9f ? Vector3.up : Vector3.right).normalized, over = Vector3.Cross(along, across);
             if (fire >= flameWeight) { flameKind = (byte)Mathf.Clamp(e.tint, 0, FireKinds - 1); flameWeight = fire; }
             // What a jet does not do is come out the same from one moment to the next: the air it tears at its edge tears
@@ -951,7 +1056,19 @@ namespace VolumetricExplosions
             // it. By the moment, not by the frame: a frame's own rhythm showed as lumps, once (above). In thin air there is
             // nothing to tear it, and it comes out even.
             uint salt = (uint)e.id * 2654435761u;
+            Fresh(out float freshTurn, out float freshPace, out int freshOctave);
             float uneven = Settings.JetUneven * (1f - thin);
+            // (the lattice values those slow-changing numbers are made from, once for this nozzle and frame: see Lattice)
+            float tLo = time - span, tHi = time;
+            float acX = across.x, acY = across.y, acZ = across.z, ovX = over.x, ovY = over.y, ovZ = over.z, alX = along.x, alY = along.y, alZ = along.z, rmX = rim.x, rmY = rim.y, rmZ = rim.z;
+            float wavers = Settings.JetWavers;
+            // (and what every bit's heat, flame, cooling and life are made from that is the same for all of them)
+            float spread = thin * outer;
+            float heatAt = look.hot * (1f - 0.2f * thin), flameAt = 0.22f * dense * fire * (1f - 0.45f * thin) * (1f - 0.4f * spread);
+            float coolLo = 0.85f - 0.3f * thin, coolHi = 1.2f + 0.5f * thin, coolSpreading = 2.1f * look.cool / lasts * (1f - 0.1f * thin * thin * thin * thin);
+            float lifeSpreading = (1.7f - 0.64f * thin) * lasts, coolInAir = 2.9f * look.cool / reach, reachAt = (1.15f - 0.12f * thin) * reach;
+            wMuchA.Fill(13f, 5, salt, tLo, tHi); wMuchB.Fill(31f, 9, salt + 1u, tLo, tHi); wQuick.Fill(8f, 4, salt + 2u, tLo, tHi); wThrown.Fill(19f, 7, salt + 3u, tLo, tHi);
+            wA1.Fill(4.3f, 1, salt + 4u, tLo, tHi); wA2.Fill(11f, 1, salt + 5u, tLo, tHi); wB1.Fill(4.7f, 1, salt + 6u, tLo, tHi); wB2.Fill(12f, 1, salt + 7u, tLo, tHi);
             for (int k = 0; k < bits; k++)
             {
                 int i = Add();
@@ -960,28 +1077,37 @@ namespace VolumetricExplosions
                 // Where in the stretch, and where across the nozzle's mouth, each bit leaves from is not left to chance but taken
                 // in turn from a list that fills all three evenly (the R3 sequence of M. Roberts): left to chance, a few dozen
                 // bits to a frame bunch here and leave gaps there, and the jet's outline was a row of bulges, new ones every frame.
-                int nth = vent.shot++ & 0xFFFFF;
-                float since = (k + (float)(nth * 0.8191725133961645 % 1.0)) / bits * span;         // how long ago within that stretch it left
-                float round = (float)(nth * 0.6710436067037893 % 1.0), turn = round * Mathf.PI * 2f, out_ = Mathf.Sqrt((float)(nth * 0.5497004779019703 % 1.0));
-                Vector3 side = across * Mathf.Cos(turn) + over * Mathf.Sin(turn);
+                // (each of the three a running sum, a fixed step at a time, the whole numbers dropped: what n times the step, less its
+                // whole part, is, without a remainder worked out in double precision three times for every bit)
+                vent.shot++;
+                float since = (k + (float)vent.r3a) / bits * span;         // how long ago within that stretch it left
+                float round = (float)vent.r3b, turn = round * Mathf.PI * 2f, out_ = Mathf.Sqrt((float)vent.r3c);
+                vent.r3a += 0.8191725133961645; if (vent.r3a >= 1.0) vent.r3a -= 1.0;
+                vent.r3b += 0.6710436067037893; if (vent.r3b >= 1.0) vent.r3b -= 1.0;
+                vent.r3c += 0.5497004779019703; if (vent.r3c >= 1.0) vent.r3c -= 1.0;
+                // (in plain numbers, x, y and z, not Vector3's sums: each of those is a call, and copies, in the game's runtime)
+                float cosT = Sin(turn + 1.5707963f), sinT = Sin(turn);
+                float sx = acX * cosT + ovX * sinT, sy = acY * cosT + ovY * sinT, sz = acZ * cosT + ovZ * sinT;
                 float left = time - since;
-                float much = 0.65f * Wavers(left * 13f, round * 5f, 5, salt) + 0.35f * Wavers(left * 31f, round * 9f, 9, salt + 1u);
-                float quick = Wavers(left * 8f, round * 4f, 4, salt + 2u), thrown = Wavers(left * 19f, round * 7f, 7, salt + 3u);
-                float wayA = 0.7f * Wavers(left * 4.3f, 0f, 1, salt + 4u) + 0.3f * Wavers(left * 11f, 0f, 1, salt + 5u) - 0.5f;
-                float wayB = 0.7f * Wavers(left * 4.7f, 0f, 1, salt + 6u) + 0.3f * Wavers(left * 12f, 0f, 1, salt + 7u) - 0.5f;
+                float much = 0.65f * wMuchA.At(left, round) + 0.35f * wMuchB.At(left, round);
+                float quick = wQuick.At(left, round), thrown = wThrown.At(left, round);
+                float wayA = 0.7f * wA1.At(left, 0f) + 0.3f * wA2.At(left, 0f) - 0.5f;
+                float wayB = 0.7f * wB1.At(left, 0f) + 0.3f * wB2.At(left, 0f) - 0.5f;
                 // (the middle of a jet is fastest, and hottest)
-                float speed = jet * Random.Range(0.88f, 1.06f) * (1f - 0.35f * out_ * out_) * (1f + uneven * 0.16f * (quick - 0.5f));
+                float speed = jet * Luck(0.88f, 1.06f) * (1f - 0.35f * out_ * out_) * (1f + uneven * 0.16f * (quick - 0.5f));
                 // (Where it fans, more of it near the middle than at the rim: a bright lobe along the jet's line, and a faint skirt.)
-                Vector3 push = along * speed + side * (out_ * Mathf.Lerp(1f, out_, thin) * speed * fans)
-                               + side * (out_ * speed * uneven * 0.09f * (thrown - 0.5f)) + (across * wayA + over * wayB) * (speed * uneven * Settings.JetWavers);
+                float sideways = out_ * (1f + (out_ - 1f) * thin) * speed * fans + out_ * speed * uneven * 0.09f * (thrown - 0.5f), astray = speed * uneven * wavers;
+                float pushX = alX * speed + sx * sideways + (acX * wayA + ovX * wayB) * astray;
+                float pushY = alY * speed + sy * sideways + (acY * wayA + ovY * wayB) * astray;
+                float pushZ = alZ * speed + sz * sideways + (acZ * wayA + ovZ * wayB) * astray;
                 // It begins a little way up inside the nozzle, so that the flame is whole at its mouth. (And is put, below, where
                 // it would have got to by now, sideways as well as on: where the gas fans out, bits put straight down the jet's
                 // line for their first frame were a rod as long as the gas goes in a frame, with the fan beginning at its end.)
-                Vector3 c = rim + side * (out_ * 0.8f * e.nozzle) - along * (0.8f * r0);
-                o.x = c.x; o.y = c.y; o.z = c.z;
-                o.kx = push.x; o.ky = push.y; o.kz = push.z;
+                float outward = out_ * 0.8f * e.nozzle, inward = 0.8f * r0;
+                o.x = rmX + sx * outward - alX * inward; o.y = rmY + sy * outward - alY * inward; o.z = rmZ + sz * outward - alZ * inward;
+                o.kx = pushX; o.ky = pushY; o.kz = pushZ;
                 o.kloss = slowing; o.drag = 2f;
-                o.r = r0 * Random.Range(0.8f, 1.2f);
+                o.r = r0 * Luck(0.8f, 1.2f);
                 // (its edge, where it meets the air, is stirred by it; its middle hardly at all)
                 o.turb = (1.8f + 5.4f * out_ * out_) * (1f - thin);
                 // A white-hot core, and a thin cooler sheath round it where it has met the air, which is where its colours
@@ -989,20 +1115,21 @@ namespace VolumetricExplosions
                 // through yellow and orange in the last of it: brightness goes with heat far more steeply than colour does
                 // (see JetShines), and a flame that had begun to cool at the nozzle was a dim orange thing for most of its
                 // length beside the game's own. In thin air it starts a little cooler, the sooner to show its colours.
-                o.heat = (1.02f - look.edge * Mathf.Pow(out_, 3.5f)) * Random.Range(0.92f, 1.08f) * look.hot * Mathf.Lerp(1f, 0.8f, thin) * (1f + uneven * 0.07f * (much - 0.5f));
-                o.flame = 0.22f * dense * fire * Random.Range(0.8f, 1.2f) * (1f - 0.45f * thin) * (1f + uneven * 1.1f * (much - 0.5f));
+                // (A sooty plume spread out in thin air is its soot glowing as it cools: orange more than white, and faint for its size.)
+                o.heat = (1.02f - look.edge * out_ * out_ * out_ * Mathf.Sqrt(out_)) * Luck(0.92f, 1.08f) * heatAt * (1f - 0.42f * spread * (0.35f + 0.65f * out_)) * (1f + uneven * 0.07f * (much - 0.5f));
+                o.flame = flameAt * Luck(0.8f, 1.2f) * (1f + uneven * 1.1f * (much - 0.5f));
                 // (In a vacuum it cools as it spreads, all the faster for having nothing to hold it together: what is seen
                 // of it there is a bright lobe at the nozzle, gone within a few nozzles' widths.)
-                o.cool = 2.1f * look.cool / lasts * Random.Range(0.85f - 0.3f * thin, 1.2f + 0.5f * thin) * Mathf.Lerp(1f, 0.9f, thin * thin * thin * thin);
+                o.cool = coolSpreading * Luck(coolLo, coolHi);
                 // (some of it spent sooner and some later, by a good deal: so that the flame ends in tongues and not at a line)
-                o.life = Mathf.Lerp(1.7f, 1.06f, thin) * lasts * Random.Range(0.6f, 1.4f);
+                o.life = lifeSpreading * Luck(0.6f, 1.4f);
                 if (!vacuum)
                 {
                     // (In air both go by how far the gas has come, see the mover: cooled to a twentieth at the flame's reach, as
                     // it was when it kept its speed; and spent between eight tenths of that reach and fourteen, this bit at its
                     // own speed.)
-                    o.cool = 2.9f * look.cool / reach * Random.Range(0.85f - 0.3f * thin, 1.2f + 0.5f * thin);
-                    float own = jet * core / (speed * holds), to = Mathf.Lerp(1.15f, 1.03f, thin) * reach * Random.Range(0.7f, 1.22f), on = 1f + to / own;
+                    o.cool = coolInAir * Luck(coolLo, coolHi);
+                    float own = jet * core / (speed * holds), to = reachAt * Luck(0.7f, 1.22f), on = 1f + to / own;
                     o.life = own / (2f * speed) * (on * on - 1f);
                 }
                 // (Flame that has spread out is drawn thinner, by how much wider it is than it began: see Deposit. Where the
@@ -1023,7 +1150,7 @@ namespace VolumetricExplosions
                     o.swell = opens - 0.02f;
                     // (Slowing, it spends longer in every metre: so some of it is spent early, by chance, as many as leave
                     // the bits no thicker on the ground at its far end than JetKept allows; see there, and the mover.)
-                    float spent = Random.Range(0.05f, 1f);
+                    float spent = Luck(0.05f, 1f);
                     spent *= spent; spent *= spent;                      // (to the power two over JetKept: four)
                     float early = (1f / spent - 1f) / (2f * slowing * holds * speed * speed);
                     if (early < o.life) o.life = early;
@@ -1031,7 +1158,7 @@ namespace VolumetricExplosions
                 Since(ref o, since, air);
                 o.tint = (byte)Mathf.Clamp(e.tint, 0, FireKinds - 1);
                 o.tile = Lumpy();
-                Born(i);
+                BornFresh(i, freshTurn, freshPace, freshOctave);
                 p[i].born = began * Mathf.Lerp(1f, 0.5f, thin);
             }
         }
@@ -1070,6 +1197,15 @@ namespace VolumetricExplosions
             Vector3 across = Vector3.Cross(along, Mathf.Abs(along.y) < 0.9f ? Vector3.up : Vector3.right).normalized, over = Vector3.Cross(along, across);
             if (fire >= flameWeight) { flameKind = PlasmaKind; flameWeight = fire; }
             uint salt = (uint)e.id * 2654435761u;
+            // What a re-entry is seen by, from a window close by and from hundreds of kilometres alike, is its head: the shock
+            // layer, air rammed to thousands of degrees just ahead of the face, far the brightest of it, thin and smooth-edged
+            // (Orion's window film: white, yellow, lavender, magenta as it heats; the Shuttle's and Dragon's from the station, a
+            // small bright head on a long trail; a meteor's). Behind it the sheath hugs the body and is gone a little past it, and
+            // the wake streams back a long way, cooling. Until 2026-10-21 (TestPlasma 1) the layer was laid thinner than the sheath
+            // and no hotter, and the sheath spread out a body's width and as hot as the layer: round a long craft a pale cloud,
+            // "brightest nowhere in particular", and the owner: "that fire doesnt look like a real re-entry, does it?".
+            bool before = Settings.TestPlasma == 1f;
+            float layerShare = before ? 0.35f : 0.45f, sheathTo = before ? 0.72f : 0.75f;
             for (int k = 0; k < bits; k++)
             {
                 int i = Add();
@@ -1085,22 +1221,23 @@ namespace VolumetricExplosions
                 float flick = 0.6f * Wavers(left * 11f, round * 6f, 6, salt) + 0.4f * Wavers(left * 27f, round * 11f, 11, salt + 1u);
                 Vector3 c, push;
                 float life;
-                if (u < 0.35f)
+                if (u < layerShare)
                 {
-                    // the shock layer: over the face, standing off it a little (most in the middle), running out to the edge and
-                    // gone there (it cannot turn the corner: what goes on past the sides is the sheath's, below)
-                    float out_ = Mathf.Sqrt(u / 0.35f);
+                    // the shock layer: over the face, standing off it a little (most in the middle: a seventh of the face's radius,
+                    // as a blunt body's bow shock stands, Billig), running out to the edge and gone there (it cannot turn the corner:
+                    // what goes on past the sides is the sheath's, below); the brightest and hottest of the glow
+                    float out_ = Mathf.Sqrt(u / layerShare);
                     float outward = 0.5f * speed;
-                    c = rim - along * (0.1f * R * (1f - 0.6f * out_ * out_)) + side * (out_ * R);
+                    c = rim - along * ((before ? 0.1f : 0.14f) * R * (1f - 0.6f * out_ * out_)) + side * (out_ * R);
                     push = side * (outward * (0.3f + 0.7f * out_)) + along * (0.05f * speed);
-                    o.heat = look.hot * Random.Range(0.95f, 1.08f);
+                    o.heat = look.hot * Random.Range(0.95f, 1.08f) * (before ? 1f : Settings.PlasmaHead);
                     // (the layer is thinner than the patch's cells, half a metre once the wake is long: bits as wide as a cell, or
-                    // what was drawn of it was a stack of bars)
-                    o.r = Mathf.Max(0.3f * R, 0.4f) * Random.Range(0.8f, 1.2f);
+                    // what was drawn of it was a stack of bars; since 2026-10-21 a little thinner, as the layer is)
+                    o.r = (before ? Mathf.Max(0.3f * R, 0.4f) : Mathf.Max(0.22f * R, 0.3f)) * Random.Range(0.8f, 1.2f);
                     life = Mathf.Max(0.02f, (1.08f - out_) * R / (outward * (0.3f + 0.7f * out_)));
-                    o.flame = 0.3f * look.dense * fire * running * Random.Range(0.85f, 1.15f);
+                    o.flame = (before ? 0.3f : Settings.PlasmaLayer) * look.dense * fire * running * Random.Range(0.85f, 1.15f);
                 }
-                else if (u < 0.72f)
+                else if (u < sheathTo)
                 {
                     // the sheath: from just outside the body's edge, back past its sides and spreading a little as it goes (the
                     // flow parts from the body at its shoulder), so that the glow wraps the whole body and runs on past it for a
@@ -1108,11 +1245,12 @@ namespace VolumetricExplosions
                     float out_ = 1.02f + 0.16f * (float)(nth * 0.3313 % 1.0);
                     float back = speed * Random.Range(0.8f, 1.05f);
                     c = rim + side * (out_ * R) + along * (0.05f * R);
-                    push = along * back + side * (back * Random.Range(0.02f, 0.11f));
-                    o.heat = look.hot * Random.Range(0.9f, 1.05f) * (0.8f + 0.2f * flick);
+                    // (since 2026-10-21 hugging the body, cooler than the layer it comes from and gone a little past the body's end)
+                    push = along * back + side * (back * (before ? Random.Range(0.02f, 0.11f) : Random.Range(0.01f, 0.05f)));
+                    o.heat = look.hot * Random.Range(0.9f, 1.05f) * (0.8f + 0.2f * flick) * (before ? 1f : 0.8f);
                     o.r = 0.22f * R * Random.Range(0.8f, 1.2f);
-                    life = 2.5f * neck / back * Random.Range(0.8f, 1.3f);
-                    o.flame = 0.4f * look.dense * fire * running * Random.Range(0.8f, 1.2f) * (0.5f + 1f * flick);
+                    life = (before ? 2.5f : 1.6f) * neck / back * Random.Range(0.8f, 1.3f);
+                    o.flame = (before ? 0.4f : Settings.PlasmaSheath) * look.dense * fire * running * Random.Range(0.8f, 1.2f) * (0.5f + 1f * flick);
                 }
                 else
                 {
@@ -1121,9 +1259,10 @@ namespace VolumetricExplosions
                     float out_ = 0.22f * Mathf.Sqrt((float)(nth * 0.3313 % 1.0));
                     c = rim + along * neck + side * (out_ * R);
                     push = along * (speed * Random.Range(0.7f, 1.05f)) + side * (speed * Random.Range(0f, 0.04f));
-                    o.heat = look.hot * Random.Range(0.6f, 0.82f) * (0.75f + 0.25f * flick);
+                    o.heat = look.hot * Random.Range(0.6f, 0.82f) * (0.75f + 0.25f * flick) * (before ? 1f : 0.85f);
                     o.r = 0.15f * R * Random.Range(0.8f, 1.2f);
-                    life = length / speed * Random.Range(0.4f, 1.3f);
+                    // (since 2026-10-21 half as long again: a re-entry is seen by a long trail behind its head)
+                    life = length / speed * Random.Range(0.4f, 1.3f) * (before ? 1f : 1.5f);
                     o.flame = 0.22f * look.dense * fire * running * Random.Range(0.5f, 1.5f) * (0.2f + 1.6f * flick);
                 }
                 o.x = c.x; o.y = c.y; o.z = c.z;
@@ -1151,11 +1290,130 @@ namespace VolumetricExplosions
         static float JetSpeed(float length) => Mathf.Max(Settings.JetPace * length, 60f);
 
         /// <summary>A number between 0 and 1 that changes smoothly from one moment to the next (t: one change to each whole number) and from one place round a ring to the next (a, which comes round again at `ring`).</summary>
+        /// <summary>
+        /// How long an engine's smoke stays in the air here, against thick air near the ground: about as long low down, up to two
+        /// and a half times as long high up. The stratosphere is still and dry: nothing turns the smoke over and no rain washes it
+        /// out, and a rocket's trail there stays for many minutes, spreading wide and catching the sun. (Until 0.8.0 the other way
+        /// about, a third as long up there, on the reckoning that thin air holds smoke together for less long: behind a rocket
+        /// twenty kilometres up the trail was gone within a second.)
+        /// </summary>
+        float Hangs() => Mathf.Max(0.3f, Settings.Smoke) * (air >= 0.33f ? Mathf.Lerp(0.85f, 1f, Mathf.Clamp01((air - 0.33f) * 2f)) : Mathf.Lerp(2.5f, 0.85f, air / 0.33f));
+
+        // ---- dust thrown off airless ground by an engine's jet
+#if DEV
+        public static string RegolithSaid = "";
+        public static string Regolith() => RegolithSaid;
+#endif
+        ParticleSystem regolith;
+        float regolithDue;
+
+        /// <summary>
+        /// On airless ground an engine's jet, striking it, throws the dust out. Not up into a cloud, as on a world with air, for
+        /// there is nothing to hold it up: each grain flies off in a straight line, low along the ground and fast, and falls back
+        /// far off, so that a lander coming down is ringed by thin streaks racing outward and the ground under it is lost in a
+        /// sheet of them (as in the films of the Moon landings). How much goes with how hard the jet strikes: the engine's
+        /// thrust and how close it is, down to nothing at two and a half of its flame's lengths. (Before 0.8.0 there was only
+        /// the game's own faint dust: the explosions' air does nothing where there is no air.)
+        /// </summary>
+        void Regolith(in Exhaust e, Vector3 rim, Vector3 along, float dt, float q)
+        {
+#if DEV
+            RegolithSaid = "vacuum " + vacuum + ", ground " + hasGround + ", bare " + groundBare + ", running " + e.running.ToString("F2") + ", along " + along.ToString("F2") + ", rim " + rim.ToString("F1") + ", level " + groundY.ToString("F1") + ", alive " + (regolith != null ? regolith.particleCount : -1);
+#endif
+            if (!vacuum || !hasGround || !groundBare || e.running < 0.05f || along.y > -0.3f || !Settings.Debris) return;
+            // (where the jet's line meets the ground, as Under has it: a plane, y + sx x + sz z = its level)
+            float facing = along.y + groundSX * along.x + groundSZ * along.z;
+            if (facing > -0.05f) return;
+            float s = -(rim.y + groundSX * rim.x + groundSZ * rim.z - groundY) / facing;
+            float reach = Mathf.Max(e.flame, 4f * e.nozzle) * 2.5f;
+            if (s < 0f || s > reach) return;
+            float close = 1f - s / reach;
+            close *= close;
+            regolithDue += 4500f * close * e.running * Mathf.Clamp(2f * e.nozzle, 0.5f, 3f) * Mathf.Clamp(q, 0.3f, 1.5f) * dt;
+            int n = Mathf.Min((int)regolithDue, 160);
+            regolithDue -= n;
+            if (n <= 0) return;
+            if (regolith == null) regolith = Recipe.Regolith(t, gravity);
+            Vector3 hit = rim + along * s, normal = new Vector3(groundSX, 1f, groundSZ).normalized;
+            Vector3 east = Vector3.Cross(Vector3.forward, normal).normalized, north = Vector3.Cross(normal, east);
+            // (the ground's own colour, as lit: the sun's light and the sky's, as the smoke takes them)
+            float day = Mathf.Sqrt(Mathf.Max(0f, 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB) + Mathf.Max(0f, 0.2126f * ambR + 0.7152f * ambG + 0.0722f * ambB));
+            // (fine dust in the sun shows lighter than the ground it came off: each grain lit all over, and the light thrown on by them)
+            Color grain = new Color((0.35f + 0.65f * Mathf.Sqrt(groundDust.r / 1.2f)) * day, (0.35f + 0.65f * Mathf.Sqrt(groundDust.g / 1.2f)) * day, (0.35f + 0.65f * Mathf.Sqrt(groundDust.b / 1.2f)) * day);
+            float wide = Mathf.Max(e.nozzle * 2f, 0.6f) * (0.6f + 0.4f * s / Mathf.Max(e.flame, 1f));
+            for (int k = 0; k < n; k++)
+            {
+                // (most of it low and not so fast, the sheet round the lander; some of it far faster and further, the streaks)
+                float turn = Random.value * 6.2831853f, low = Random.Range(0.008f, 0.06f), fast = Random.value;
+                Vector3 way = east * Mathf.Cos(turn) + north * Mathf.Sin(turn);
+                float speed = (12f + 110f * fast * fast * fast) * (0.45f + 0.55f * close);
+                Vector3 from = hit + way * (wide * Random.value) + normal * 0.2f;
+                var p = new ParticleSystem.EmitParams
+                {
+                    position = t.TransformPoint(from),
+                    velocity = t.TransformDirection(way * (speed * Mathf.Cos(low)) + normal * (speed * Mathf.Sin(low))),
+                    startLifetime = Random.Range(0.6f, 1.6f),
+                    startSize = Random.Range(0.6f, 1.6f) * (0.7f + 0.6f * Mathf.Min(e.nozzle, 1.5f)),
+                    startColor = new Color(grain.r, grain.g, grain.b, Random.Range(0.3f, 0.7f) * (0.35f + 0.65f * close)),
+                };
+                regolith.Emit(p, 1);
+            }
+        }
+
+        /// <summary>
+        /// Wavers, for many bits of one nozzle in one frame. The numbers each bit of a flame takes from the moment it left and its
+        /// place round the nozzle are made from a lattice of chance values, a whole number of the moment's steps by a place round
+        /// the ring; all the bits a nozzle lays in one frame take theirs from the same few, which are worked out once here (Fill)
+        /// and blended for each bit (At): the same numbers as Wavers gives, without its four hashes for each of eight of them for
+        /// every bit. (A moment outside what was filled, which a frame's own length does not reach, is worked out as Wavers does.)
+        /// </summary>
+        sealed class Lattice
+        {
+            const int Rows = 12, Ring = 9;
+            readonly float[] v = new float[Rows * Ring];
+            int t0, rows, ring;
+            float k;
+            uint salt;
+
+            public void Fill(float k, int ring, uint salt, float from, float to)
+            {
+                this.k = k; this.ring = ring; this.salt = salt;
+                float a = from * k, b = to * k;
+                int lo = (int)a, hi = (int)b;
+                if (a < lo) lo--;
+                if (b < hi) hi--;
+                t0 = lo;
+                rows = Mathf.Min(hi - lo + 2, Rows);
+                for (int r = 0; r < rows; r++)
+                    for (int j = 0; j < ring; j++) v[r * Ring + j] = Chance(lo + r, j, salt);
+            }
+
+            public float At(float left, float round)
+            {
+                float t = left * k;
+                int ti = (int)t;
+                if (t < ti) ti--;
+                int r = ti - t0;
+                float a = round * ring;
+                if (r < 0 || r + 1 >= rows || a < 0f || a >= ring) return Wavers(t, a, ring, salt);
+                float ft = t - ti;
+                int a0 = (int)a;
+                float fa = a - a0;
+                ft = ft * ft * (3f - 2f * ft); fa = fa * fa * (3f - 2f * fa);
+                int a1 = a0 + 1 == ring ? 0 : a0 + 1;
+                float h00 = v[r * Ring + a0], h01 = v[r * Ring + a1], h10 = v[(r + 1) * Ring + a0], h11 = v[(r + 1) * Ring + a1];
+                return (h00 + (h01 - h00) * fa) * (1f - ft) + (h10 + (h11 - h10) * fa) * ft;
+            }
+        }
+        readonly Lattice wMuchA = new Lattice(), wMuchB = new Lattice(), wQuick = new Lattice(), wThrown = new Lattice(), wA1 = new Lattice(), wA2 = new Lattice(), wB1 = new Lattice(), wB2 = new Lattice();
+
         static float Wavers(float t, float a, int ring, uint salt)
         {
-            float tf = Mathf.Floor(t), af = Mathf.Floor(a);
-            int t0 = (int)tf, a0 = (int)af;
-            float ft = t - tf, fa = a - af;
+            // (floors by casting, a step down for what is below nought: Mathf.Floor is a call out, and this runs seven times for every bit of a flame)
+            int t0 = (int)t, a0 = (int)a;
+            if (t < t0) t0--;
+            if (a < a0) a0--;
+            float ft = t - t0, fa = a - a0;
             ft = ft * ft * (3f - 2f * ft); fa = fa * fa * (3f - 2f * fa);
             a0 = ((a0 % ring) + ring) % ring;
             int a1 = (a0 + 1) % ring;

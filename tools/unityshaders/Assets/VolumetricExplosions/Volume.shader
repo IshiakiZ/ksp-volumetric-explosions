@@ -15,6 +15,7 @@ Shader "VolumetricExplosions/Volume"
         _RestE ("RestE", 3D) = "" {}
         _Turns ("Turns", 3D) = "" {}
         _Clear ("Clear", 3D) = "" {}
+        _VolSunMap ("VolSunMap", 2D) = "" {}
     }
     SubShader
     {
@@ -69,6 +70,7 @@ Shader "VolumetricExplosions/Volume"
                 return pos;
             }
 
+            float4 _VolShift;     // xy: for a patch walked a quarter of its pixels a frame, how far its picture is moved (-1 to 1 each way, as the camera's projection has it; see below); nought otherwise
             float4 _VolParams;     // x: how much a metre of the thickest smoke blocks, y: how many steps may be spent on smoke, z: how deep the billows are cut into the edge of the smoke (0 to 1), w: how much a metre of the thickest flame blocks
             float4 _VolCamera;     // x: 1 if the camera drawing this has a depth picture of the scene, y: the angle one of its pixels covers (both set for each camera)
             float4 _VolStep;     // x: length of the finest step in metres
@@ -106,7 +108,7 @@ Shader "VolumetricExplosions/Volume"
             float4 _VolJetBody;     // x: how much flame makes the flame's body whole (a clear, faint flame is whole where there is any of it); y: how many shock diamonds there are
             float4 _VolJetFlow;     // x: how far down the jet, metres, the pattern is carried half as fast as at the nozzle and is half as drawn out; y: how far the pattern's streaks differ in heat at the nozzle, z: and far down the jet; w: 0 if the flame ends at a sharp edge where it thins, as fire does, 1 if it thins away as a glow
             float4 _VolJetEnd;     // x: the length of the strongest flame, metres; y: how far its far end is broken up into tongues, whatever is there (0 to 1); z: how much cooler its far end is drawn than the gas there is reckoned (0 to 1); w: how much wider the jet gets for each metre it goes
-            float4 _VolJetGlow;     // x: how much a shock diamond glows of itself, whatever flame is round it: so much a metre in the jet of a nozzle a metre wide, and by so much more as the nozzle is narrower; y: how far the flame's gas is gone from sight once it has cooled (1: a clear flame's, seen by its own light alone; 0: a sooty one's, dark)
+            float4 _VolJetGlow;     // x: how much a shock diamond glows of itself, whatever flame is round it: so much a metre in the jet of a nozzle a metre wide, and by so much more as the nozzle is narrower; y: how far the flame's gas is gone from sight once it has cooled (1: a clear flame's, seen by its own light alone; 0: a sooty one's, dark); z: how much further apart the diamonds stand than at the ground, w: how much wider they are
             float4 _VolJetAt0;     // The mouths of up to eight of the ship's nozzles, for the shock diamonds in each one's jet. xyz: where, in the grid's axes; w: how wide, a radius in metres (nought: no such nozzle)
             float4 _VolJetAt1;
             float4 _VolJetAt2;
@@ -129,6 +131,11 @@ Shader "VolumetricExplosions/Volume"
             float4 _VolCutE;
             float4 _VolCutF;
             float4 _VolSlot;     // xy: where in the picture it is drawn into this patch's own part of it begins, in pixels (see layers.glsl: the patches drawn at half size share one picture, each in a slot of its own)
+            float4 _VolQuarter;     // a patch walked a quarter of its pixels a frame (Layers; carry.glsl): xy which pixel of each two by two of its slot this frame's are; z 1 while it is (each pixel drawn is then that one of its two by two)
+            float4 _VolSunMapFrom;     // what stands between the smoke and the sun (see SunShadow.cs): xyz where the sun's-eye picture is taken from, w: one over its width, metres
+            float4 _VolSunMapRight;     // xyz: the picture's right, as the sun sees it
+            float4 _VolSunMapUp;     // xyz: its up
+            float4 _VolSunMapAlong;     // xyz: the way the sun's light goes; w: 1 if the picture is of this patch (0: nothing is looked up)
             float4 _VolWakes;     // what is left where something has gone through the smoke (see carve, and Wakes.cs): x how many wakes, y seconds for a wake to fill in, z seconds the air in one goes on turning, w how much of the smoke a fresh one has pushed out of its way (0 to 1)
             float4 _VolWakeLo;     // xyz: a corner of a box round every wake, in the grid's axes (nothing outside it is looked at)
             float4 _VolWakeHi;     // xyz: the opposite corner
@@ -167,6 +174,7 @@ Shader "VolumetricExplosions/Volume"
             Texture3D _RestE; SamplerState sampler_RestE;     // (its third number is something else: how fast the smoke at a place is going through its round of turns, in rounds a second)
             Texture3D _Turns; SamplerState sampler_Turns;     // whose turn it is at a place: rg the point of its round the smoke there is at, as a point on a circle (0.5: the middle of it), for the three reckonings the big billows go by; ba the same for the small billows' three
             Texture3D _Clear; SamplerState sampler_Clear;     // r: how many cells of the coarser grid it is from this one to the nearest with any smoke or flame in it, over 255 (nought: there is some in this one). Read cell by cell, not between cells.
+            Texture2D _VolSunMap; SamplerState sampler_VolSunMap;     // how far along the sun's light, from that picture's plane, the nearest solid thing is at each dot of it
             Texture3D _Detail; SamplerState sampler_Detail;     // r: how much the smoke is gathered (lumps upon lumps), gba: the slope of that, each way
             Texture2D _CameraDepthTexture; SamplerState sampler_CameraDepthTexture;
 
@@ -190,9 +198,13 @@ Shader "VolumetricExplosions/Volume"
 #else
                 clip_.z = min(clip_.z, clip_.w * 0.99999);
 #endif
-                OUT.pos = clip_;
                 OUT.vs_TEXCOORD0 = world.xyz;
                 OUT.vs_TEXCOORD1 = clip_;
+                // (A patch walked a quarter of its pixels a frame, the rest carried over from the frame before (Layers; carry.glsl), is drawn
+                // into a picture half as wide and tall as its slot, each pixel of it the one of a two by two of the slot's walked this frame:
+                // the picture moved by part of a pixel, so that each pixel's middle is on that one's. Where the game draws into its pictures
+                // upside down (Direct3D), Layers turns the move up and down over.)
+                OUT.pos = float4(clip_.xy - _VolShift.xy * clip_.w, clip_.zw);
                 return OUT;
             }
 
@@ -477,6 +489,7 @@ Shader "VolumetricExplosions/Volume"
                         // about like the squares of a chessboard: so whatever a pixel of the screen shows, near thing or far,
                         // one of the pixels round it here stopped at the same.
                         int2 cell = ((int2)(FragCoord(IN.pos).xy - _VolSlot.xy)), most = TextureSize(_CameraDepthTexture, 0) - 1;
+                        if (_VolQuarter.z > 0.5) cell = cell * 2 + ((int2)(_VolQuarter.xy + 0.5));
                         float4 four = float4(TexelFetch(_CameraDepthTexture, min(2 * cell, most), 0).x, TexelFetch(_CameraDepthTexture, min(2 * cell + int2(1, 0), most), 0).x, TexelFetch(_CameraDepthTexture, min(2 * cell + int2(0, 1), most), 0).x, TexelFetch(_CameraDepthTexture, min(2 * cell + int2(1, 1), most), 0).x);
                         four = 1.0 / (_ZBufferParams.z * four + _ZBufferParams.w);
                         ahead = ((cell.x + cell.y) & 1) == 0 ? min(min(four.x, four.y), min(four.z, four.w)) : max(max(four.x, four.y), max(four.z, four.w));
@@ -514,6 +527,7 @@ Shader "VolumetricExplosions/Volume"
                 bool fine = false, ended = false;
                 float left = _VolParams.y, clear = 0.0, last = -1.0e9, longer = 1.0, coarser = 0.0;
                 float passed = 0.0;       // the most that the smoke passed over so far could have hidden (see _VolThin)
+                float thinLonger = 1.0, thinRun = 0.0;     // how many times longer the steps are for thin smoke, and for how many steps it has been thin (see where they are made longer)
 
                 // Thin smoke between the camera and the sun shines.
                 float toward = max(dot(rd, _VolSunDir.xyz), 0.0);
@@ -521,8 +535,13 @@ Shader "VolumetricExplosions/Volume"
                 float3 colour = ((float3)(0.0));
                 float through = 1.0;
                 float deep = 0.0, deep2 = 0.0;      // the depth of each step along the ray (and its square), weighed by how much it hid of what is behind (see result1)
+                float3 rounds = ((float3)(0.0));            // (testing, _VolThin.z: how many times round the loop, how many of them in smoke, how many leaps over clear air)
+                // (the coarse grids held along the ray: see where they are read)
+                float holdFor = 0.1 * max(max(_VolSize.x, _VolSize.y), _VolSize.z) / 32.0, heldAt = -1.0e9, billowsAt = -1.0e9;
+                float4 heldGoing = ((float4)(0.5)), heldTone = ((float4)(0.0)), heldTurn = ((float4)(0.0)), heldR1 = ((float4)(0.0)), heldR2 = ((float4)(0.0)), heldR3 = ((float4)(0.0)), heldR4 = ((float4)(0.0)), heldR5 = ((float4)(0.0));
                 { [loop] for (int i = 0; i < 288; i++)
                 {
+                    rounds.x += 1.0;
                     if (through < 0.02) break;
                     if (k >= kLast)
                     {
@@ -550,21 +569,30 @@ Shader "VolumetricExplosions/Volume"
                         if (cells > 2.5)
                         {
                             float to = floor((k + (2.0 * cells - 3.5) * perCell) / (2.0 * coarse)) * 2.0 * coarse;
-                            if (to > k) { k = to; continue; }
+                            if (to > k) { k = to; rounds.z += 1.0; continue; }
                         }
                     }
                     // The grid is a moment old (it takes a few frames to make), and the smoke has moved on since. So the grid
                     // is read not at this place but where the smoke now here was when the grid was made, going by how fast
                     // the smoke about here was moving then: between one grid and the next the whole cloud is carried
                     // smoothly on, instead of standing still and then jumping.
-                    float4 going = SampleLod(_Flow, p + 0.5, 0.0);
+                    // (How the smoke moves here, what is round about, and the billows' reckonings are on the coarse grids, 32 cells a side, read
+                    // between their cells by the card: along a ray they change little over a tenth of a cell. So they are read again only once the
+                    // ray has gone a tenth of a cell since they last were: at every step where the steps are longer, every few where they are
+                    // shorter, as from inside a cloud. Read at every step, as until 2026-10-18, they were a fifth of what the walk cost from inside
+                    // a booster's cloud on the pad (two hundred steps a ray, a tenth of a metre each); held so, the picture is the same within a
+                    // two-hundred-and-fiftieth.)
+                    bool reread = abs(t - heldAt) > holdFor;
+                    if (reread) { heldGoing = SampleLod(_Flow, p + 0.5, 0.0); heldAt = t; }
+                    float4 going = heldGoing;
                     float2 wakeShown = ((float2)(0.0));      // (testing: see TestView 17 below)
                     float3 gone = (going.xyz - 0.5) * _VolFlow.x;
                     gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
                     float3 here = p * _VolSize.xyz + _VolOffset.xyz;
                     float3 was = here - gone - _VolDetail.xyz;
                     float3 at = p + 0.5 - gone * perSize;
-                    float4 tone = SampleLod(_Around, at, 0.0);
+                    if (reread) heldTone = SampleLod(_Around, at, 0.0);
+                    float4 tone = heldTone;
                     if (tone.g <= 0.0 && !fine)
                     {
                         k = (floor(k / (2.0 * coarse)) + 1.0) * 2.0 * coarse;
@@ -647,12 +675,14 @@ Shader "VolumetricExplosions/Volume"
                             stride = fineNow;
                             fine = true;
                             clear = 0.0;
+                            thinLonger = 1.0; thinRun = 0.0;
                             continue;
                         }
                     }
                     if (some)
                     {
                         clear = 0.0;
+                        rounds.y += 1.0;
 
                         // Billows: read where this smoke "was", by each reckoning that counts for anything just now (see the top),
                         // and blended. (Where the pattern is squeezed, it is read that much more coarsely.)
@@ -680,13 +710,25 @@ Shader "VolumetricExplosions/Volume"
                             // (As a point on a circle, for each three: the three reckonings count for as much as it is from three
                             // places on the rim, a third of the way round apart. Turned on by as far as the smoke has gone round
                             // since the grid was made, so that what they count for changes from frame to frame, not from grid to grid.)
-                            float4 turn = SampleLod(_Turns, at, 0.0) * 2.0 - 1.0;
-                            r5 = SampleLod(_RestE, at, 0.0) * _VolFlow.y + _VolFlow.w;
+                            // (and the reckonings' grids, held as the rest are; where they are, all of them at once)
+                            if (abs(t - billowsAt) > holdFor)
+                            {
+                                heldTurn = SampleLod(_Turns, at, 0.0); heldR5 = SampleLod(_RestE, at, 0.0);
+                                heldR1 = SampleLod(_RestA, at, 0.0); heldR2 = SampleLod(_RestB, at, 0.0); heldR3 = SampleLod(_RestC, at, 0.0); heldR4 = SampleLod(_RestD, at, 0.0);
+                                billowsAt = t;
+                            }
+                            float4 turn = heldTurn * 2.0 - 1.0;
+                            r5 = heldR5 * _VolFlow.y + _VolFlow.w;
                             float on = 6.2831853 * r5.b * _VolThin.y, c = cos(on), s = sin(on);
                             float2 big2 = float2(turn.r * c - turn.g * s, turn.r * s + turn.g * c);
                             float c2 = c * c - s * s, s2 = 2.0 * s * c;
                             float2 small2 = float2(turn.b * c2 - turn.a * s2, turn.b * s2 + turn.a * c2);
-                            float3 share = max(0.5 - 0.5 * (big2.x * float3(1.0, -0.5, -0.5) - big2.y * float3(0.0, 0.8660254, -0.8660254)), 0.0);
+                            // (Each counts for nothing over the third of its round about where it begins afresh, and comes in and goes out
+                            // smoothly either side: so at any place and moment two of the three count and the third is not read. Until
+                            // 2026-10-17 each went to nothing only at the moment it began afresh, and all three were read nearly always:
+                            // a tenth of what drawing the smoke costs, for a pattern no different to look at, and two blended instead of
+                            // three are the crisper; the end of a reckoning's round, where its pattern is drawn out furthest, is not seen.)
+                            float3 share = max(0.5 - (big2.x * float3(1.0, -0.5, -0.5) - big2.y * float3(0.0, 0.8660254, -0.8660254)), 0.0);
                             // (One that has come to the end of its turn since the grid was made, and begun afresh, counts for nothing
                             // until the next grid comes: the grid still has where the smoke "was" by it as it was before. It is the
                             // one that was in the second half of its turn then and is in the first half now. Where the smoke is not
@@ -694,7 +736,7 @@ Shader "VolumetricExplosions/Volume"
                             float3 was2 = turn.r * float3(0.0, 0.8660254, -0.8660254) + turn.g * float3(1.0, -0.5, -0.5), now2 = big2.x * float3(0.0, 0.8660254, -0.8660254) + big2.y * float3(1.0, -0.5, -0.5);
                             share = lerp(share, ((float3)(0.5 * max(1.0 - length(turn.rg), 0.0))), step(was2, ((float3)(-1e-4))) * step(((float3)(0.0)), now2));
                             bigSeen = bigNear * share * rsqrt(max(dot(share, share), 1e-6));
-                            share = max(0.5 - 0.5 * (small2.x * float3(1.0, -0.5, -0.5) - small2.y * float3(0.0, 0.8660254, -0.8660254)), 0.0);
+                            share = max(0.5 - (small2.x * float3(1.0, -0.5, -0.5) - small2.y * float3(0.0, 0.8660254, -0.8660254)), 0.0);
                             was2 = turn.b * float3(0.0, 0.8660254, -0.8660254) + turn.a * float3(1.0, -0.5, -0.5); now2 = small2.x * float3(0.0, 0.8660254, -0.8660254) + small2.y * float3(1.0, -0.5, -0.5);
                             share = lerp(share, ((float3)(0.5 * max(1.0 - length(turn.ba), 0.0))), step(was2, ((float3)(-1e-4))) * step(((float3)(0.0)), now2));
                             smallSeen = smallNear * share * rsqrt(max(dot(share, share), 1e-6));
@@ -702,9 +744,9 @@ Shader "VolumetricExplosions/Volume"
                         bool3 big = GreaterThan(bigSeen, ((float3)(0.0))), small = GreaterThan(smallSeen, ((float3)(0.0)));
                         // (Each set is read at its own place in the pattern as well, so that three sets begun at the same spot are still three different sets.)
                         float4 r1 = ((float4)(0.0)), r2 = ((float4)(0.0)), r3 = ((float4)(0.0)), r4 = ((float4)(0.0));
-                        if (big.x || big.y) r1 = SampleLod(_RestA, at, 0.0) * _VolFlow.y + _VolFlow.w;
-                        if (big.y || big.z) r2 = SampleLod(_RestB, at, 0.0) * _VolFlow.y + _VolFlow.w;
-                        if (big.z || small.x) r3 = SampleLod(_RestC, at, 0.0) * _VolFlow.y + _VolFlow.w;
+                        if (big.x || big.y) r1 = heldR1 * _VolFlow.y + _VolFlow.w;
+                        if (big.y || big.z) r2 = heldR2 * _VolFlow.y + _VolFlow.w;
+                        if (big.z || small.x) r3 = heldR3 * _VolFlow.y + _VolFlow.w;
                         testFrom = r1.rgb;
                         if (big.x) bigBillows((was + r1.rgb) * _VolDetail.w, level, bigSeen.x, lump, slope);
                         if (big.y) bigBillows((was + float3(r1.a, r2.rg)) * _VolDetail.w + float3(0.37, 0.11, 0.71), level, bigSeen.y, lump, slope);
@@ -742,11 +784,13 @@ Shader "VolumetricExplosions/Volume"
                         {
                             // (what follows is all that such a step does: see where the flame is worked out, below)
                             left -= 1.0;
+                            thinRun = flame > 0.0 ? 0.0 : thinRun + 1.0;
                             k += stride;
                             if (fine && left <= 0.0 && longer < 7.5 && Mod(k, 2.0 * stride) < 0.5) { stride *= 2.0; longer *= 2.0; left = 0.5 * _VolParams.y; }
+                            else if (fine && thinRun >= 3.0 && thinLonger < 4.0 && (left < 0.6 * _VolParams.y || longer > 1.5) && Mod(k, 2.0 * stride) < 0.5) { stride *= 2.0; thinLonger *= 2.0; thinRun = 0.0; }
                             continue;
                         }
-                        if (small.y || small.z) r4 = SampleLod(_RestD, at, 0.0) * _VolFlow.y + _VolFlow.w;
+                        if (small.y || small.z) r4 = heldR4 * _VolFlow.y + _VolFlow.w;
                         if (small.x) smallBillows((was + r3.gba) * _VolDetail.w, level, smallSeen.x, lump, slope);
                         if (small.y) smallBillows((was + r4.rgb) * _VolDetail.w + float3(0.53, 0.29, 0.17), level, smallSeen.y, lump, slope);
                         if (small.z) smallBillows((was + float3(r4.a, r5.rg)) * _VolDetail.w + float3(0.19, 0.83, 0.61), level, smallSeen.z, lump, slope);
@@ -760,6 +804,10 @@ Shader "VolumetricExplosions/Volume"
                         float thin = exp(-sigma * _VolPeak.w);
 
                         // Flame: licked into tongues, flickering, and coloured by how hot it is.
+                        // (folded: a fire in the open drawn as since 2026-10-18, its flame folded, its light stopped by its smoke, its hot smoke
+                        // shining; the mod's TestFire 2 draws it as before, for setting one against the other, and its TestDusk 1 (w 3) folded but
+                        // lit as on the morning of 2026-10-18, before the fire at dusk was seen)
+                        bool folded = _VolFire.w > 1.5 && _VolJetLook.w <= 0.0;
                         float burning, fireN = -1.0, fireHot = 0.0;
                         if (_VolFire.w > 0.5 && _VolJetLook.w <= 0.0 && flame > 0.0)
                         {
@@ -777,6 +825,18 @@ Shader "VolumetricExplosions/Volume"
                             float body = (1.0 - exp(-flame * _VolParams.w * 2.0)) * smoothstep(0.05, 0.35, hotHere);
                             float tongue = smoothstep(0.30, 0.40, body * 1.2 + (fireN - 0.5) * 1.2 * _VolFire.z + (lump - 0.45) * 0.4);
                             burning = flame * _VolParams.w * tongue * (0.7 + 0.9 * fireN);
+                            // (A fuel fire's thick flame is folded at the size of its billows, as photographs of fuel fireballs show it: bright
+                            // where a billow's top faces out, and in the creases between billows, where cold air is drawn in, cooler, dim and dark
+                            // with soot. Burnt whole, as until 2026-10-18, a young fireball was one smooth glowing body: "a glowing volumetric
+                            // orb", the owner, 2026-10-17. And the flame as a whole at 0.45 of what it was: brighter, it rolled over into white in
+                            // the film's curve and threw a halo round itself through the film's glow, by day as well.)
+                            { [loop] for (int once = folded ? 0 : 1; once < 1; once++)
+                            {
+                                float top = smoothstep(0.40, 0.52, lump);
+                                burning *= lerp(0.25, 1.0, top) * 0.45;
+                                sigma += flame * _VolParams.w * (1.0 - top) * tongue;
+                                fireHot *= lerp(0.6, 1.0, top);
+                            } }
                             // (soot only where it has cooled: a fuel fireball is luminous all through for its first second)
                             sigma += flame * _VolParams.w * _VolFire.z * 0.45 * smoothstep(0.5, 0.25, fireN) * (1.0 - tongue) * smoothstep(0.75, 0.35, hotHere);
                         }
@@ -813,9 +873,9 @@ Shader "VolumetricExplosions/Volume"
                             nearer(_VolJetAt4, here, dAside2, dAlong, dWide); nearer(_VolJetAt5, here, dAside2, dAlong, dWide);
                             nearer(_VolJetAt6, here, dAside2, dAlong, dWide); nearer(_VolJetAt7, here, dAside2, dAlong, dWide);
                             if (dAside2 > 1e8) dAside2 = aside * aside;
-                            float spacing = 2.6 * dWide;
+                            float spacing = 2.6 * dWide * max(_VolJetGlow.z, 0.5);
                             float cell = dAlong / spacing - 0.75, nth = floor(cell), into = cell - nth;
-                            float span = dWide * lerp(0.6, 0.18, into);
+                            float span = dWide * lerp(0.6, 0.18, into) * max(_VolJetGlow.w, 0.5);
                             float diamond = step(0.0, cell) * step(nth, _VolJetBody.y - 0.5) * exp(-3.2 * into) * smoothstep(0.0, 0.16, into) * exp(-0.65 * nth)
                                           * exp(-dAside2 / (span * span));
                             diamonds = _VolJetLook.z * diamond;
@@ -834,10 +894,17 @@ Shader "VolumetricExplosions/Volume"
                         // ray, and counted for less, as they once were, a ray that began in the thin skirts of a cloud spent them
                         // all there and never reached the body of it: from close by, windows clean through the smoke with hard edges.)
                         left -= burning > sigma ? 2.0 : 1.0;
+                        // (Where the steps were made longer for thin smoke (see below), thicker smoke or flame has them as short as before again; and at
+                        // flame the ray goes back to just after the last step, which was in thin smoke, so that the flame begins where it does: begun a
+                        // long step late, flame inside thin smoke was speckled. Thick smoke's edge is not gone back for: inside a cloud, where the steps
+                        // are made longer most, going back for it cost more time than it saved and made the picture no better.)
+                        if (thinLonger > 1.5 && (burning > 0.0 || (sigma + burning) * stride * finest > 0.030)) { float strideWas = stride; stride /= thinLonger; thinLonger = 1.0; thinRun = 0.0; if (burning > 0.0) { k += stride - strideWas; continue; } }
                         if (_VolGrid.w < 0.5 && sigma + burning <= 0.0)
                         {
+                            thinRun = flame > 0.0 ? 0.0 : thinRun + 1.0;
                             k += stride;
                             if (fine && left <= 0.0 && longer < 7.5 && Mod(k, 2.0 * stride) < 0.5) { stride *= 2.0; longer *= 2.0; left = 0.5 * _VolParams.y; }
+                            else if (fine && thinRun >= 3.0 && thinLonger < 4.0 && (left < 0.6 * _VolParams.y || longer > 1.5) && Mod(k, 2.0 * stride) < 0.5) { stride *= 2.0; thinLonger *= 2.0; thinRun = 0.0; }
                             continue;
                         }
                         float4 air = SampleLod(_Volume, at, 0.0);
@@ -861,18 +928,77 @@ Shader "VolumetricExplosions/Volume"
                         // Down in the clefts between billows less light of any kind gets in.
                         float cleft = eaten * about;
                         float sun = ((1.0 - strays) * exp(-before) + strays * exp(-0.25 * before)) * (1.0 - 0.3 * cleft);
+                        // What stands between this place and the sun (the craft, the tower, a building, the ground): its shadow in the smoke.
+                        // Not black: light that has found its way round inside the cloud still reaches it, more in pale smoke than in soot.
+                        float solidLit = 1.0;
+                        float3 mapSeen = ((float3)(0.0));       // (testing: 24)
+                        if (_VolSunMapAlong.w > 0.5)
+                        {
+                            float3 rel = eye + rd * t - _VolSunMapFrom.xyz;
+                            float2 onMap = float2(dot(rel, _VolSunMapRight.xyz), dot(rel, _VolSunMapUp.xyz)) * _VolSunMapFrom.w + 0.5;
+                            mapSeen = float3(frac(onMap * 4.0), 0.0);
+                            if (onMap.x > 0.0 && onMap.y > 0.0 && onMap.x < 1.0 && onMap.y < 1.0)
+                            {
+                                float far = dot(rel, _VolSunMapAlong.xyz), nearest = SampleLod(_VolSunMap, onMap, 0.0).r;
+                                mapSeen = float3(clamp((far - nearest) / 20.0, 0.0, 1.0), clamp((nearest - far) / 20.0, 0.0, 1.0), frac(far / 100.0));
+                                solidLit = smoothstep(far - 2.0, far - 0.6, nearest);
+                                sun *= lerp(0.12 + 0.4 * strays, 1.0, solidLit);
+                            }
+                        }
                         float sky = exp(-air.b * 8.0) * (1.0 - 0.55 * cleft);
                         float3 toA = here - _VolLampA.xyz, toB = here - _VolLampB.xyz, toC = here - _VolLampC.xyz;
-                        float firelight = min(_VolLamps.x * _VolLampA.w / (dot(toA, toA) + _VolLampA.w + 1e-4) + _VolLamps.y * _VolLampB.w / (dot(toB, toB) + _VolLampB.w + 1e-4) + _VolLamps.z * _VolLampC.w / (dot(toC, toC) + _VolLampC.w + 1e-4), 1.0);
+                        float3 fromLamp = float3(_VolLamps.x * _VolLampA.w / (dot(toA, toA) + _VolLampA.w + 1e-4), _VolLamps.y * _VolLampB.w / (dot(toB, toB) + _VolLampB.w + 1e-4), _VolLamps.z * _VolLampC.w / (dot(toC, toC) + _VolLampC.w + 1e-4));
+                        float allLamps = fromLamp.x + fromLamp.y + fromLamp.z;
+                        float firelight = min(allLamps, 1.0);
+                        // (The fires' light reaches a place only through the smoke between: in a thick cloud with the fire inside, its far side
+                        // is not lit by it. Taken from the coarse grid of how much smoke lies round about, at a third and two thirds of the way
+                        // to each lamp, and a twenty-fifth of what that would stop along a straight line: light finds its way round inside a
+                        // cloud. Unstopped, as until 2026-10-18, the fire lit a whole cloud as evenly as a lamp lights a paper lantern; stopped by
+                        // a tenth, as for that morning, the smoke round a fire at dusk lost the orange glow from within it. Each lamp's light by
+                        // its own way, as since 2026-10-20: stopped along the way to the nearest lamp alone, the light changed in a step wherever
+                        // the nearest lamp did, on the flat halfway between two lamps; between a blast's lamps one above another, as they climb,
+                        // a level line straight across the cloud, dark smoke over smoke lit orange (the owner: "a hard line edge with the
+                        // fire's rendering"). A lamp that is out gives nothing and is passed by.)
+                        { [loop] for (int once = folded && firelight > 0.01 ? 0 : 1; once < 1; once++)
+                        {
+                            float stops = 0.5 * _VolParams.x * (_VolFire.w > 2.5 ? 0.1 : 0.04), lampLit = 0.0;
+                            { [loop] for (int n = 0; n < 3; n++)
+                            {
+                                float gives = n == 0 ? fromLamp.x : n == 1 ? fromLamp.y : fromLamp.z;
+                                if (gives <= 0.0) continue;
+                                float3 way = (n == 0 ? _VolLampA.xyz : n == 1 ? _VolLampB.xyz : _VolLampC.xyz) - here;
+                                float2 onWay = float2(SampleLod(_Around, (here + way * 0.333 - _VolOffset.xyz) / _VolSize.xyz + 0.5, 0.0).r, SampleLod(_Around, (here + way * 0.667 - _VolOffset.xyz) / _VolSize.xyz + 0.5, 0.0).r);
+                                lampLit += gives * exp(-dot(onWay, onWay) * stops * length(way));
+                            } }
+                            firelight *= lampLit / allLamps;
+                        } }
                         // Beside a fire the eye is taken up by the fire: the daylight on the smoke there counts for little, and it shows by the firelight.
-                        float dazzle = 1.0 - 0.85 * min(firelight * 1.6, 1.0);
-                        float3 light = (_VolSun.rgb * (sun * shine * relief) + _VolAmb.rgb * (0.3 + 0.7 * sky)) * dazzle + _VolGlow.rgb * (firelight * 4.0);
+                        // (Not round a fire in the open since 2026-10-18: the film's eye goes by the whole picture, and with the daylight taken off
+                        // the smoke round a fire its billows lost their light and shade, and the cloud was all one orange.)
+                        float dazzle = folded ? 1.0 : 1.0 - 0.85 * min(firelight * 1.6, 1.0);
+                        // (A big fire's light on the smoke beside it is many times the sun's (a fireball's face at 1300 K gives off some fifty times
+                        // the sun's light for every bit of sky it fills): twice as strong round a fire in the open since its light has been stopped
+                        // by the smoke on its way and the daylight left on the smoke, so that what it reaches glows orange, as at dusk it did before.)
+                        float3 light = (_VolSun.rgb * (sun * shine * relief) + _VolAmb.rgb * (0.3 + 0.7 * sky)) * dazzle + _VolGlow.rgb * (firelight * (folded && _VolFire.w < 2.5 ? 8.0 : 4.0));
                         // (and the lamps of the scene: at night a launch's smoke in the floodlights is not left black where its own fire does not reach)
                         if (_VolSceneA.w > 0.0) light += clamp(sceneLamp(here, _VolSceneA, _VolSceneTintA, _VolSceneDirA) + sceneLamp(here, _VolSceneB, _VolSceneTintB, _VolSceneDirB)
                                                              + sceneLamp(here, _VolSceneC, _VolSceneTintC, _VolSceneDirC) + sceneLamp(here, _VolSceneD, _VolSceneTintD, _VolSceneDirD), 0.0, 8.0) * dazzle;
                         float3 lit_ = sqrt(own * light);
+                        // (Hot smoke shines: in a fuel fire the soot is what gives the light, and where the gas round the flame is still hot, so is
+                        // its smoke. Cooler in the creases between billows, where cold air is drawn in, and dim there, steeply, as a black body's
+                        // light goes with its heat. For a fire in the open, since 2026-10-18. No hotter than an orange heat: smoke is soot cooling
+                        // out of the flame, and at the flame's own yellow-white heat it came out pale grey-white round a young fireball at dusk.)
+                        { [loop] for (int once = folded ? 0 : 1; once < 1; once++)
+                        {
+                            float heatS = min(air.a * 1.2 * lerp(0.5, 1.0, smoothstep(0.40, 0.52, lump)), _VolFire.w > 2.5 ? 9.0 : 0.62);
+                            float3 hotS = heatS < 0.25 ? _VolHot1.rgb * (heatS * 4.0) : heatS < 0.5 ? lerp(_VolHot1.rgb, _VolHot2.rgb, heatS * 4.0 - 1.0) : heatS < 0.75 ? lerp(_VolHot2.rgb, _VolHot3.rgb, heatS * 4.0 - 2.0) : lerp(_VolHot3.rgb, _VolHot4.rgb, min(heatS * 4.0 - 3.0, 1.0));
+                            float h = min(heatS, 1.1);
+                            lit_ += hotS * ((0.55 + 2.2 * h * h * h) * smoothstep(0.28, 0.55, heatS) * 0.45);
+                        } }
                         if (_VolGrid.w > 0.5 && _VolGrid.w < 2.5) { lit_ = ((float3)(0.45)); burning = 0.0; }                      // (testing: no light and no flame)
-                        if (_VolGrid.w > 16.5) { lit_ = lerp(lit_, float3(1.0, 0.12, 0.08), min(wakeShown.x * 1.5, 1.0)) + float3(0.0, min(wakeShown.y * 0.3, 0.8), 0.0); burning = 0.0; }      // (testing: 17 where the wakes are)
+                        if (_VolGrid.w > 23.5 && _VolGrid.w < 24.5) { lit_ = mapSeen; burning = 0.0; }      // (testing: 24 the sun's-eye picture as looked up: off it, where on it in stripes; on it, red as far behind the nearest solid thing, green as far in front, blue the distance in hundreds of metres)
+                        else if (_VolGrid.w > 22.5 && _VolGrid.w < 23.5) { lit_ = float3(1.0 - solidLit, solidLit, 0.0) * (_VolSunMapAlong.w > 0.5 ? 1.0 : 0.3); burning = 0.0; }      // (testing: 23 what stands in the sun's way: red in its shadow, green not, dim where this patch has no sun's-eye picture)
+                        else if (_VolGrid.w > 16.5) { lit_ = lerp(lit_, float3(1.0, 0.12, 0.08), min(wakeShown.x * 1.5, 1.0)) + float3(0.0, min(wakeShown.y * 0.3, 0.8), 0.0); burning = 0.0; }      // (testing: 17 where the wakes are)
                         else if (_VolGrid.w > 14.5) burning = 0.0;                 // (testing: 15 everything but the flame,
                         else if (_VolGrid.w > 13.5) lit_ = ((float3)(0.0));                // 14 the flame alone, on black smoke)
                         else if (_VolGrid.w > 9.5) { burning = 0.0; lit_ = _VolGrid.w < 10.5 ? ((float3)(sun * shine * relief)) : _VolGrid.w < 11.5 ? ((float3)(sky)) : _VolGrid.w < 12.5 ? own * 3.0 : ((float3)(firelight)); }      // (testing: 10 the sun's light alone, 11 the sky's, 12 the smoke's own colour, 13 the firelight)
@@ -886,6 +1012,7 @@ Shader "VolumetricExplosions/Volume"
                         deep += hidHere * tHere;
                         deep2 += hidHere * tHere * tHere;
                         through *= 1.0 - a;
+                        thinRun = flame <= 0.0 && both * stepLength < 0.0020 ? thinRun + 1.0 : 0.0;
                     }
                     else if (fine)
                     {
@@ -900,8 +1027,15 @@ Shader "VolumetricExplosions/Volume"
                         // was, thick smoke seen through thin from close by was speckled: from there the steps are short and soon used up.)
                         if (through < 0.3 && longer < 3.5) { if (Mod(k, stride * 4.0 / longer) < 0.5) { stride *= 4.0 / longer; longer = 4.0; } }
                         else if (left <= 0.0 && longer < 7.5 && Mod(k, 2.0 * stride) < 0.5) { stride *= 2.0; longer *= 2.0; left = 0.5 * _VolParams.y; }
+                        // And in thin smoke longer still: after three steps in a row of smoke too thin to hide a five-hundredth each, with no flame on
+                        // the grid there, and once two fifths of the steps allowed for are used (or the steps are longer already), they are doubled,
+                        // up to four times as long, and short again at thicker smoke or flame (see above). From inside a booster's cloud on the pad a ray
+                        // spent its steps a tenth of a metre long in the thin smoke round the camera (two hundred of them, and a tenth of the rays at the
+                        // loop's end) and had them doubled and doubled again further on, where the smoke that can be seen is; walked so, it took a quarter
+                        // less time and came out nearer to one walked with no limit on its steps (from a mean of 0.9 of 255 apart to 0.4).
+                        else if (thinRun >= 3.0 && thinLonger < 4.0 && (left < 0.6 * _VolParams.y || longer > 1.5) && Mod(k, 2.0 * stride) < 0.5) { stride *= 2.0; thinLonger *= 2.0; thinRun = 0.0; }
                         // And out of the smoke, as long as the grid's cells again.
-                        if (clear >= coarse && Mod(k, coarse) < 0.5) { fine = false; stride = coarse; }
+                        if (clear >= coarse && Mod(k, coarse) < 0.5) { fine = false; stride = coarse; thinLonger = 1.0; thinRun = 0.0; }
                     }
                 } }
                 // The walk stops when no more than a fiftieth of what is behind the smoke would still get through. That fiftieth
@@ -912,6 +1046,7 @@ Shader "VolumetricExplosions/Volume"
                 result = float4(colour * (all_ / max(hides, 1e-6)), all_);
                 float meanDepth = deep / max(hides, 1e-6), spread = sqrt(max(deep2 / max(hides, 1e-6) - meanDepth * meanDepth, 0.0));
                 result1 = float4(all_ * meanDepth * _VolCamera.w, all_ * spread * _VolCamera.w, 0.0, all_);
+                if (_VolThin.z > 0.5) result = float4(rounds / ((float3)(_VolThin.z)), 1.0);       // (testing: the rounds, over so many: red all, green in smoke, blue leaps)
                 return Both(result, result1);
             }
             ENDCG

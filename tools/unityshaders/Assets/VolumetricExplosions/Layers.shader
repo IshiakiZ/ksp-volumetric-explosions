@@ -65,7 +65,7 @@ Shader "VolumetricExplosions/Layers"
 
             float4 _VolSheet;     // the part of the screen any patch's smoke can be on, as the camera's projection gives it (-1 to 1): x0, y0, x1, y1 (x1 not beyond x0: nothing for this camera)
             float4 _VolCamera;     // x: 1 if the camera drawing this has a depth picture of the scene, w: what the depths kept with the smoke were multiplied by (for this camera)
-            float4 _VolLayers;     // x: how many patches were drawn into the atlas for this camera, y: 1 if the ships' patches were drawn into the full-sized picture, z: slots to a row of the atlas, w: 1 if a slot is half the screen's size each way (0: the screen's size)
+            float4 _VolLayers;     // x: how many patches were drawn into the atlas for this camera, y: 1 if the ships' patches were drawn into the full-sized picture (2: into it at half size each way, as a slot is), z: slots to a row of the atlas, w: 1 if a slot is half the screen's size each way (0: the screen's size)
             float4 _VolSlots;     // xy: the size of a slot, in pixels; z: (testing) 1 lays the patches over one another in the order they were drawn, as the game used to (no sorting by depth); 2 shows each patch in a colour of its own; 3 the same laid in the old order; 4 the nearest two patches' depths and spreads as colours; 5 sorted and laid over one another as until 2026-10-10
             float4 _WeatherClouds;     // x: 1 if a weather mod's clouds were laid on before the smoke in this camera's drawing (Natural Weather 0.4 and on)
             Texture2D _VolAtlas; SamplerState sampler_VolAtlas;     // the patches' smoke, each in its slot: its colour times how much it hides, and how much it hides
@@ -123,6 +123,23 @@ Shader "VolumetricExplosions/Layers"
                 return ((cell.x + cell.y) & 1) == 0 ? min(min(four.x, four.y), min(four.z, four.w)) : max(max(four.x, four.y), max(four.z, four.w));
             }
 
+            // The four pixels of a half-sized slot round this one, by nearness, made to favour those that stopped where this pixel's own
+            // surface is. Enlarged plainly, a half-sized picture would smear over the outline of anything standing in the smoke: the slot's
+            // pixels beside a rocket stopped at the rocket or went on past it. (Allowing for a surface that slopes away from the camera: see
+            // enlarge.glsl, which did this for one patch at a time.) The same for every patch, and for the ships' picture at half size.
+            float4 weighFour(float4 share, int2 pixel, int2 c00, int2 c10, int2 c01, int2 c11)
+            {
+                int2 most = TextureSize(_CameraDepthTexture, 0) - 1;
+                float here = 1.0 / (_ZBufferParams.z * TexelFetch(_CameraDepthTexture, min(pixel, most), 0).x + _ZBufferParams.w);
+                float4 apart = float4(stopped(c00, most), stopped(c10, most), stopped(c01, most), stopped(c11, most)) - here;
+                float4 beside = float4(TexelFetch(_CameraDepthTexture, clamp(pixel - int2(1, 0), ((int2)(0)), most), 0).x, TexelFetch(_CameraDepthTexture, clamp(pixel + int2(1, 0), ((int2)(0)), most), 0).x, TexelFetch(_CameraDepthTexture, clamp(pixel - int2(0, 1), ((int2)(0)), most), 0).x, TexelFetch(_CameraDepthTexture, clamp(pixel + int2(0, 1), ((int2)(0)), most), 0).x);
+                beside = abs(1.0 / (_ZBufferParams.z * beside + _ZBufferParams.w) - here);
+                float slopes = min(beside.x, beside.y) + min(beside.z, beside.w);
+                float slack = 0.01 * here + 0.01 + 3.0 * slopes;
+                share /= apart * apart + slack * slack;
+                return share / (share.x + share.y + share.z + share.w);
+            }
+
             // (testing: a colour for each patch)
             float3 hue(int n)
             {
@@ -167,23 +184,8 @@ Shader "VolumetricExplosions/Layers"
                     float4 s00 = TexelFetch(_VolAtlas, origin + c00, 0), s10 = TexelFetch(_VolAtlas, origin + c10, 0), s01 = TexelFetch(_VolAtlas, origin + c01, 0), s11 = TexelFetch(_VolAtlas, origin + c11, 0);
                     // (most of the screen has none of this patch's smoke on it, and is passed over at once)
                     if (AllZero(s00) && AllZero(s10) && AllZero(s01) && AllZero(s11)) continue;
-                    if (!weighed)
-                    {
-                        // Enlarged plainly, a half-sized picture would smear over the outline of anything standing in the smoke: the
-                        // slot's pixels beside a rocket stopped at the rocket or went on past it. So those that stopped where this
-                        // pixel's own surface is count for most (allowing for a surface that slopes away from the camera: see
-                        // enlarge.glsl, which did this for one patch at a time). The same for every patch: worked out once.
-                        weighed = true;
-                        int2 most = TextureSize(_CameraDepthTexture, 0) - 1;
-                        float here = 1.0 / (_ZBufferParams.z * TexelFetch(_CameraDepthTexture, min(pixel, most), 0).x + _ZBufferParams.w);
-                        float4 apart = float4(stopped(c00, most), stopped(c10, most), stopped(c01, most), stopped(c11, most)) - here;
-                        float4 beside = float4(TexelFetch(_CameraDepthTexture, clamp(pixel - int2(1, 0), ((int2)(0)), most), 0).x, TexelFetch(_CameraDepthTexture, clamp(pixel + int2(1, 0), ((int2)(0)), most), 0).x, TexelFetch(_CameraDepthTexture, clamp(pixel - int2(0, 1), ((int2)(0)), most), 0).x, TexelFetch(_CameraDepthTexture, clamp(pixel + int2(0, 1), ((int2)(0)), most), 0).x);
-                        beside = abs(1.0 / (_ZBufferParams.z * beside + _ZBufferParams.w) - here);
-                        float slopes = min(beside.x, beside.y) + min(beside.z, beside.w);
-                        float slack = 0.01 * here + 0.01 + 3.0 * slopes;
-                        share /= apart * apart + slack * slack;
-                        share /= share.x + share.y + share.z + share.w;
-                    }
+                    // (worked out once, for every patch: see weighFour)
+                    if (!weighed) { weighed = true; share = weighFour(share, pixel, c00, c10, c01, c11); }
                     float4 smoke = s00 * share.x + s10 * share.y + s01 * share.z + s11 * share.w;
                     if (smoke.a <= 0.0005 && smoke.r + smoke.g + smoke.b <= 0.0005) continue;
                     float2 deep = TexelFetch(_VolAtlasDepth, origin + c00, 0).rg * share.x + TexelFetch(_VolAtlasDepth, origin + c10, 0).rg * share.y
@@ -196,10 +198,22 @@ Shader "VolumetricExplosions/Layers"
                 } }
                 if (_VolLayers.y > 0.5)
                 {
-                    float4 smoke = TexelFetch(_VolFull, pixel, 0);
+                    float4 smoke;
+                    float2 deep = ((float2)(0.0));
+                    // (the ships' picture at half size, where their boxes cover much of the screen: read as a slot is (Layers.ShipsHalf))
+                    bool halfShips = _VolLayers.y > 1.5;
+                    if (!halfShips) smoke = TexelFetch(_VolFull, pixel, 0);
+                    else
+                    {
+                        float4 s00 = TexelFetch(_VolFull, c00, 0), s10 = TexelFetch(_VolFull, c10, 0), s01 = TexelFetch(_VolFull, c01, 0), s11 = TexelFetch(_VolFull, c11, 0);
+                        if (!weighed) { weighed = true; share = weighFour(share, pixel, c00, c10, c01, c11); }
+                        smoke = s00 * share.x + s10 * share.y + s01 * share.z + s11 * share.w;
+                        deep = TexelFetch(_VolFullDepth, c00, 0).rg * share.x + TexelFetch(_VolFullDepth, c10, 0).rg * share.y
+                             + TexelFetch(_VolFullDepth, c01, 0).rg * share.z + TexelFetch(_VolFullDepth, c11, 0).rg * share.w;
+                    }
                     if (smoke.a > 0.0005 || smoke.r + smoke.g + smoke.b > 0.0005)
                     {
-                        float2 deep = TexelFetch(_VolFullDepth, pixel, 0).rg;
+                        if (!halfShips) deep = TexelFetch(_VolFullDepth, pixel, 0).rg;
                         colours[n] = smoke;
                         depths[n] = deep.x / (max(smoke.a, 1e-4) * scale);
                         spreads[n] = deep.y / (max(smoke.a, 1e-4) * scale);

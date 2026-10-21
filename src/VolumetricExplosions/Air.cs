@@ -27,16 +27,41 @@ namespace VolumetricExplosions
         public static readonly long[] Part = new long[16];
         static readonly float[] partShown = new float[16];
         static readonly string[] partName = { "dead", "turn aside", "rest", "sprites", "frame", "blasts", "air", "fires", "pieces", "look ahead", "grid over", "tune", "glows", "start", "place", "marks" };
+#if DEV
+        public static long FlameTicks, FlameBits;
+        static long flameTicksWas, flameBitsWas, flameFramesWas;
+        /// <summary>(How long laying engines' flames has taken since last asked, a frame on average, and for each bit laid.)</summary>
+        public static string FlameCost()
+        {
+            long frames = Time.frameCount - flameFramesWas, ticks = FlameTicks - flameTicksWas, bits = FlameBits - flameBitsWas;
+            flameTicksWas = FlameTicks; flameBitsWas = FlameBits; flameFramesWas = Time.frameCount;
+            if (frames <= 0) return "no frames";
+            double ms = ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            return (ms / frames).ToString("F3") + " ms a frame laying flames, " + (bits / (double)frames).ToString("F0") + " bits a frame, " + (bits > 0 ? (ms * 1000.0 / bits).ToString("F2") : "-") + " us a bit, over " + frames + " frames";
+        }
+#endif
         public static void Lap(int which, ref long lap)
         {
             long now = System.Diagnostics.Stopwatch.GetTimestamp();
             Part[which] += now - lap;
             lap = now;
         }
+        // (for the development build: the four parts of "fires" in a patch's step, see Site.Step and the slow frames' log)
+        public static readonly long[] FireParts = new long[4];
+        [System.Diagnostics.Conditional("DEV")]
+        public static void SubLap(int which, ref long at)
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            FireParts[which] += now - at;
+            at = now;
+        }
         public static readonly long[] Stage = new long[8];    // timer ticks the parts of the last grid took: getting ready, putting the particles in, the sun's light, the sky's, what is round about, where it is going, (those four together), packing
         public static readonly System.Threading.Tasks.ParallelOptions Few = new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = -1 };
 
         readonly List<Blast> newborn = new List<Blast>();
+        readonly SunShadow sunShadow = new SunShadow();
+        readonly List<Site> ranked = new List<Site>();
+        static readonly Comparison<Site> byAway = (a, b) => a.AwayNow.CompareTo(b.AwayNow);
         readonly List<Site> sites = new List<Site>();
         readonly List<Scorch> marks = new List<Scorch>();
         readonly System.Diagnostics.Stopwatch clock = new System.Diagnostics.Stopwatch();
@@ -52,8 +77,135 @@ namespace VolumetricExplosions
             StartCoroutine(AfterEachFrame());
         }
 
+        // ---- the first explosion's first-time work, done ahead (2026-10-18)
+        // (In a fresh game the first explosion stalled it for 129 to 183 ms in one or two frames, out of sight or in view, and the
+        // next ones never for more than 43: the air's update 72 ms, the end of the frame 38 and the drawing's setting up 25 for the
+        // first time (Keystone's meter, method by method), and the card making the smoke's programs. Fragmentation's warm-up only
+        // begins and puts away a patch of air. So a few seconds into each flight scene a fuel crash is set off where it cannot be
+        // seen (see where, below), through the game's own way of setting one off (its bang never heard: see Blast's Awake), kept a
+        // few frames and taken away; and the card makes the mod's programs as they are loaded (Assets.WarmPrograms).)
+        static bool warming;
+        static int warmFrame = -1;
+        /// <summary>(An explosion that appears now is the warm-up's, set off in this same frame: never to be heard, see Blast.)</summary>
+        public static bool WarmingNow => warming && Time.frameCount == warmFrame;
+        Site warmSite;
+        GameObject warmShip;
+        Vector3d warmAt;
+        Vector3 warmUp;
+
+        void WarmExhaust()
+        {
+            if (warmShip == null) return;
+            Sources.Burning(new Exhaust
+            {
+                id = 0x5741524d, rim = warmAt + (Vector3d)(warmUp * 30f), along = -(Vector3d)warmUp, going = Vector3d.zero, nozzle = 1.25f, flame = 12f,
+                running = 1f, amount = 1f, shade = 0.5f, warm = 0.3f, lasts = 4f, tint = 1, fire = 1f, rides = warmShip.transform, kind = ExhaustKind.Engine,
+            });
+        }
+        readonly List<Blast> warmBlasts = new List<Blast>();
+
+        IEnumerator WarmUp()
+        {
+            float until = Time.time + 30f;
+            while (Time.time < until && (!FlightGlobals.ready || FlightGlobals.ActiveVessel == null || FlightGlobals.ActiveVessel.packed)) yield return new WaitForSeconds(0.5f);
+            yield return new WaitForSeconds(0.5f);       // (while the scene is still settling)
+            Camera cam = FlightCamera.fetch != null ? FlightCamera.fetch.mainCamera : null;
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (cam == null || v == null || !Settings.Volume || Assets.Volume == null || v.mainBody == null || !v.mainBody.atmosphere) yield break;
+            // (Where: from a camera near the ground, on the ground beyond the horizon in front of it, below the planet's curve, so that
+            // it is drawn as a real one is, and the drawing's own first-time work is done too, but hidden; from a camera high up,
+            // 20 km behind it, at 300 m. What: a fuel crash, as the first explosion of a flight mostly is: its fireball, its fire on
+            // the ground, its burn mark.)
+            Vector3 up = (Vector3)FlightGlobals.getUpAxis(v.mainBody, v.CoMD);
+            Vector3 ahead = Vector3.ProjectOnPlane(cam.transform.forward, up).normalized;
+            if (ahead.sqrMagnitude < 0.5f) ahead = Vector3.ProjectOnPlane(cam.transform.up, up).normalized;     // (looking straight down)
+            double camHigh = v.mainBody.GetAltitude(cam.transform.position) - Math.Max(0.0, v.mainBody.TerrainAltitude(v.mainBody.GetLatitude(cam.transform.position), v.mainBody.GetLongitude(cam.transform.position)));
+            Vector3d at;
+            if (camHigh < 500.0)
+            {
+                // (twice as far as the horizon and 5 km more, at least 20 km: from 70 m up on Kerbin the horizon is 9 km off, from
+                // 400 m 22; a fireball's first frames there stand well under the line the eye can see over the planet's curve)
+                double reach = Math.Max(20000.0, 2.0 * Math.Sqrt(2.0 * v.mainBody.Radius * Math.Max(1.0, camHigh)) + 5000.0);
+                Vector3d far = (Vector3d)cam.transform.position + (Vector3d)ahead * reach;
+                double lat = v.mainBody.GetLatitude(far), lon = v.mainBody.GetLongitude(far);
+                double ground = Math.Max(v.mainBody.ocean ? 0.0 : double.MinValue, v.mainBody.TerrainAltitude(lat, lon));
+                at = v.mainBody.GetWorldSurfacePosition(lat, lon, ground + 2.0);
+            }
+            else at = (Vector3d)cam.transform.position + (Vector3d)(-ahead * 20000f + up * 300f);
+            long began = System.Diagnostics.Stopwatch.GetTimestamp();
+            // (and a rocket's exhaust beside it, on a stand-in ship there, fed as the air asks for smoke each frame: the first
+            // lift-off of a game stalled it 234-256 ms, the patches of an engine's smoke, its riding patch and the trail it lays,
+            // being made for the first time among the rest)
+            var before = new HashSet<Site>(sites);
+            warmShip = new GameObject("VolumetricExplosions: a stand-in ship, once");
+            warmShip.transform.position = (Vector3)at + up * 30f;
+            warmAt = at; warmUp = up;
+            Sources.Asked += WarmExhaust;
+            warming = true;
+            try { Records.Fake("fuel=1800 oxidizer=2200 cause=crash speed=60", at); warmFrame = Time.frameCount; FXMonger.Explode(null, at, 1.0); }
+            catch (Exception ex) { warming = false; Addon.Log("could not warm the first explosion up: " + ex.Message); yield break; }
+            // (and a fire's light, as faint as can be, for three frames where the camera is: the first light of a fire to fall on the
+            // ground and the buildings round about made the card build their lit kinds there and then; a light drawn per pixel, as the
+            // strongest fire's is, reaching as far as the camera sees much)
+            // (and four more drawn the cheap way, per corner, as the lamps round an engine's flame are: the first of those made the card
+            // build the lit kinds of everything in sight that take them, at the first lift-off of a game, see Natural Light's Engines)
+            GameObject lamp = null;
+            try
+            {
+                lamp = new GameObject("VolumetricExplosions: a faint light, once") { layer = Recipe.Layer };
+                lamp.transform.position = cam.transform.position;
+                Light l = lamp.AddComponent<Light>();
+                l.type = LightType.Point; l.shadows = LightShadows.None; l.renderMode = LightRenderMode.ForcePixel;
+                l.intensity = 0.01f; l.range = 1500f; l.color = Color.white;
+                for (int k = 0; k < 4; k++)
+                {
+                    var corner = new GameObject("VolumetricExplosions: a faint light drawn per corner, once") { layer = Recipe.Layer };
+                    corner.transform.SetParent(lamp.transform, false);
+                    corner.transform.localPosition = new Vector3(k - 1.5f, 0.5f, 0f);
+                    Light c = corner.AddComponent<Light>();
+                    c.type = LightType.Point; c.shadows = LightShadows.None; c.renderMode = LightRenderMode.ForceVertex;
+                    c.intensity = 0.01f; c.range = 1500f; c.color = Color.white;
+                }
+            }
+            catch (Exception) { }
+            for (int f = 0; f < 6; f++) yield return null;
+            if (lamp != null) Destroy(lamp);
+            warming = false;
+            // (and its explosion's own things, its bang never let out)
+            foreach (Blast b in warmBlasts) if (b != null) Destroy(b.gameObject);
+            warmBlasts.Clear();
+            Sources.Asked -= WarmExhaust;
+            // (and, beside those still there, patches enough to leave three put by for the next ones to be made from, see Spares: at
+            // a lift-off from the pad three begin in the one frame, the flame's, the trench's and the pad's smoke's)
+            var spare = new List<Site>();
+            try
+            {
+                int madeHere = 0;
+                foreach (Site s in sites) if (!before.Contains(s)) madeHere++;
+                for (int k = madeHere; k < 3; k++) spare.Add(Site.Make(Plan.Where(at + (Vector3d)(up * (400f + 150f * k)))));
+            }
+            catch (Exception ex) { Addon.Log("could not put patches by: " + ex); }
+            if (warmSite != null) { sites.Remove(warmSite); warmSite.Dispose(); warmSite = null; }
+            // (and every patch made there meanwhile: the exhaust's riding patch and its trail)
+            for (int n = sites.Count - 1; n >= 0; n--)
+            {
+                Site s = sites[n];
+                if (before.Contains(s)) continue;
+                if ((s.FrameOrigin - at).magnitude > 3000.0) continue;
+                sites.RemoveAt(n); s.Dispose();
+            }
+            foreach (Site s in spare) s.Dispose();
+            // (and volume textures for nine patches, their names known to the library: see Sending. Six were too few: a climb has up
+            // to seven patches at once, and the textures made on the way, whose names are not asked for while anything is drawn,
+            // sent a ninth of its grids the slow way through Unity, 5 to 17 ms of a frame each: 2026-10-18)
+            try { Site.PutByTextures(9); } catch (Exception ex) { Addon.Log("could not put textures by: " + ex.Message); }
+            if (warmShip != null) { Destroy(warmShip); warmShip = null; }
+            Addon.Log("the first explosion's first-time work done ahead, out of sight, in " + ((System.Diagnostics.Stopwatch.GetTimestamp() - began) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F0") + " ms over six frames; " + Spares.Report());
+        }
+
         void Start()
         {
+            StartCoroutine(WarmUp());
             // (the launch pads of this scene, for what of an engine's jet goes down a pad's grate: see Pads)
             try { Pads.Look(); }
             catch (Exception ex) { Debug.LogError("[VolumetricExplosions] the launch pads could not be looked at: " + ex); }
@@ -178,6 +330,7 @@ namespace VolumetricExplosions
 
         void OnDestroy()
         {
+            sunShadow.Dispose();
             Camera.onPreCull -= BeforeDrawing;
             Camera.onPreRender -= ForCamera;
             Camera.onPostRender -= AfterDrawing;
@@ -200,6 +353,7 @@ namespace VolumetricExplosions
             if (picture != null) { picture.Release(); Destroy(picture); }
             foreach (Site s in sites) s.Dispose();
             sites.Clear();
+            Spares.Drop();
             foreach (Scorch m in marks) m.Dispose();
             marks.Clear();
             if (Instance == this) { Instance = null; Alive = 0; }
@@ -229,7 +383,14 @@ namespace VolumetricExplosions
                         if (blast == null) continue;
                         Plan plan = Plan.Make((Vector3d)blast.transform.position, blast.strength);
                         LastPlan = plan.label ?? "";
-                        SiteFor(plan).Explode(plan);
+                        // (what went off, for its own bang (Bangs): its charge taken as a tenth of the propellant that burns, as for liquid
+                        // propellants going off on a pad, and no less than a part breaking up gives; near the ground if within its reach of it;
+                        // its fire's roar as long as the fireball burns, some seconds for tonnes)
+                        bool low = plan.surfaceBelow && (plan.surfacePoint - (Vector3d)blast.transform.position).magnitude < Math.Max(8.0, plan.reach * 1.5);
+                        blast.Knows(Mathf.Max(0.1f * Mathf.Max(plan.fire, plan.charge), 0.4f + 6f * blast.strength * blast.strength), low, plan.radius > 0f ? Mathf.Clamp(0.45f * Mathf.Pow(Mathf.Max(plan.fire, 1f), 0.26f), 0.5f, 6f) : 0f);
+                        Site at = SiteFor(plan);
+                        at.Explode(plan);
+                        if (warming) { warmSite = at; warmBlasts.Add(blast); }
                     }
                 }
                 catch (Exception ex)
@@ -248,7 +409,7 @@ namespace VolumetricExplosions
             foreach (Site s in sites)
                 if (s.Takes(plan)) return s;
             if (Staying() >= Most) LetOneGo();
-            var site = new Site(plan);
+            var site = Site.Make(plan);
             sites.Add(site);
             return site;
         }
@@ -369,8 +530,8 @@ namespace VolumetricExplosions
             {
                 if (exhaust.running <= 0.02f || riding >= MostFlames || Time.time < noAirUntil) return false;
                 Plan plan = Plan.Where(exhaust.rim);
-                if (plan.vacuum || plan.space || plan.underwater) { noAirUntil = Time.time + 0.5f; return false; }
-                try { site = new Site(plan, exhaust.rides); }
+                if (plan.air < Site.TrailAir || plan.underwater) { noAirUntil = Time.time + 0.5f; return false; }
+                try { site = Site.Make(plan, exhaust.rides); }
                 catch (Exception ex)
                 {
                     if (!complained) Debug.LogError("[VolumetricExplosions] could not begin an engine's young smoke: " + ex);
@@ -406,9 +567,10 @@ namespace VolumetricExplosions
                     if (to == null)
                     {
                         Plan plan = Plan.Where(at);
-                        if (plan.vacuum || plan.space || plan.underwater) { s.Handing.Clear(); continue; }       // (no air there to hold it: it is let go)
+                        if (plan.air < Site.TrailAir || plan.underwater) { s.Handing.Clear(); continue; }       // (no air there to hold it: it is let go)
+                        plan.space = false;                                                                    // (an engine's trail high up is the air's, where it was laid, not a wreck's cloud flying on)
                         if (Staying() >= Most) LetOneGo();
-                        try { to = new Site(plan); }
+                        try { to = Site.Make(plan); }
                         catch (Exception ex)
                         {
                             if (!complained) Debug.LogError("[VolumetricExplosions] could not begin an engine's trail: " + ex);
@@ -449,7 +611,7 @@ namespace VolumetricExplosions
                         Plan plan = Plan.Where((Vector3d)pad.middle);
                         if (plan.vacuum || plan.underwater) continue;
                         if (Staying() >= Most) LetOneGo();
-                        try { s = new Site(plan); }
+                        try { s = Site.Make(plan); }
                         catch (Exception ex)
                         {
                             if (!complained) Debug.LogError("[VolumetricExplosions] could not begin a pad's smoke: " + ex);
@@ -485,7 +647,7 @@ namespace VolumetricExplosions
                 if (exhaust.running <= 0.02f || riding >= MostFlames) return false;
                 Plan plan = Plan.Where(exhaust.rim);
                 if (plan.underwater) return false;
-                try { site = new Site(plan, exhaust.rides); }
+                try { site = Site.Make(plan, exhaust.rides); }
                 catch (Exception ex)
                 {
                     if (!complained) Debug.LogError("[VolumetricExplosions] could not begin an engine's flame: " + ex);
@@ -521,9 +683,12 @@ namespace VolumetricExplosions
                 // (a cloud pushes nothing out: explosions and trails keep three patches' room of their own)
                 if (exhaust.kind == ExhaustKind.Thermal && Staying() >= Most - 3) return false;
                 Plan plan = Plan.Where(exhaust.rim);
-                if (plan.vacuum || plan.space || plan.underwater) { noAirUntil = Time.time + 0.5f; return false; }              // no air to hold smoke
+                // (no air to hold smoke: for an engine's jet, the thinnest air its trail is laid in, see Site.TrailAir; for anything else, a vacuum's)
+                bool jet = exhaust.kind == ExhaustKind.Engine || exhaust.kind == ExhaustKind.Unset;
+                if ((jet ? plan.air < Site.TrailAir : plan.vacuum || plan.space) || plan.underwater) { noAirUntil = Time.time + 0.5f; return false; }
+                if (jet) plan.space = false;
                 if (Staying() >= Most) LetOneGo();
-                try { site = new Site(plan); }
+                try { site = Site.Make(plan); }
                 catch (Exception ex)
                 {
                     if (!complained) Debug.LogError("[VolumetricExplosions] could not begin an engine's smoke: " + ex);
@@ -576,6 +741,8 @@ namespace VolumetricExplosions
             }
         }
 
+        float quietFor;
+
         void LateUpdate()
         {
             steppedFrame = Time.frameCount;
@@ -585,15 +752,44 @@ namespace VolumetricExplosions
             if (Cost[3] > 0) gridMs = Cost[3] * 1000f / System.Diagnostics.Stopwatch.Frequency;
             for (int n = 0; n < Cost.Length; n++) { shown[n] = Mathf.Lerp(shown[n], Cost[n] * 1000f / System.Diagnostics.Stopwatch.Frequency, 0.1f); Cost[n] = 0; }
             for (int n = 0; n < Part.Length; n++) { partShown[n] = Mathf.Lerp(partShown[n], Part[n] * 1000f / System.Diagnostics.Stopwatch.Frequency, 0.05f); Part[n] = 0; }
+            for (int n = 0; n < FireParts.Length; n++) FireParts[n] = 0;
+#if DEV
+            Mark(-1);
+#endif
             Pads.Frame();
             if (sites.Count > 0) LookForLights();
+#if DEV
+            long topFrom = System.Diagnostics.Stopwatch.GetTimestamp();
+#endif
+            // (what the next patches will take, made ahead while there are patches: see Spares)
+            if (sites.Count > 0 && !warming) Site.TopUp();
+#if DEV
+            topMs = (System.Diagnostics.Stopwatch.GetTimestamp() - topFrom) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+#endif
+            // (the names of textures sent once, asked for once nothing has been drawn for a few seconds: see Sending)
+            quietFor = sites.Count > 0 || warming ? 0f : quietFor + dt;
+            if (quietFor > 3f) Sending.Name(2);
 #if DEV
             TestMover();
             TestBurn();
 #endif
+#if DEV
+            Mark(0);
+#endif
             Sources.Ask();
+#if DEV
+            Mark(1);
+#endif
             Trenches(dt);
+            // (the patches nearest the camera first in line for new grids: see Site.Relight)
+            ranked.Clear();
+            foreach (Site s in sites) if (s.Count > 0) ranked.Add(s);
+            ranked.Sort(byAway);
+            for (int k = 0; k < ranked.Count; k++) ranked[k].GridRank = k;
             int alive = 0;
+#if DEV
+            Mark(2);
+#endif
             for (int n = sites.Count - 1; n >= 0; n--)
             {
                 Site s = sites[n];
@@ -609,7 +805,18 @@ namespace VolumetricExplosions
                 alive += s.Count;
                 if (s.Finished) { s.Dispose(); sites.RemoveAt(n); }
             }
+#if DEV
+            Mark(3);
+#endif
             Deliver();
+#if DEV
+            Mark(4);
+#endif
+            // (the grids the patches showed this frame, sent by the render thread before anything is drawn: see Sending)
+            Sending.Flush();
+#if DEV
+            Mark(5);
+#endif
             Alive = alive;
             if (Assets.Volume != null || Assets.Mark != null || Assets.Shock != null)
             {
@@ -642,7 +849,32 @@ namespace VolumetricExplosions
                 if (!marks[n].Step(dt)) { marks[n].Dispose(); marks.RemoveAt(n); }
             Lap(15, ref lap);
             LastMs = (float)clock.Elapsed.TotalMilliseconds;
+#if DEV
+            Mark(6);
+            if (LastMs > 10f)
+            {
+                string[] what = { "before", "asked", "trenches", "steps", "shown", "sent", "the rest" };
+                int collections = GC.CollectionCount(0);
+                var t = new System.Text.StringBuilder("a frame of the air's took " + LastMs.ToString("F1") + " ms (" + sites.Count + " patches, frame " + Time.frameCount + ", top-up " + topMs.ToString("F1") + " ms, collections " + (collections - collectionsWere) + " since the last such frame):");
+                collectionsWere = collections;
+                for (int k = 0; k < what.Length; k++) t.Append(' ').Append(what[k]).Append(' ').Append(((frameMarks[k + 1] - frameMarks[k]) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1"));
+                for (int n = 0; n < Part.Length; n++) { double d = Part[n] * 1000.0 / System.Diagnostics.Stopwatch.Frequency; if (d >= 1.0) t.Append("; ").Append(partName[n]).Append(' ').Append(d.ToString("F1")); }
+                string[] fireNames = { "fires", "frags", "vents", "ends" };
+                t.Append(" (of fires:");
+                for (int n = 0; n < 4; n++) t.Append(' ').Append(fireNames[n]).Append(' ').Append((FireParts[n] * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F1"));
+                t.Append(')');
+                Addon.Log(t.ToString());
+            }
+#endif
         }
+
+#if DEV
+        // (for the development build: where a slow frame of the air's went, see the end of LateUpdate)
+        static readonly long[] frameMarks = new long[8];
+        static double topMs;
+        static int collectionsWere;
+        static void Mark(int k) => frameMarks[k + 1] = System.Diagnostics.Stopwatch.GetTimestamp();
+#endif
 
         /// <summary>
         /// Just before anything is drawn, put each cloud where its patch of ground (or its wreck) is now.
@@ -656,11 +888,22 @@ namespace VolumetricExplosions
             // drawn at half size was drawn where its box had been.
             if (camera.targetTexture != null || steppedFrame != Time.frameCount) return;
             if (placedFrame == Time.frameCount) return;
+            // Nor before the flight's own cameras: on the first of them to draw (the far one, else the near one), not on one drawn
+            // before them (the far planets' and the sky's, which draws nothing of this mod's). The Smooth Running mod carries the
+            // craft on to the frame's moment just before the first camera that draws the frame, and of its hook and this one
+            // whichever was made first went first: placed before it, every patch riding a craft was laid where the craft's last
+            // physics step had left it, behind the craft as drawn by up to a step and jumping as the steps fell between frames. A
+            // craft coming in from orbit left its re-entry glow lengths behind it (the owner, 2026-10-20, in the development build's
+            // films, whose copies are swapped in while the game runs, hooks and all). The craft are put back only after the near
+            // camera has drawn.
+            if (!camerasLooked) Depth(0, depthOurs[0]);
+            if (camera != depthCamera[0] && camera != depthCamera[1] && (depthCamera[0] != null || depthCamera[1] != null)) return;
             placedFrame = Time.frameCount;
             long lap = System.Diagnostics.Stopwatch.GetTimestamp();
             foreach (Site s in sites) s.Place();
             foreach (Scorch m in marks) m.Place();
             Vector3 eyeAt = depthCamera[0] != null ? depthCamera[0].transform.position : camera.transform.position;
+            sunShadow.Frame(sites, eyeAt);
             foreach (Site s in sites) s.SeeFlashes(eyeAt, sites);
             Halves();
             if (Layered) layers.Frame(sites, depthCamera, depthCamera[0] != null ? depthCamera[0].transform.position : camera.transform.position);
@@ -728,14 +971,14 @@ namespace VolumetricExplosions
         }
 
         /// <summary>A shock front as it is drawn: a ball of this radius about this place, pushing the picture so far (in heights of the screen) where it is seen edge-on.</summary>
-        public struct Front { public Vector3 middle, up; public float radius, push; public bool ground; }
+        public struct Front { public Vector3 middle, up; public float radius, push; public bool ground; public Vector4 cloud; public Vector3 sun, sunLight, sky, fire; }      // (cloud: see Site.Condense; 0, it leaves none)
 
         CommandBuffer shockCommands;
         Camera shockCamera;
         Material shockMaterial;
         RenderTexture picture;
         readonly List<Front> fronts = new List<Front>();
-        static readonly int[] frontMiddle = Names("_ShockC"), frontPush = Names("_ShockP"), frontGround = Names("_ShockG");
+        static readonly int[] frontMiddle = Names("_ShockC"), frontPush = Names("_ShockP"), frontGround = Names("_ShockG"), frontCloud = Names("_ShockW");
 
         static int[] Names(string name)
         {
@@ -792,11 +1035,22 @@ namespace VolumetricExplosions
             bool backwards = SystemInfo.usesReversedZBuffer;
             shockMaterial.SetVector("_ShockDepth", new Vector4((backwards ? far / near - 1f : 1f - far / near) / far, (backwards ? 1f : far / near) / far,
                 (camera.depthTextureMode & DepthTextureMode.Depth) != 0 ? 1f : 0f, backwards ? 0f : 1f));
-            fronts.Sort((a, b) => b.push.CompareTo(a.push));
+            // (one that leaves a cloud behind it before any that does not, however faint its bending now)
+            fronts.Sort((a, b) => (b.push + (b.cloud.x > 0f ? 1f : 0f)).CompareTo(a.push + (a.cloud.x > 0f ? 1f : 0f)));
+            bool lit = false;
             for (int n = 0; n < frontMiddle.Length; n++)
             {
-                if (n >= fronts.Count) { shockMaterial.SetVector(frontMiddle[n], Vector4.zero); continue; }
+                if (n >= fronts.Count) { shockMaterial.SetVector(frontMiddle[n], Vector4.zero); shockMaterial.SetVector(frontCloud[n], Vector4.zero); continue; }
                 Front f = fronts[n];
+                shockMaterial.SetVector(frontCloud[n], f.cloud);
+                if (f.cloud.x > 0f && !lit)
+                {
+                    shockMaterial.SetVector("_ShockSun", f.sun);
+                    shockMaterial.SetVector("_ShockSunLight", With(f.sunLight, 1.5f));
+                    shockMaterial.SetVector("_ShockSky", f.sky);
+                    shockMaterial.SetVector("_ShockFire", f.fire);
+                    lit = true;
+                }
                 shockMaterial.SetVector(frontMiddle[n], With(f.middle, f.radius));
                 // A front is a seventh as wide as it has spread, but never looks narrower than an eighth of the screen's height: it has to be seen.
                 shockMaterial.SetVector(frontPush[n], new Vector4(f.push, Mathf.Clamp(0.14f * f.radius, 2.5f, 20f), 0.12f, Mathf.Min(0.07f, 4f * f.push)));
@@ -1026,6 +1280,23 @@ namespace VolumetricExplosions
             return say.ToString();
         }
 
+#if DEV
+        /// <summary>(Each patch's own lights on the scene: see Site.LightsSaid. And how many lights the game draws for every dot.)</summary>
+        public static string FireLights()
+        {
+            if (Instance == null) return "not running";
+            var say = new System.Text.StringBuilder("pixel lights " + QualitySettings.pixelLightCount);
+            foreach (Site s in Instance.sites) say.Append("\n").Append(s.LightsSaid());
+            return say.ToString();
+        }
+#endif
+
+#if DEV
+        /// <summary>(What the sun's view of the smoke was taken over last: see SunShadow.)</summary>
+        public static string SunShadowNow() => SunShadow.Said + (Instance != null ? "; " + Instance.sunShadow.Probe() : "");
+        public static string SunBlock(string arg) => Instance != null ? Instance.sunShadow.Block(arg) : "not running";
+#endif
+
         /// <summary>(The lamps of the scene that may light smoke, as last looked for.)</summary>
         public static string LightsNow()
         {
@@ -1124,6 +1395,32 @@ namespace VolumetricExplosions
 #endif
 
         /// <summary>For the development build: how much of the smoke is inside solid things just now.</summary>
+#if DEV
+        static Light testLight;
+        /// <summary>(for finding out: a point light "east north up intensity range [r g b]" metres from the craft, over the ground there; "off" takes it away)</summary>
+        public static string TestLight(string arg)
+        {
+            if (arg == "off") { if (testLight != null) Destroy(testLight.gameObject); testLight = null; return "off"; }
+            Vessel v = FlightGlobals.ActiveVessel;
+            if (v == null) return "no craft";
+            string[] w = arg.Split(' ');
+            float e = float.Parse(w[0]), n = float.Parse(w[1]), u = float.Parse(w[2]), i = float.Parse(w[3]), range = float.Parse(w[4]);
+            CelestialBody b = v.mainBody;
+            Vector3d up = (v.CoMD - b.position).normalized, east = Vector3d.Cross(b.angularVelocity.normalized, up).normalized;
+            if (east.sqrMagnitude < 0.5) east = Vector3d.Cross(Vector3d.up, up).normalized;
+            Vector3d north = Vector3d.Cross(up, east);
+            Vector3d at = v.CoMD + east * e + north * n;
+            double ground = b.TerrainAltitude(b.GetLatitude(at), b.GetLongitude(at), true);
+            at = b.GetWorldSurfacePosition(b.GetLatitude(at), b.GetLongitude(at), ground + u);
+            if (testLight == null) { var go = new GameObject("VolumetricExplosions test light"); testLight = go.AddComponent<Light>(); testLight.type = LightType.Point; testLight.shadows = LightShadows.None; }
+            testLight.transform.position = at;
+            testLight.intensity = i; testLight.range = range;
+            testLight.color = w.Length >= 8 ? new Color(float.Parse(w[5]), float.Parse(w[6]), float.Parse(w[7])) : Color.red;
+            testLight.renderMode = LightRenderMode.ForcePixel;
+            return "light at " + at + ", ground " + ground.ToString("F1") + " m, pixel lights allowed " + QualitySettings.pixelLightCount;
+        }
+#endif
+
         public static string Inside()
         {
             if (Instance == null) return "not running";
@@ -1313,7 +1610,8 @@ namespace VolumetricExplosions
     /// <summary>
     /// A burn mark left on the ground: a small sheet laid over the terrain, charred in the middle with soot
     /// and streaks thrown outward, drawn out along the way a crash was going, with embers glowing in it
-    /// for the first few seconds. It fades over a few minutes.
+    /// for the first few seconds. It fades over a few minutes. (Since 0.8.0 as photographs of real ones show them:
+    /// lopsided, in lobes and broad tongues of soot, each mark one of several kinds: see tools/fxbake's Burn.)
     /// </summary>
     public sealed class Scorch
     {
@@ -1347,6 +1645,10 @@ namespace VolumetricExplosions
             float turn = speed > 8f ? Mathf.Atan2(going.z, going.x) : UnityEngine.Random.Range(0f, Mathf.PI * 2f);
             float cos = Mathf.Cos(turn), sin = Mathf.Sin(turn), ahead = (longer - 1f) * radius * 0.45f;
             Vector3 up = (Vector3)frame.up;
+            // (one of the kinds of mark, at random, so that no two are alike: it reaches furthest ahead, the way a crash was going)
+            int kind = Assets.ScorchKinds.Length > 1 ? UnityEngine.Random.Range(0, Assets.ScorchKinds.Length) : 0;
+            Texture picture = kind < Assets.ScorchKinds.Length ? Assets.ScorchKinds[kind] : Assets.Scorch.mainTexture;
+            Texture glowing = kind < Assets.EmberKinds.Length ? Assets.EmberKinds[kind] : Assets.Embers.mainTexture;
 
             if (Assets.Mark != null && Assets.Cube != null)
             {
@@ -1386,9 +1688,9 @@ namespace VolumetricExplosions
                 // (a mark drawn on the ground has no motion of its own for the game's smoothing to take: see Site.TuneShadow)
                 renderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
                 thrown = new Material(Assets.Mark) { renderQueue = 2460 };
-                thrown.SetTexture("_MarkTex", Assets.Scorch.mainTexture);
-                thrown.SetTexture("_MarkEmbers", Assets.Embers.mainTexture);
-                thrown.SetVector("_MarkSize", new Vector4(2f * radius / Mathf.Max(64, Assets.Scorch.mainTexture.width), 0f, 0f, 0f));
+                thrown.SetTexture("_MarkTex", picture);
+                thrown.SetTexture("_MarkEmbers", glowing);
+                thrown.SetVector("_MarkSize", new Vector4(2f * radius / Mathf.Max(64, picture.width), 0f, 0f, 0f));
                 renderer.sharedMaterial = thrown;
                 renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 renderer.receiveShadows = false;

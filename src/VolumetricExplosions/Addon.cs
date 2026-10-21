@@ -22,7 +22,7 @@ namespace VolumetricExplosions
     [KSPAddon(KSPAddon.Startup.Flight, false)]
     public sealed class Addon : MonoBehaviour
     {
-        public const string Version = "0.7.1";
+        public const string Version = "0.8.0";
 
         static GameObject[] ours;            // built once, reused for every flight
         static Transform shelf;              // an inactive parent that keeps the templates from playing
@@ -117,18 +117,28 @@ namespace VolumetricExplosions
         /// <summary>(for trying: how much the smoke must hide before its motion is written, and the least that moving smoke is said to have moved, in widths of the picture: see motion.glsl)</summary>
         public static float FollowFrom = 0.15f, FollowLeast = 0f;
         public static bool SoundTravels = true;        // the bang is heard when its sound has had time to get to the camera, not on the instant
+        public static bool OwnBang = true;             // (since 0.8.0) the bang made from the blast itself (Bangs), not the game's two recordings
         public static bool Shadows = true;             // the smoke throws its shadow on what is under it, in sunlight (see tools/shaderpack/shadow.glsl)
+        public static bool Shaded = true;              // (since 0.8.0) what stands in the sun (the craft, the tower, buildings, the ground) throws its shadow into the smoke (see SunShadow)
         public static bool Built = false;              // use the shaders built in the Unity editor even where the hand-packed OpenGL ones would do (for comparing the two)
         public static bool Predict = true;             // the way things moving through smoke are about to go is looked ahead along, and the smoke in their way made finer before they get there (see Wakes.cs)
         public static bool Wakes = true;               // what goes through smoke leaves a tunnel in it, drawn at the pixel, that fills in again (see Wakes.cs, and carve in volume.glsl)
         public static bool Vortices = true;            // the air behind what goes through smoke is left turning, and carries the smoke round: a vortex street behind blunt things, two tubes behind wings
         public static float Quality = 1f, Smoke = 1f, Size = 1f, Wind = 1f, Detail = 0.6f, Thick = 1.6f, Bend = 1f;
+        // (since 2026-10-20) A cloud started by a blast at the sea's surface is water thrown up, not smoke: its billows are cut so
+        // much as deep as smoke's, and shade one another so much as strongly (see Site.TuneVolume). 1: as smoke, as until then. (A
+        // field, so that a development build can try others while it runs: dev_fx_set.)
+        public static float SeaBillows = 0.5f;
         public static int Breeze = 1;                  // when there is a wind for smoke to drift on: 0 never (still air always, whatever the weather), 1 as it comes (still nine times in ten, see Site.Wind; a weather mod's wind where there is one), 2 always some
         public static float Thin = 2f;                 // smoke too thin to see is not drawn: up to this many steps of an eight-bit picture's worth along any one line of sight (0: all of it is drawn)
         public static int MaxParticles = 30000, Threads = 0;
         /// <summary>For measuring how steady the picture is (development build; never read from the file): move the samples along each ray by this part of a step, make the grid's cells this much bigger, move the grid by this part of a cell, draw only part of the picture (see the shader), and (1) leave the smoke where each grid has it instead of carrying it on between grids.</summary>
         public static float TestCloudGrids = 0f, TestCloudRepeat = 0f, TestCloudMass = 0f;      // (development build, for tuning clouds made of thermals: how much longer between grids than usual; the billows' repeat as a share of the thermal's radius; how much thicker)
         public static float TestLattice = 0f, TestCell = 1f, TestShift = 0f, TestView = 0f, TestSmoke = 0f;
+        /// <summary>(for trying: more than nought shows, instead of the smoke, how many times each ray went round its loop, over this many: red all, green in smoke, blue leaps over clear air)</summary>
+        public static float TestRounds = 0f;
+        /// <summary>(for trying: 1 lights the ground and the craft as until 0.7.1: as strong by night as by day, the quick flicker alone, left to the game to draw cheaply)</summary>
+        public static float TestFireLight = 0f;
         // An engine's flame (see Site.Flame, the mover at JetGas, and TuneJet): its gas leaves at so many of the flame's lengths a
         // second; the first so much of the flame is the stretch it is not slowed in; how uneven it comes out (0: as even as
         // before 0.6.4); how far aside the whole jet wavers, against how far it goes on; and its drawn pattern runs down it
@@ -137,19 +147,29 @@ namespace VolumetricExplosions
         public static float JetPace = 9f, JetCore = 0.25f, JetUneven = 1f, JetWavers = 0.05f, JetRuns = 30f, JetRunsOn = 0.33f;
         // (and the line its pattern is drawn along comes round to the nozzle's so many of the gas's own times late: the time the gas would take over the flame's length at the speed it leaves at)
         public static float JetLags = 1.2f;
+        // A re-entry glow's head (see Site.Plasma): its shock layer's heat against the glow's own, and how thick its layer and its
+        // sheath are laid, against the glow's. (Fields so that a development build can try others while it runs: dev_fx_set.)
+        public static float PlasmaHead = 1.2f, PlasmaLayer = 0.75f, PlasmaSheath = 0.25f;
         public static float TestGround;                // (for seeing what the sounding of the ground is worth: 1 takes the ground as one tilted plane, as it used to be taken)
         public static float TestWind = -1f, TestWindSpeed = 4f;      // (for testing one thing against another in the same wind: which way it blows, in degrees round from east through north, and how hard, in metres a second ten metres up. Less than nought: the wind of the place and time, as usual)
         public static float TestTurns;                 // (for seeing what it is worth that each bit of smoke goes through its billows' rounds at its own pace: 1 puts all of it on the same round, as it used to be)
         public static float TestGrids, TestFreeze;     // (for finding what a fire costs: seconds more to wait between one grid and the next; 1 leaves the particles where they are, 2 stops the billows taking turns as well, 3 stops the site's clock altogether)
+        public static float TestJoin;                  // (for comparing: 1 begins a trail's next patch a quarter of a second ahead of its nozzle, as before 0.8.0, not where the last patch left off (Site.Vents))
+        public static float TestRing;                  // (for comparing: 1 leaves out the ring of dust a front lifts off bare ground (Site.RingDust), and pieces' puffs where they land and their longer burning (Site.Strike), as before 0.8.0)
+        public static float TestThin;                  // (for comparing: 1 lays smoke thinner than a pixel and a half as it is, unwidened (see Site.Thinnest), as before 0.8.0)
         public static float TestYoung;                 // (for setting one against the other: 1 lays an engine's smoke straight into the air it leaves it in, as before 0.5.0, whatever ship it says it is on; 2 does that and leaves out the pads' trenches as well)
         public static float TestMover, TestMoverSize = 0.5f;      // (development build, for seeing wakes: a ball this wide, a radius in metres, sent at this speed, metres a second, east through the middle of the newest cloud, again and again, as another mod's piece of wreckage would be. Nought: none)
         public static float TestBurn, TestBurnKind = 2f;  // (development build, for seeing a fire on a ship: a fire this wide, a radius in metres, burning on the side of the craft being flown, told as an engine's jet (kind 1) or as something burning (2). Nought: none)
         public static float TestFoot;                  // (for setting one against the other: 1 lifts a flame lying on the ground clear of it, as smoke is, as until 2026-10-10; only where the grids are made by the mod's own code, so with Native off)
-        public static float TestFire;                  // (for setting one against the other: 1 draws a fire in the open as it was until 2026-10-10, a glow following the billows, instead of in sharp tongues lit by their heat)
+        public static float TestFire;                  // (for setting one against the other: 1 draws a fire in the open as it was until 2026-10-10, a glow following the billows, instead of in sharp tongues lit by their heat; 2 as it was until 2026-10-18: its thick flame burnt whole, its light through any smoke, its hot smoke unlit by its heat, the daylight taken off the smoke round it, and a fuel blast's dust as a dry crash's)
+        public static float TestDusk;                  // (for setting one against the other: 1 lights a fire in the open as on the morning of 2026-10-18: its light stopped by a tenth of the smoke on its way, four times as strong, its smoke's glow up to the flame's own heat)
+        public static float TestRise;                  // (for setting one against the other: 1 lets a fuel fireball rise at half the root of its radius and its rind at 0.3 of it, as until 2026-10-18, lying on the ground as a dome)
+        public static float TestPlasma;                // (for setting one against the other: 1 lays a re-entry glow as until 2026-10-21: its shock layer no denser nor hotter than the sheath behind it, the sheath spread a body's width round the craft and as hot, the wake as long as the craft's own reckoning, and all of it soft-edged and torn as an engine's flame)
+        public static float TestGlare;                 // (for setting one against the other: 1 draws the glare behind every fire at its full strength by day, as until 2026-10-18)
         public static float TestFlash;                 // (for setting one against the other: 1 draws a blast's flash over all smoke, as until 0.7.0, however much of it lies between
                                                        // the camera and the flash; 2 shows it dimmed but tells the log, once a second, how much smoke each flash was dimmed by)
         public static float TestSoot;                  // (for setting one against the other: 1 makes the smoke of a fire as it was until 2026-10-09: a fireball's soot shown dot by dot, burning things' smoke thrown as an engine's)
-        public static float TestLayers;                // (for seeing what putting the patches' smoke in depth order pixel by pixel is worth, see Layers: 1 lays them over one another in the order the game used to draw them in; 2 has each patch put on the screen by its own box, as before 0.5.0; 3 shows each patch in a colour of its own, in depth order, and 4 the same in the old order; 5 puts one slot to a row of the atlas; 6 shows how far behind the nearest patch's smoke the next lies (red, 0 to 10 m) and how widely each is spread along the ray (green the nearest, blue the next, 0 to 5 m); 7 lays them over one another in depth order, mixed where close, as until 2026-10-10)
+        public static float TestLayers;                // (for seeing what putting the patches' smoke in depth order pixel by pixel is worth, see Layers: 1 lays them over one another in the order the game used to draw them in; 2 has each patch put on the screen by its own box, as before 0.5.0; 3 shows each patch in a colour of its own, in depth order, and 4 the same in the old order; 5 puts one slot to a row of the atlas; 6 shows how far behind the nearest patch's smoke the next lies (red, 0 to 10 m) and how widely each is spread along the ray (green the nearest, blue the next, 0 to 5 m); 7 lays them over one another in depth order, mixed where close, as until 2026-10-10; 8 walks the ships' patches at half size always, and 9 never: see Layers.ShipsHalf)
         public static float TestBlaze;                 // (for setting one against the other, and for measuring what it costs: 1 leaves the fire a blast leaves on the ground as it was until 0.6.2: out within half a minute whatever was spilt, a pool of its own for every blast, however near the last, and nothing burning round about it. 2 is the new fire without the patches of spilt fuel that burn round about the pool; 3 has those patches after sundown too, when as installed they are left out because they cannot light the ground. See Site.AddFire, and Plan)
 
         public static string Folder => KSPUtil.ApplicationRootPath + "GameData/VolumetricExplosions/";
@@ -183,7 +203,9 @@ namespace VolumetricExplosions
                 node.TryGetValue("push", ref Push);
                 node.TryGetValue("collide", ref Collide);
                 node.TryGetValue("sound_travels", ref SoundTravels);
+                node.TryGetValue("own_bang", ref OwnBang);
                 node.TryGetValue("shadows", ref Shadows);
+                node.TryGetValue("shaded", ref Shaded);
                 node.TryGetValue("predict", ref Predict);
                 node.TryGetValue("wakes", ref Wakes);
                 node.TryGetValue("vortices", ref Vortices);
@@ -223,14 +245,19 @@ namespace VolumetricExplosions
     /// <summary>The textures and the materials made from them.</summary>
     public static class Assets
     {
-        public static Material Cloud, Glow, GlowBehind, Spark, Ring, Shard, Scorch, Embers;
+        public static Material Cloud, Glow, GlowBehind, Spark, Ring, Shard, Scorch, Embers, Dust;
+        /// <summary>The kinds of burn mark, each with its embers (since 0.8.0: no two marks alike; see Scorch in Air.cs). The first is Scorch's and Embers' own picture.</summary>
+        public static Texture2D[] ScorchKinds = new Texture2D[0], EmberKinds = new Texture2D[0];
         public static Shader Volume;                   // the smoke-as-a-volume shader; null where the game cannot use it
+        public static Shader VolumeRelease;            // the same without the testing switches' code (6-13 % cheaper; see Site.TuneVolume); null where missing
         public static Shader Mark;                     // the shader that throws a burn mark onto whatever is there; null where the game cannot use it
         public static Shader Shock;                    // the shader that bends the picture behind a blast's shock front; null where the game cannot use it
         public static Shader Enlarge;                  // the shader that puts smoke drawn at half size on the screen; null where the game cannot use it
         public static Shader Shadow;                   // the shader that throws the smoke's shadow on what is under it; null where the game cannot use it
         public static Shader Motion;                   // the shader that writes where the smoke is going into the game's picture of motion (see Layers); null where the game cannot use it
+        public static Shader Carry;                    // the shader that carries a patch's smoke over from the frame before where only a quarter of it is walked (see Layers); null where the game cannot use it
         public static Shader Layers;                   // the shader that puts every patch's smoke on the screen together, in depth order (see Layers); null where the game cannot use it
+        public static Shader SunDepth;                 // the shader that draws what stands between the smoke and the sun, as the sun sees it (see SunShadow); null where the game cannot use it
         public static Mesh Sheet;                      // one triangle that covers the whole screen
         public static Texture3D Detail;
         public static Mesh Cube;
@@ -238,9 +265,37 @@ namespace VolumetricExplosions
         // the graphics card will read those smoothly, as every desktop card should; otherwise half-precision ones.
         public static UnityEngine.Experimental.Rendering.GraphicsFormat Sixteen = UnityEngine.Experimental.Rendering.GraphicsFormat.R16G16B16A16_UNorm;
         public static bool SixteenAsHalves;
-        static bool volumeTried, markTried, shockTried, enlargeTried, shadowTried, layersTried, motionTried;
+        static bool volumeTried, markTried, shockTried, enlargeTried, shadowTried, layersTried, motionTried, sunDepthTried, carryTried;
         public const int Tiles = 4;                    // the particle sheet is 4 by 4
         static int builtForLimit = -1;
+
+        static bool programsWarmed;
+
+        /// <summary>
+        /// The card made to build the mod's programs now, as they are loaded, not at the first explosion's first frame, when it stalled
+        /// the game (2026-10-18; see Air.WarmUp): every pass of each of the mod's shaders, and of the particle shaders it draws with.
+        /// Once a game.
+        /// </summary>
+        static void WarmPrograms(params Shader[] shaders)
+        {
+            if (programsWarmed) return;
+            programsWarmed = true;
+            try
+            {
+                var warm = new ShaderVariantCollection();
+                int n = 0;
+                foreach (Shader s in shaders)
+                {
+                    if (s == null) continue;
+                    try { if (warm.Add(new ShaderVariantCollection.ShaderVariant(s, UnityEngine.Rendering.PassType.Normal))) n++; }
+                    catch (Exception) { }
+                }
+                long began = System.Diagnostics.Stopwatch.GetTimestamp();
+                warm.WarmUp();
+                Addon.Log(n + " of the mod's programs made ahead on the card, in " + ((System.Diagnostics.Stopwatch.GetTimestamp() - began) * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("F0") + " ms");
+            }
+            catch (Exception ex) { Addon.Log("the programs could not be made ahead: " + ex.Message); }
+        }
 
         public static bool Load()
         {
@@ -249,6 +304,7 @@ namespace VolumetricExplosions
             LoadMark();
             LoadShadow();
             LoadShock();
+            LoadSunDepth();
             LoadEnlarge();
             LoadLayers();
             if (Cloud != null && builtForLimit == QualitySettings.masterTextureLimit) return true;
@@ -261,6 +317,7 @@ namespace VolumetricExplosions
                 Addon.Log("this build of the game lacks a particle shader the mod needs; keeping the stock explosions");
                 return false;
             }
+            WarmPrograms(Volume, VolumeRelease, Mark, Shadow, Shock, SunDepth, Enlarge, Layers, Motion, Carry, premultiplied, additive, blended);
             Texture2D puff = Texture("puff.png"), glow = Texture("glow.png"), spark = Texture("spark.png"), ring = Texture("ring.png"), shard = Texture("shard.png"), scorch = Texture("scorch.png"), embers = Texture("embers.png");
             if (puff == null || glow == null || spark == null || ring == null || shard == null || scorch == null || embers == null) return false;
             // The second number softens a particle where it meets the ground or a ship instead of ending in a hard line.
@@ -269,15 +326,29 @@ namespace VolumetricExplosions
             Spark = Make(additive, spark, true, 0f);
             Ring = Make(additive, ring, true, 0.6f);
             Shard = Make(blended, shard, true, 0f);
+            Dust = Make(blended, glow, true, 0.3f);
             // Burn marks are drawn straight after the solid ground and before anything see-through, so that smoke is never behind them.
             Scorch = Make(blended, scorch, true, 0f);
             Scorch.renderQueue = 2460;
             Embers = Make(additive, embers, true, 0f);
             Embers.renderQueue = 2461;
+            // (the other kinds of mark, scorch1.png and embers1.png on, as many as there are: see tools/fxbake's Burn)
+            var marks = new List<Texture2D> { scorch };
+            var glows = new List<Texture2D> { embers };
+            for (int k = 1; k < 16 && File.Exists(Settings.Folder + "PluginData/scorch" + k + ".png") && File.Exists(Settings.Folder + "PluginData/embers" + k + ".png"); k++)
+            {
+                Texture2D one = Texture("scorch" + k + ".png"), hot = Texture("embers" + k + ".png");
+                if (one == null || hot == null) break;
+                marks.Add(one);
+                glows.Add(hot);
+            }
+            ScorchKinds = marks.ToArray();
+            EmberKinds = glows.ToArray();
             // The order things are drawn in: the glow of a fire, then the volume of smoke over it, then what is left as sprites, then flashes and sparks.
             GlowBehind = new Material(Glow) { renderQueue = 2990 };
             Cloud.renderQueue = 3001;
             Shard.renderQueue = 3001;
+            Dust.renderQueue = 3001;
             Glow.renderQueue = 3002;
             Spark.renderQueue = 3002;
             Ring.renderQueue = 3002;
@@ -303,7 +374,7 @@ namespace VolumetricExplosions
             }
             try
             {
-                if (UseBuilt) Volume = BuiltShader("Volume");
+                if (UseBuilt) { Volume = BuiltShader("Volume"); VolumeRelease = BuiltShader("VolumeRelease"); }
                 else
                 {
                     string path = Settings.Folder + "PluginData/volume.bundle";
@@ -313,6 +384,14 @@ namespace VolumetricExplosions
                     Shader[] found = bundle.LoadAllAssets<Shader>();
                     bundle.Unload(false);
                     foreach (Shader shader in found) if (shader != null && shader.isSupported) Volume = shader;
+                    // (and the copy without the testing switches, where it is: see Site.TuneVolume)
+                    string release = Settings.Folder + "PluginData/volumerelease.bundle";
+                    AssetBundle second = File.Exists(release) ? AssetBundle.LoadFromFile(release) : null;
+                    if (second != null)
+                    {
+                        foreach (Shader shader in second.LoadAllAssets<Shader>()) if (shader != null && shader.isSupported) VolumeRelease = shader;
+                        second.Unload(false);
+                    }
                 }
                 if (Volume == null) { Addon.Log("smoke is drawn as sprites: the volume shader is not supported here"); return; }
                 if (!SystemInfo.IsFormatSupported(UnityEngine.Experimental.Rendering.GraphicsFormat.R16G16B16A16_UNorm, UnityEngine.Experimental.Rendering.FormatUsage.Linear))
@@ -418,6 +497,19 @@ namespace VolumetricExplosions
             }
         }
 
+        /// <summary>The shader that draws what stands between the smoke and the sun (see tools/shaderpack/sundepth.glsl and SunShadow). Without it nothing throws a shadow into the smoke.</summary>
+        static void LoadSunDepth()
+        {
+            if (sunDepthTried) return;
+            sunDepthTried = true;
+            try { SunDepth = UseBuilt ? BuiltShader("SunDepth") : OpenGLShader("sundepth.bundle"); }
+            catch (Exception ex)
+            {
+                SunDepth = null;
+                Addon.Log("nothing throws a shadow into the smoke: " + ex.Message);
+            }
+        }
+
         /// <summary>
         /// The shader that puts smoke drawn at half size on the screen (see tools/shaderpack/enlarge.glsl). Without
         /// it the smoke is drawn at the screen's full size, which costs several times as much.
@@ -450,6 +542,23 @@ namespace VolumetricExplosions
                 Addon.Log("each patch of smoke is put on the screen by itself: " + ex.Message);
             }
             LoadMotion();
+            LoadCarry();
+        }
+
+        /// <summary>
+        /// The shader by which a patch walked a quarter of its pixels a frame has the rest carried over from the frame before
+        /// (tools/shaderpack/carry.glsl; see Layers). Without it every patch is walked whole, as before.
+        /// </summary>
+        static void LoadCarry()
+        {
+            if (carryTried) return;
+            carryTried = true;
+            try { Carry = Layers != null ? OpenGLShader("carry.bundle") : null; }
+            catch (Exception ex)
+            {
+                Carry = null;
+                Addon.Log("smoke is walked whole every frame: " + ex.Message);
+            }
         }
 
         /// <summary>

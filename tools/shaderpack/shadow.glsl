@@ -33,7 +33,7 @@ uniform vec4 _ShadowGridX;     // the rows of the turn from the scene's axes int
 uniform vec4 _ShadowGridY;
 uniform vec4 _ShadowGridZ;
 uniform vec4 _ShadowSun;       // xyz: towards the sun, in the grid box's own axes (and its sizes); w: how dark a shadow may be (0: none)
-uniform vec4 _ShadowSunWorld;  // xyz: towards the sun, in the scene's axes
+uniform vec4 _ShadowSunWorld;  // xyz: towards the sun, in the scene's axes; w: how wide the sun looks, radians
 uniform vec4 _VolFlow;         // as the smoke's own (volume.glsl): x twice how far the fastest smoke on the grid has gone since the grid was made, m; z the farthest it is carried on, m
 uniform vec4 _VolSize;         // xyz: the size of the grid's box, m
 uniform sampler3D _Volume;
@@ -80,6 +80,12 @@ void main()
     // (as the smoke's own light reckons it: a part of the sunlight finds its way round inside a cloud)
     float through = 0.8 * exp(-before) + 0.2 * exp(-0.25 * before);
     float dark = _ShadowSun.w * lit * (1.0 - through);
+    // (The sun is a disc, not a point: a shadow is as soft as the sun is wide seen from where it falls, by how far off the
+    // smoke is. Under a cloud a few metres up it is sharp; under a rocket's trail thirty kilometres up, which is some tens of
+    // metres wide and whose shadow is spread over a kilometre, it is nothing to be seen. Drawn as sharp from any height,
+    // the trails of a launch lay dark lines across the ground far below.)
+    float wide = 0.5 * min(_VolSize.x, min(_VolSize.y, _VolSize.z));
+    dark *= wide / (wide + _ShadowSunWorld.w * t0);
     if (!(dark > 0.004)) discard;
     SV_Target0 = vec4(vec3(1.0 - min(dark, 0.95)), 1.0);
 }

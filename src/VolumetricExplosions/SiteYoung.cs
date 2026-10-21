@@ -84,8 +84,22 @@ namespace VolumetricExplosions
         public static float Seen(float air, float amount)
         {
             float left = 1.25f * Mathf.Pow(Mathf.Max(air, 0f), Mathf.Lerp(0.8f, 0.4f, Mathf.Clamp01(amount)));
+            // (and gone by the thinnest air a trail is laid in, not cut off there)
+            left *= Mathf.Clamp01((air - TrailAir) / (2f * TrailAir));
             return left < 0.02f ? 0f : Mathf.Min(left, 1f);
         }
+
+        /// <summary>
+        /// The thinnest air an engine's trail is laid in, against the ground's (about fifty kilometres up on Kerbin): far thinner
+        /// than holds smoke of any other kind (see Plan.vacuum, under which an explosion is a vacuum's), for a rocket's exhaust is
+        /// not smoke alone: its water freezes as the gas spreads, and the ice is seen far higher than smoke would be, as the
+        /// plume of a launch is at dusk. Its owner says how much of it there is (Rocket Smoke makes more of it where it is ice).
+        /// (Until 0.8.0 a trail ended where the air did for explosions, at four thousandths of the ground's, some thirty-one
+        /// kilometres up: a rocket's trail stopped in mid-air.)
+        /// </summary>
+        public const float TrailAir = 0.0001f;
+        /// <summary>Whether the air here is too thin to hold even an engine's trail (see TrailAir).</summary>
+        bool Smokeless => air < TrailAir;
 
         /// <summary>(Metres a second: a rocket's trail is laid no wider for going faster than this. It is laid wider the faster the rocket goes, four and a half times as wide by here: left to go on so, it was eleven times as wide at orbital speed.)</summary>
         public const float WidestAt = 700f;
@@ -120,12 +134,22 @@ namespace VolumetricExplosions
             // (a little wider than the trail's puffs used to be laid, and wider again where the air is thin and there is less
             // to hold the jet in; nor ever less than a jet widens standing still, by six parts in a hundred of the way it goes)
             widest = Mathf.Max(1.4f * wide * (1f + 0.2f * thin), 0.75f * e.nozzle + 0.06f * travels);
+            // (and in thin air as wide as the flame's own fan where it ends, whatever is wider: high up, with next to no air to
+            // hold it in, the gas turns out from the nozzle's lip, and what the flame becomes is as wide as the flame was; the
+            // trail then goes on spreading, see Vents. Laid no wider than in thick air, as until 0.8.0, a rocket's trail forty
+            // kilometres up was a white rod a third as wide as the flame it came out of. Spread here as far as the trail goes,
+            // the young smoke's puffs swelled into a string of white balls before they were handed on.)
+            Plume look = Plumes[Mathf.Clamp(e.tint, 0, FireKinds - 1)];
+            widest = Mathf.Max(widest, 0.7f * e.nozzle + Fans(look, thin) * Reach(look, length, thin));
             float shipSpeed = going.magnitude;
             // (as its puffs go on the whole: see YoungSmoke, where each has its own speed by where across the jet it is)
             float speed = 0.72f * jet;
             float faster = Mathf.Max(1f, (along * speed - going).magnitude / speed);
             thrown = travels / (faster * Sooner(travels, far, shipSpeed));
         }
+
+        /// <summary>How wide (a radius, metres) an engine's gas spreads to, once it is at the air's own pressure: about as the square root of how much thinner the air is than the gas leaving the nozzle (taken as seven tenths of the ground's).</summary>
+        float Balanced(in Exhaust e) => e.nozzle * Mathf.Sqrt(0.7f / Mathf.Max(air, TrailAir));
 
         /// <summary>How many times sooner young smoke spends its push, and does its widening, for the ship's going at speed: so that it has done both by where its trail takes over from it (see YoungSmoke).</summary>
         static float Sooner(float travels, float far, float shipSpeed) =>
@@ -173,7 +197,7 @@ namespace VolumetricExplosions
             float each = made / rate;
             float slows = 0.375f / lasts;
             float cools = 1.68f / lasts * (1f - 0.75f * thin);
-            float hangs = Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.3f, 1f, Mathf.Clamp01(air * 1.4f));
+            float hangs = Hangs();
             float stays = e.lasts * hangs / (1f + shipSpeed / 250f);
             float r0 = 0.75f * e.nozzle;
             // How wide it gets, and over how far. Its push takes it so far through still air (the mover takes the push away at
@@ -360,7 +384,7 @@ namespace VolumetricExplosions
         public bool Keeps(CelestialBody where, Vector3d world)
         {
             if (Feeds(where, world)) return true;
-            if (!vented || where != body || space || vacuum || leaving || riding || count > Settings.MaxParticles * 0.45f) return false;
+            if (!vented || where != body || space || Smokeless || leaving || riding || count > Settings.MaxParticles * 0.45f) return false;
             bool low = hasGround && ventFrom.y - GroundAt(ventFrom.x, ventFrom.z) < 30f;
             return low && (frame.ToLocal(world) - ventFrom).sqrMagnitude < 75f * 75f;
         }

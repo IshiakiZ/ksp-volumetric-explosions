@@ -25,6 +25,18 @@ namespace VolumetricExplosions
         /// <summary>Whether it can be done here: the shader is there, and the graphics card can draw into the pictures it needs.</summary>
         public static bool Possible => Assets.Layers != null && ColourFormat != RenderTextureFormat.Default && DepthFormat != RenderTextureFormat.Default;
 
+        /// <summary>
+        /// Whether the ships' patches are to be walked at half the screen's size each way, as the rest are, and enlarged as the rest
+        /// are (read by Site when it sets a patch going, for the frame after this one's: see Frame). A ship's flame is drawn whole
+        /// for its fine tongues, which enlarged from half size were a blur of colour when they were a few pixels wide. But where the
+        /// ships' boxes cover much of the screen, the camera close by or in the plume, a tongue is tens of pixels wide, and walking
+        /// every pixel of the screen costs four times as much: at 1440 lines a booster's smoke took a fast card from 180 frames a
+        /// second to 80, and from inside it to 15 (ksp-rocket-smoke's first issue, 2026-10-18). From a quarter of the screen
+        /// covered; whole again under a sixth, so that it does not flicker between the two near the line.
+        /// </summary>
+        public static bool ShipsHalf;
+        bool shipsHalfNow;                        // (what the patches were set going with this frame: ShipsHalf as it was when they were)
+
         static RenderTextureFormat colourFormat = RenderTextureFormat.Default, depthFormat = RenderTextureFormat.Default;
         static bool formatsLooked;
 
@@ -64,6 +76,56 @@ namespace VolumetricExplosions
         static readonly int slotNote = Shader.PropertyToID("_VolSlot"), layersNote = Shader.PropertyToID("_VolLayers"), slotsNote = Shader.PropertyToID("_VolSlots"), sheetNote = Shader.PropertyToID("_VolSheet");
         static readonly Vector3[] cube = Corners();
 
+        // ---- a patch walked a quarter of its pixels a frame, the rest carried over (2026-10-18; research/rendering/notes/smoke-temporal.md)
+        /// <summary>
+        /// Whether a patch with no fire in it that covers much of the screen (a booster's exhaust cloud with the camera in or by it) is
+        /// walked at one pixel in each two by two of its slot a frame, the four in turn, and the other three carried over from the
+        /// frame before, from where their smoke was then (tools/shaderpack/carry.glsl). In the lab, inside a booster's cloud, 60-66 %
+        /// less of the walk, the picture within 0.2 of 255 of walking it whole frame by frame, with the camera flying at up to 150 m/s
+        /// and turning 90 degrees a second and the smoke going on between grids. False: every patch walked whole, as before (for
+        /// setting the two side by side).
+        /// </summary>
+        public static bool Carrying = true;
+        /// <summary>Whether a patch walked so is walked whole for a frame when its grid is made anew (what the old grid carried on since is then given up at once; in the lab it did not show).</summary>
+        public static bool CarryAnewOnGrid = false;
+        /// <summary>(Development read-out: the patches carried over for the last camera that drew, and why the rest were not.)</summary>
+        public static string CarrySays => !Carrying ? "off" : !Settings.Half ? "not at half size" : Settings.TestLayers != 0f ? "a test of the layers" : Assets.Carry == null ? "no shader" :
+            saidCarried + " of " + saidPatches + " patches walked a quarter at a time (" + saidFires + " with fire, " + saidSmall + " covering too little of the screen)";
+        static int saidCarried, saidPatches, saidFires, saidSmall;
+#if DEV
+        /// <summary>(Development build, for films side by side: "off" walks every patch whole, anything else carries; says what it does.)</summary>
+        public static string Carry(string on) { Carrying = on == null || on.Trim() != "off"; return CarrySays; }
+        public static string Carry() => CarrySays;
+#endif
+
+        const int CarriedMost = 2;                // (at most so many at a time: each keeps four pictures the size of its slot and two of a quarter of it)
+        sealed class Carried
+        {
+            public RenderTexture Quarter, QuarterDepth, WasA, WasADepth, WasB, WasBDepth;
+            public bool AIsLast;                  // (which of the two pictures of what it was is last frame's)
+            public int Frame = -10, Turn, Width, Height;
+            public Camera Seen;
+            public Matrix4x4 Box, Draws;          // its box, and what took a place in the scene to the camera's picture (the smoothing's shake and all), last frame
+            public Vector3 Eye, Ahead;            // where the camera was from the box's middle and which way it looked, last frame
+            public float GridAge;                 // how long ago its grid had been made, last frame (less now: made anew)
+            public bool Covering;                 // whether it covered enough of the screen to be carried, last frame
+            public float Covers;                  // how much of the screen it covers now
+            public readonly MaterialPropertyBlock Own = new MaterialPropertyBlock(), Slot = new MaterialPropertyBlock();
+        }
+        readonly Dictionary<Site, Carried>[] carried = { new Dictionary<Site, Carried>(), new Dictionary<Site, Carried>() };
+        readonly List<Site> carriedGone = new List<Site>();
+        readonly List<Site> carryChosen = new List<Site>();
+        Material carryMaterial;
+        readonly RenderTargetIdentifier[] two = new RenderTargetIdentifier[2];
+        static readonly Vector2Int[] turns = { new Vector2Int(0, 0), new Vector2Int(1, 1), new Vector2Int(1, 0), new Vector2Int(0, 1) };
+        static readonly int shiftNote = Shader.PropertyToID("_VolShift"), quarterNote = Shader.PropertyToID("_VolQuarter"), thinNote = Shader.PropertyToID("_VolThin"), lampsNote = Shader.PropertyToID("_VolLamps"),
+            carryAtNote = Shader.PropertyToID("_CarryAt"), carryQNote = Shader.PropertyToID("_CarryQ"), carryCamNote = Shader.PropertyToID("_CarryCam"),
+            carryRayXNote = Shader.PropertyToID("_CarryRayX"), carryRayYNote = Shader.PropertyToID("_CarryRayY"), carryRayZNote = Shader.PropertyToID("_CarryRayZ"),
+            carryWasXNote = Shader.PropertyToID("_CarryWasX"), carryWasYNote = Shader.PropertyToID("_CarryWasY"), carryWasWNote = Shader.PropertyToID("_CarryWasW"),
+            carryBoxXNote = Shader.PropertyToID("_CarryBoxX"), carryBoxYNote = Shader.PropertyToID("_CarryBoxY"), carryBoxZNote = Shader.PropertyToID("_CarryBoxZ"),
+            carryQuarterNote = Shader.PropertyToID("_CarryQuarter"), carryQuarterDepthNote = Shader.PropertyToID("_CarryQuarterDepth"),
+            carryWasNote = Shader.PropertyToID("_CarryWas"), carryWasDepthNote = Shader.PropertyToID("_CarryWasDepth");
+
         static Vector3[] Corners()
         {
             var c = new Vector3[8];
@@ -86,6 +148,20 @@ namespace VolumetricExplosions
             }
             Order(world, eye);
             Order(ships, eye);
+            // (how much of the screen the ships' boxes cover, the corners of the rectangle that holds them all: see ShipsHalf)
+            shipsHalfNow = ShipsHalf;
+            Camera seer = cameras.Length > 0 && cameras[0] != null ? cameras[0] : cameras.Length > 1 ? cameras[1] : null;
+            if (!Settings.Half || ships.Count == 0 || seer == null) ShipsHalf = false;
+            else
+            {
+                Vector4 r = new Vector4(2f, 2f, -2f, -2f);
+                Matrix4x4 v = seer.projectionMatrix * seer.worldToCameraMatrix;
+                foreach (Site s in ships) Covers(ref r, v, s.BoxMatrix, seer);
+                float covered = r.z > r.x && r.w > r.y ? Mathf.Clamp01((Mathf.Min(r.z, 1f) - Mathf.Max(r.x, -1f)) * (Mathf.Min(r.w, 1f) - Mathf.Max(r.y, -1f)) * 0.25f) : 0f;
+                ShipsHalf = ShipsHalf ? covered > 1f / 6f : covered > 0.25f;
+                // (for testing: 8 always so, 9 never)
+                if (Settings.TestLayers == 8f) ShipsHalf = true; else if (Settings.TestLayers == 9f) ShipsHalf = false;
+            }
             bool any = world.Count + ships.Count > 0;
             for (int which = 0; which < 2; which++)
             {
@@ -116,6 +192,7 @@ namespace VolumetricExplosions
             sheet.transform.position = nearest.BoxCentre;
             Room(world.Count, Time.unscaledDeltaTime);
             if (ships.Count == 0) LetFullGo(Time.unscaledDeltaTime); else fullUnused = 0f;
+            LetCarriedGo();
         }
 
         /// <summary>The farthest first (by the middle of each box, as the game sorts see-through things: so that the test that lays them on in that order shows what used to be).</summary>
@@ -165,11 +242,15 @@ namespace VolumetricExplosions
                 atlasBoth[0] = atlas; atlasBoth[1] = atlasDepth;
                 c.SetRenderTarget(atlasBoth, atlas);
                 c.ClearRenderTarget(false, true, Color.clear);
+                ChooseCarried(which, camera, view, half);
                 for (int k = 0; k < slots; k++)
                 {
                     Site s = inRange[k];
                     int x = (k % perRow) * slotWide, y = (k / perRow) * slotTall;
+                    if (Carry(c, which, camera, s, x, y, view)) { Covers(ref rect, view, s.BoxMatrix, camera); continue; }
                     s.Marching.SetVector(slotNote, new Vector4(x, y, 0f, 0f));
+                    s.Marching.SetVector(shiftNote, Vector4.zero);
+                    s.Marching.SetVector(quarterNote, Vector4.zero);
                     c.SetViewport(new Rect(x, y, slotWide, slotTall));
                     c.DrawMesh(Assets.Cube, s.BoxMatrix, s.Marching, 0, 0);
                     Covers(ref rect, view, s.BoxMatrix, camera);
@@ -192,7 +273,7 @@ namespace VolumetricExplosions
             foreach (Site s in ships) if (s.Within(camera)) shipsIn++;
             if (shipsIn > 0)
             {
-                Full(wide, tall);
+                Full(shipsHalfNow ? slotWide : wide, shipsHalfNow ? slotTall : tall);
                 fullBoth[0] = full; fullBoth[1] = fullDepth;
                 c.SetRenderTarget(fullBoth, full);
                 c.ClearRenderTarget(false, true, Color.clear);
@@ -211,7 +292,7 @@ namespace VolumetricExplosions
                     foreach (Site s in ships)
                     {
                         if (!s.Within(camera)) continue;
-                        Material m = s.Follows(full, fullDepth, Vector4.zero, seesNow, seesBefore, Time.deltaTime);
+                        Material m = s.Follows(full, fullDepth, new Vector4(0f, 0f, shipsHalfNow ? 1f : 0f, 0f), seesNow, seesBefore, Time.deltaTime);
                         if (m != null) c.DrawMesh(Assets.Cube, s.BoxMatrix, m, 0, 0);
                     }
                 }
@@ -222,10 +303,173 @@ namespace VolumetricExplosions
             float spareX = 8f / Mathf.Max(1, wide), spareY = 8f / Mathf.Max(1, tall);
             rect = new Vector4(Mathf.Max(-1f, rect.x - spareX), Mathf.Max(-1f, rect.y - spareY), Mathf.Min(1f, rect.z + spareX), Mathf.Min(1f, rect.w + spareY));
             float test = Settings.TestLayers == 1f ? 1f : Settings.TestLayers == 3f ? 2f : Settings.TestLayers == 4f ? 3f : Settings.TestLayers == 6f ? 4f : Settings.TestLayers == 7f ? 5f : 0f;
-            material.SetVector(layersNote, new Vector4(slots, shipsIn > 0 ? 1f : 0f, perRow, half ? 1f : 0f));
+            material.SetVector(layersNote, new Vector4(slots, shipsIn > 0 ? (shipsHalfNow ? 2f : 1f) : 0f, perRow, half ? 1f : 0f));
             material.SetVector(slotsNote, new Vector4(slotWide, slotTall, test, 0f));
             material.SetVector(sheetNote, rect.z > rect.x && rect.w > rect.y ? rect : Vector4.zero);
         }
+
+        /// <summary>
+        /// Which of this camera's patches are walked a quarter at a time this frame (see Carrying): those with no fire in them
+        /// (no lamp lit: a fire, a blast's flash), from a quarter of the screen covered (whole again under a sixth, so that it does not
+        /// go to and fro near the line, as ShipsHalf), the most covered first, two at most. At half size only: the slot's two by two.
+        /// </summary>
+        void ChooseCarried(int which, Camera camera, Matrix4x4 view, bool half)
+        {
+            carryChosen.Clear();
+            Dictionary<Site, Carried> mine = carried[which];
+            bool may = Carrying && half && carryMaterial != null && Settings.TestLayers == 0f;
+            int fires = 0, small = 0;
+            foreach (Site s in inRange)
+            {
+                mine.TryGetValue(s, out Carried k);
+                if (!may) { if (k != null) k.Covering = false; continue; }
+                Vector4 lamps = s.Marching.GetVector(lampsNote);
+                if (Mathf.Max(lamps.x, Mathf.Max(lamps.y, lamps.z)) > 0f) { fires++; if (k != null) k.Covering = false; continue; }
+                Vector4 r = new Vector4(2f, 2f, -2f, -2f);
+                Covers(ref r, view, s.BoxMatrix, camera);
+                float covers = r.z > r.x && r.w > r.y ? Mathf.Clamp01((Mathf.Min(r.z, 1f) - Mathf.Max(r.x, -1f)) * (Mathf.Min(r.w, 1f) - Mathf.Max(r.y, -1f)) * 0.25f) : 0f;
+                bool covering = k != null && k.Covering ? covers > 1f / 6f : covers > 0.25f;
+                if (!covering) { small++; if (k != null) k.Covering = false; continue; }
+                if (k == null) { k = new Carried(); mine[s] = k; }
+                k.Covering = true;
+                k.Covers = covers;
+                carryChosen.Add(s);
+            }
+            // (the most covered kept, the rest walked whole)
+            while (carryChosen.Count > CarriedMost)
+            {
+                int least = 0;
+                for (int n = 1; n < carryChosen.Count; n++) if (mine[carryChosen[n]].Covers < mine[carryChosen[least]].Covers) least = n;
+                mine[carryChosen[least]].Covering = false;
+                carryChosen.RemoveAt(least);
+            }
+            saidCarried = carryChosen.Count; saidPatches = inRange.Count; saidFires = fires; saidSmall = small;
+        }
+
+        /// <summary>
+        /// A patch walked a quarter of its slot's pixels this frame, the rest carried over from the frame before (see Carrying), into
+        /// its slot of the atlas: true where it is so drawn. Walked whole into its own picture and copied into its slot where what it
+        /// was cannot be trusted: its first frame so, a frame missed (the map, a pause), another camera, a slot of another size, the
+        /// camera jumped or turned sharply, and (with CarryAnewOnGrid) a new grid.
+        /// </summary>
+        bool Carry(CommandBuffer c, int which, Camera camera, Site s, int x, int y, Matrix4x4 draws)
+        {
+            if (!carryChosen.Contains(s) || !carried[which].TryGetValue(s, out Carried k)) return false;
+            if (k.WasA == null || k.Width != slotWide || k.Height != slotTall)
+            {
+                ReleaseCarried(k);
+                k.Width = slotWide; k.Height = slotTall;
+                int qw = (slotWide + 1) / 2, qh = (slotTall + 1) / 2;
+                k.Quarter = Picture(qw, qh, ColourFormat, "VolumetricExplosions smoke walked a quarter at a time");
+                k.QuarterDepth = Picture(qw, qh, DepthFormat, "VolumetricExplosions how far off that smoke is");
+                k.WasA = Smooth(Picture(slotWide, slotTall, ColourFormat, "VolumetricExplosions smoke as it was (1)"));
+                k.WasADepth = Smooth(Picture(slotWide, slotTall, DepthFormat, "VolumetricExplosions how far off it was (1)"));
+                k.WasB = Smooth(Picture(slotWide, slotTall, ColourFormat, "VolumetricExplosions smoke as it was (2)"));
+                k.WasBDepth = Smooth(Picture(slotWide, slotTall, DepthFormat, "VolumetricExplosions how far off it was (2)"));
+                k.Frame = -10;
+            }
+            Matrix4x4 box = s.BoxMatrix;
+            Vector3 eye = camera.transform.position - s.BoxCentre, ahead = camera.transform.forward;
+            float gridAge = s.Marching.GetVector(thinNote).y;
+            // (A camera's jump between two frames of more than 30 m against the patch, or a turn of more than 15 degrees: a camera
+            // switched, or the view cut. The lab's flights at 150 m/s and turns of 90 degrees a second are a fortieth of that.)
+            bool trusted = k.Frame == Time.frameCount - 1 && k.Seen == camera && (eye - k.Eye).sqrMagnitude < 900f && Vector3.Angle(ahead, k.Ahead) < 15f
+                           && !(CarryAnewOnGrid && gridAge < k.GridAge);
+            RenderTexture last = k.AIsLast ? k.WasA : k.WasB, lastDepth = k.AIsLast ? k.WasADepth : k.WasBDepth;
+            RenderTexture next = k.AIsLast ? k.WasB : k.WasA, nextDepth = k.AIsLast ? k.WasBDepth : k.WasADepth;
+            Vector4 q4 = Vector4.zero;
+            s.Marching.SetVector(slotNote, Vector4.zero);
+            if (trusted)
+            {
+                Vector2Int q = turns[k.Turn & 3];
+                k.Turn++;
+                q4 = new Vector4(q.x, q.y, 1f, which == 1 ? 1f / 64f : 1f);
+                // (the picture moved by part of a pixel; where the game draws into its pictures upside down, the move up and down turned over)
+                float upside = SystemInfo.graphicsUVStartsAtTop ? -1f : 1f;
+                s.Marching.SetVector(shiftNote, new Vector4(2f * (q.x - 0.5f) / slotWide, upside * 2f * (q.y - 0.5f) / slotTall, 0f, 0f));
+                s.Marching.SetVector(quarterNote, new Vector4(q.x, q.y, 1f, 0f));
+                two[0] = k.Quarter; two[1] = k.QuarterDepth;
+                c.SetRenderTarget(two, k.Quarter);
+                c.ClearRenderTarget(false, true, Color.clear);
+                c.SetViewport(new Rect(0f, 0f, k.Quarter.width, k.Quarter.height));
+                c.DrawMesh(Assets.Cube, box, s.Marching, 0, 0);
+            }
+            else
+            {
+                // (walked whole into its own picture, which the slot then copies)
+                k.Turn = 0;
+                q4 = new Vector4(0f, 0f, 2f, which == 1 ? 1f / 64f : 1f);
+                s.Marching.SetVector(shiftNote, Vector4.zero);
+                s.Marching.SetVector(quarterNote, Vector4.zero);
+                two[0] = next; two[1] = nextDepth;
+                c.SetRenderTarget(two, next);
+                c.ClearRenderTarget(false, true, Color.clear);
+                c.SetViewport(new Rect(0f, 0f, slotWide, slotTall));
+                c.DrawMesh(Assets.Cube, box, s.Marching, 0, 0);
+            }
+            // (the numbers of the carrying over: a pixel's ray now, last frame's camera, and how the box has moved since)
+            Matrix4x4 inv = draws.inverse;
+            Vector3 at = camera.transform.position;
+            Matrix4x4 wasDraws = trusted ? k.Draws : draws, moved = trusted ? k.Box * box.inverse : Matrix4x4.identity;
+            CarryNumbers(k.Own, q4, inv, at, wasDraws, moved, k, trusted ? last : next, trusted ? lastDepth : nextDepth);
+            CarryNumbers(k.Slot, q4, inv, at, wasDraws, moved, k, trusted ? last : next, trusted ? lastDepth : nextDepth);
+            // (carried into its own picture of what it was, for the next frame; walked whole, it is that already)
+            if (trusted)
+            {
+                k.Own.SetVector(carryAtNote, new Vector4(0f, 0f, slotWide, slotTall));
+                two[0] = next; two[1] = nextDepth;
+                c.SetRenderTarget(two, next);
+                c.SetViewport(new Rect(0f, 0f, slotWide, slotTall));
+                c.DrawMesh(quad, Matrix4x4.identity, carryMaterial, 0, 0, k.Own);
+            }
+            // (and into its slot, which the sheet lays on the screen as before)
+            k.Slot.SetVector(carryAtNote, new Vector4(x, y, slotWide, slotTall));
+            c.SetRenderTarget(atlasBoth, atlas);
+            c.SetViewport(new Rect(x, y, slotWide, slotTall));
+            c.DrawMesh(quad, Matrix4x4.identity, carryMaterial, 0, 0, k.Slot);
+            k.AIsLast = !k.AIsLast;
+            k.Frame = Time.frameCount; k.Seen = camera; k.Box = box; k.Draws = draws; k.Eye = eye; k.Ahead = ahead; k.GridAge = gridAge;
+            return true;
+        }
+
+        void CarryNumbers(MaterialPropertyBlock b, Vector4 q4, Matrix4x4 inv, Vector3 at, Matrix4x4 wasDraws, Matrix4x4 moved, Carried k, RenderTexture was, RenderTexture wasDepth)
+        {
+            b.SetVector(carryQNote, q4);
+            b.SetVector(carryCamNote, new Vector4(at.x, at.y, at.z, 1f));
+            b.SetVector(carryRayXNote, RayRow(inv, at, 0)); b.SetVector(carryRayYNote, RayRow(inv, at, 1)); b.SetVector(carryRayZNote, RayRow(inv, at, 2));
+            b.SetVector(carryWasXNote, wasDraws.GetRow(0)); b.SetVector(carryWasYNote, wasDraws.GetRow(1)); b.SetVector(carryWasWNote, wasDraws.GetRow(3));
+            b.SetVector(carryBoxXNote, moved.GetRow(0)); b.SetVector(carryBoxYNote, moved.GetRow(1)); b.SetVector(carryBoxZNote, moved.GetRow(2));
+            b.SetTexture(carryQuarterNote, k.Quarter); b.SetTexture(carryQuarterDepthNote, k.QuarterDepth);
+            b.SetTexture(carryWasNote, was); b.SetTexture(carryWasDepthNote, wasDepth);
+        }
+
+        /// <summary>
+        /// A row taking a pixel's place on the picture (-1 to 1 each way, then 1 and 0) to the way of its ray from the camera at `at`:
+        /// the place on the far plane, less the camera's, times the far plane's own w (the rays are made unit lengths in the shader).
+        /// </summary>
+        static Vector4 RayRow(Matrix4x4 inv, Vector3 at, int i)
+        {
+            Vector4 r = inv.GetRow(i), r3 = inv.GetRow(3);
+            return new Vector4(r.x - at[i] * r3.x, r.y - at[i] * r3.y, r.z - at[i] * r3.z + r.w - at[i] * r3.w, 0f);
+        }
+
+        /// <summary>(Once a frame: the pictures of patches not walked a quarter at a time in the last two frames let go, gone patches' with them.)</summary>
+        void LetCarriedGo()
+        {
+            for (int which = 0; which < 2; which++)
+            {
+                carriedGone.Clear();
+                foreach (KeyValuePair<Site, Carried> e in carried[which]) if (e.Value.Frame < Time.frameCount - 2) carriedGone.Add(e.Key);
+                foreach (Site s in carriedGone) { ReleaseCarried(carried[which][s]); carried[which].Remove(s); }
+            }
+        }
+
+        static void ReleaseCarried(Carried k)
+        {
+            Release(ref k.Quarter); Release(ref k.QuarterDepth); Release(ref k.WasA); Release(ref k.WasADepth); Release(ref k.WasB); Release(ref k.WasBDepth);
+        }
+
+        static RenderTexture Smooth(RenderTexture rt) { rt.filterMode = FilterMode.Bilinear; return rt; }
 
         /// <summary>For any other camera (and one of the two with nothing of the smoke in its range): the sheet draws nothing.</summary>
         public void NotFor()
@@ -336,6 +580,7 @@ namespace VolumetricExplosions
             sheetRenderer.shadowCastingMode = ShadowCastingMode.Off;
             sheetRenderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;      // (see Site.TuneShadow)
             sheetRenderer.receiveShadows = false;
+            if (Assets.Carry != null) carryMaterial = new Material(Assets.Carry);
             NotFor();
         }
 
@@ -359,6 +604,9 @@ namespace VolumetricExplosions
             Release(ref atlasDepth);
             Release(ref full);
             Release(ref fullDepth);
+            for (int which = 0; which < 2; which++) { foreach (Carried k in carried[which].Values) ReleaseCarried(k); carried[which].Clear(); }
+            if (carryMaterial != null) Object.Destroy(carryMaterial);
+            carryMaterial = null;
             if (sheet != null) Object.Destroy(sheet);
             if (material != null) Object.Destroy(material);
             if (quad != null) Object.Destroy(quad);

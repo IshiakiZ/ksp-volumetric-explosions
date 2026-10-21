@@ -32,16 +32,34 @@ static class Program
         Png.Write(Path.Combine(folder, "spark.png"), Simple.Spark(128), 128, 128);
         Png.Write(Path.Combine(folder, "ring.png"), Simple.Ring(512), 512, 512);
         Png.Write(Path.Combine(folder, "shard.png"), Simple.Shard(128), 128, 128);
-        Png.Write(Path.Combine(folder, "scorch.png"), Simple.Scorch(512), 512, 512);
-        Png.Write(Path.Combine(folder, "embers.png"), Simple.Embers(256), 256, 256);
+        // The burn marks, several kinds (see Burn): the first as scorch.png and embers.png, the others numbered.
+        var marks = new byte[Burn.Kinds][];
+        for (int k = 0; k < Burn.Kinds; k++)
+        {
+            string tag = k == 0 ? "" : k.ToString();
+            marks[k] = Simple.Scorch(512, k);
+            Png.Write(Path.Combine(folder, "scorch" + tag + ".png"), marks[k], 512, 512);
+            Png.Write(Path.Combine(folder, "embers" + tag + ".png"), Simple.Embers(256, k), 256, 256);
+        }
         File.WriteAllBytes(Path.Combine(folder, "detail.bin"), Detail.Block(96, out float steepest));
-        Console.WriteLine("puff.png " + width + "x" + height + ", glow.png, spark.png, ring.png, shard.png, scorch.png, detail.bin (96 cells each way; mean " + Detail.Mean + ", spread " + Detail.Spread + ", steepest slope " + steepest.ToString("F2") + " per repeat: the shader's Steepest)");
+        Console.WriteLine("puff.png " + width + "x" + height + ", glow.png, spark.png, ring.png, shard.png, " + Burn.Kinds + " kinds of scorch.png and embers.png, detail.bin (96 cells each way; mean " + Detail.Mean + ", spread " + Detail.Spread + ", steepest slope " + steepest.ToString("F2") + " per repeat: the shader's Steepest)");
 
         if (preview)
         {
             // The sheet as it looks over a night sky and over a day sky, to judge it without starting the game.
             Png.Write(Path.Combine(folder, "preview_dark.png"), Simple.Over(atlas, width, height, 10, 12, 20), width, height);
             Png.Write(Path.Combine(folder, "preview_sky.png"), Simple.Over(atlas, width, height, 120, 160, 215), width, height);
+            // The burn marks side by side, over concrete, grass and sand.
+            int[][] grounds = { new[] { 150, 147, 140 }, new[] { 84, 104, 56 }, new[] { 196, 178, 140 } };
+            var sheet = new byte[512 * Burn.Kinds * 512 * grounds.Length * 4];
+            for (int g = 0; g < grounds.Length; g++)
+                for (int k = 0; k < Burn.Kinds; k++)
+                {
+                    byte[] laid = Simple.Laid(marks[k], 512, 512, grounds[g][0], grounds[g][1], grounds[g][2]);
+                    for (int y = 0; y < 512; y++)
+                        Array.Copy(laid, y * 512 * 4, sheet, ((g * 512 + y) * 512 * Burn.Kinds + k * 512) * 4, 512 * 4);
+                }
+            Png.Write(Path.Combine(folder, "preview_marks.png"), sheet, 512 * Burn.Kinds, 512 * grounds.Length);
         }
         return 0;
     }
@@ -360,67 +378,52 @@ static class Simple
         return p;
     }
 
-    /// <summary>
-    /// A burn mark for the ground (ordinary colour and opacity). From the middle outward: a patch charred
-    /// black with a ragged edge, soot fading out round it, pale ash lying in patches over the soot, thin
-    /// streaks of soot thrown out much further, and spatter.
-    /// </summary>
-    public static byte[] Scorch(int size)
+    /// <summary>A burn mark for the ground (ordinary colour and opacity), the given one of Burn.Kinds: see Burn.</summary>
+    public static byte[] Scorch(int size, int kind)
     {
+        var burn = new Burn(kind);
         var p = new byte[size * size * 4];
-        for (int y = 0; y < size; y++)
+        Parallel.For(0, size, y =>
+        {
             for (int x = 0; x < size; x++)
             {
                 float u = (x + 0.5f) / size * 2f - 1f, v = (y + 0.5f) / size * 2f - 1f;
-                float r = MathF.Sqrt(u * u + v * v);
-                float angle = MathF.Atan2(v, u), cu = MathF.Cos(angle), cv = MathF.Sin(angle);
-                // Noise taken round a circle joins up with itself.
-                float lobes = Noise.Value(cu * 1.7f + 5f, cv * 1.7f + 5f, 0.5f, 31) * 0.6f + Noise.Value(cu * 4.3f + 2f, cv * 4.3f + 2f, 3.5f, 32) * 0.4f;
-                float reach = 0.20f + 0.20f * lobes + 0.03f * Noise.Value(u * 9f, v * 9f, 2.5f, 35);
-                float rough = Noise.Value(u * 6f, v * 6f, 1.5f, 33), grit = Noise.Value(u * 23f, v * 23f, 6.5f, 34);
-
-                // Soot: strongest by the char, gone by twice as far out, uneven.
-                float soot = Volume.Smooth(Volume.Saturate((reach * 2.3f - r) / (reach * 1.6f))) * (0.45f + 0.4f * rough + 0.15f * grit);
-                float cr = 0.075f, cg = 0.07f, cb = 0.062f, a = soot * 0.72f;
-                // Ash: pale grey, in patches, in the ring where the fire burned longest.
-                float ring = Volume.Smooth(Volume.Saturate((r - reach * 0.7f) / (reach * 0.5f))) * Volume.Smooth(Volume.Saturate((reach * 2.0f - r) / (reach * 0.7f)));
-                float ash = ring * Volume.Saturate((Noise.Value(u * 11f + 3f, v * 11f - 2f, 9.5f, 36) - 0.5f) / 0.18f) * 0.5f;
-                cr = Volume.Lerp(cr, 0.30f, ash); cg = Volume.Lerp(cg, 0.285f, ash); cb = Volume.Lerp(cb, 0.26f, ash);
-                a = Volume.Saturate(a + ash * 0.25f);
-                // Streaks: many thin rays of different lengths.
-                float rays = MathF.Pow(Noise.Value(cu * 19f + 7f, cv * 19f + 7f, 4.5f, 37), 5f) * 3.2f + MathF.Pow(Noise.Value(cu * 47f + 1f, cv * 47f + 1f, 8.5f, 38), 6f) * 2.2f;
-                float length = 0.55f + 0.45f * Noise.Value(cu * 9f + 4f, cv * 9f + 4f, 6.5f, 39);
-                float streak = Volume.Saturate(rays) * Volume.Smooth(Volume.Saturate((length - r) / (length * 0.75f))) * Volume.Saturate((r - reach * 0.5f) / (reach * 0.5f));
-                a = Volume.Saturate(a + streak * 0.6f * (1f - a));
-                cr = Volume.Lerp(cr, 0.05f, streak * 0.7f); cg = Volume.Lerp(cg, 0.047f, streak * 0.7f); cb = Volume.Lerp(cb, 0.042f, streak * 0.7f);
-                // The char itself.
-                float charred = Volume.Smooth(Volume.Saturate((reach - r) / (reach * 0.45f)));
-                a = Volume.Lerp(a, 0.93f, charred * (0.85f + 0.15f * grit));
-                cr = Volume.Lerp(cr, 0.022f, charred); cg = Volume.Lerp(cg, 0.02f, charred); cb = Volume.Lerp(cb, 0.018f, charred);
-                // Spatter: specks, fewer further out.
-                float speck = Volume.Saturate((Noise.Value(u * 41f, v * 41f, 3.5f, 40) - 0.74f) / 0.05f) * Volume.Saturate((0.95f - r) / 0.6f) * Volume.Saturate((r - reach * 0.8f) / 0.1f);
-                a = Volume.Saturate(a + speck * 0.55f * (1f - a));
-                a *= Volume.Smooth(Volume.Saturate((1f - r) / 0.08f));
+                burn.Mark(u, v, out float cr, out float cg, out float cb, out float a);
                 Set(p, (y * size + x) * 4, cr, cg, cb, a);
             }
+        });
         return p;
     }
 
-    /// <summary>What still glows in a fresh burn mark: embers, thick in the middle, in a broken pattern (for the additive shader).</summary>
-    public static byte[] Embers(int size)
+    /// <summary>What still glows in a fresh burn mark, the same one of Burn.Kinds: embers where the char is, in a broken pattern, and a few bits burning out along its tongues (for the additive shader).</summary>
+    public static byte[] Embers(int size, int kind)
     {
+        var burn = new Burn(kind);
         var p = new byte[size * size * 4];
-        for (int y = 0; y < size; y++)
+        Parallel.For(0, size, y =>
+        {
             for (int x = 0; x < size; x++)
             {
                 float u = (x + 0.5f) / size * 2f - 1f, v = (y + 0.5f) / size * 2f - 1f;
-                float r = MathF.Sqrt(u * u + v * v);
-                float cracks = 1f - MathF.Abs(2f * Noise.Value(u * 7f, v * 7f, 2.5f, 51) - 1f);
-                float specks = Volume.Saturate((Noise.Value(u * 26f, v * 26f, 5.5f, 52) - 0.62f) / 0.1f);
-                float body = MathF.Exp(-r * r * 9f);
-                float glow = Volume.Saturate(body * (0.25f + 1.4f * MathF.Pow(cracks, 5f)) + body * specks * 0.8f + MathF.Exp(-r * r * 30f) * 0.5f);
+                float glow = burn.Embers(u, v);
                 Set(p, (y * size + x) * 4, 1f, 0.42f + 0.4f * glow, 0.08f + 0.25f * glow * glow, glow);
             }
+        });
+        return p;
+    }
+
+    /// <summary>A picture in ordinary colour and opacity laid over a plain background, for looking at (the burn marks over the ground).</summary>
+    public static byte[] Laid(byte[] src, int width, int height, int r, int g, int b)
+    {
+        var p = new byte[src.Length];
+        for (int n = 0; n < width * height; n++)
+        {
+            float a = src[n * 4 + 3] / 255f;
+            p[n * 4] = (byte)Math.Min(255f, src[n * 4] * a + r * (1f - a));
+            p[n * 4 + 1] = (byte)Math.Min(255f, src[n * 4 + 1] * a + g * (1f - a));
+            p[n * 4 + 2] = (byte)Math.Min(255f, src[n * 4 + 2] * a + b * (1f - a));
+            p[n * 4 + 3] = 255;
+        }
         return p;
     }
 
@@ -445,6 +448,149 @@ static class Simple
         p[at + 1] = Volume.ToByte(g);
         p[at + 2] = Volume.ToByte(b);
         p[at + 3] = Volume.ToByte(a);
+    }
+}
+
+/// <summary>
+/// A burn mark as photographs of real ones show them (looked at 2026-10-19: shell bursts on snow seen from above, the scars rockets
+/// left where they blew up on the ground, ground round a launch pad burnt by its exhaust, a mortar's burst on paving). Never a round
+/// blot with an even fringe of fine rays, as the mod's mark was until then. Lopsided: the char in lobes, reaching further on one side;
+/// the soot thrown out in a few broad tongues and fans of different lengths, widening outward, each finely streaked along its length
+/// and ragged where it ends, with cleaner ground between them; round it a thin veil of soot, brown where it lies thin (as smoke
+/// stains are), black where thick; pale ash in patches over the char, most toward its middle; and what was thrown out leaving short
+/// dark dashes pointing away, most just beyond the char and fewer further out. Ahead (+u, the way a crash was going: see Scorch in
+/// Air.cs) it reaches furthest. Several kinds, so that no two marks are alike: the mod takes one at random, and turns it.
+/// </summary>
+sealed class Burn
+{
+    public const int Kinds = 4;
+    const int DashesRound = 110, DashesOut = 30;
+    readonly int seed;
+    readonly float core, lop, lopAt;
+    readonly float[] at, wide, reach, strength;
+
+    public Burn(int kind)
+    {
+        seed = 6100 + kind * 389;
+        var rnd = new Random(seed);
+        float R() => (float)rnd.NextDouble();
+        core = 0.24f + 0.08f * R();
+        lop = 0.2f + 0.25f * R();
+        lopAt = 0.6f * (R() - 0.5f);
+        int n = 3 + rnd.Next(4);
+        at = new float[n]; wide = new float[n]; reach = new float[n]; strength = new float[n];
+        for (int k = 0; k < n; k++)
+        {
+            // (the tongues mostly ahead, some to the sides, few behind)
+            float a = (R() * 2f - 1f) * MathF.PI * (0.55f + 0.45f * R());
+            at[k] = a;
+            wide[k] = 0.12f + 0.28f * R();
+            reach[k] = Math.Min(0.98f, (0.6f + 0.35f * R()) * (1f + 0.12f * MathF.Cos(a)));
+            strength[k] = 0.4f + 0.6f * R();
+        }
+    }
+
+    /// <summary>How far the char reaches that way (of the mark's half-width): lobed, ragged, furthest toward lopAt.</summary>
+    float Reach(float cu, float cv, float th)
+    {
+        float lobes = Noise.Value(cu * 1.5f + 3f, cv * 1.5f + 3f, 0.5f, seed + 1), ragged = Noise.Value(cu * 3f + 1f, cv * 3f + 1f, 1.5f, seed + 2);
+        return core * (1f + lop * MathF.Cos(th - lopAt)) * (0.5f + lobes + 0.3f * (ragged - 0.5f));
+    }
+
+    /// <summary>The mark's colour and opacity at (u, v), each -1 to 1 across it.</summary>
+    public void Mark(float u, float v, out float cr, out float cg, out float cb, out float a)
+    {
+        float r = MathF.Sqrt(u * u + v * v), th = MathF.Atan2(v, u), cu = MathF.Cos(th), cv = MathF.Sin(th);
+        float edge = Reach(cu, cv, th);
+        float grit = Noise.Value(u * 23f, v * 23f, 6.5f, seed + 3), mottle = Noise.Value(u * 6f + 9f, v * 6f - 4f, 2.5f, seed + 4);
+        // The char: whole where the fire stood on the ground, its edge ragged.
+        float broken = 0.8f * (Noise.Value(cu * 16f + 2f, cv * 16f + 6f, r * 4f, seed + 8) - 0.5f) + 0.5f * (Noise.Value(cu * 40f, cv * 40f, r * 7f, seed + 9) - 0.5f)
+                     + 0.3f * (Noise.Value(u * 9f, v * 9f, 4.5f, seed + 13) - 0.5f);
+        float patchy = Volume.Saturate(0.45f + 1.1f * (Noise.Value(u * 4f - 3f, v * 4f + 1f, 5.5f, seed + 11) - 0.5f) + 0.6f * (Noise.Value(u * 9f, v * 9f, 1.5f, seed + 12) - 0.5f) + 0.35f);
+        float charred = Volume.Smooth(Volume.Saturate((edge * (1f + 0.6f * broken) - r) / (edge * 0.3f + 0.01f)));
+        // The streaks all the thrown soot lies in, along the way it was blown: fine ones, and coarser.
+        float fine = Noise.Value(cu * 70f, cv * 70f, r * 2.5f, seed + 5), coarse = Noise.Value(cu * 22f + 5f, cv * 22f + 5f, r * 1.2f, seed + 6);
+        float streaked = Volume.Saturate(0.2f + 0.6f * fine + 0.5f * coarse - 0.1f);
+        // The veil: soot laid thin round it, out to about twice as far, in lobes of its own.
+        float far = edge * (1.5f + 1.0f * Noise.Value(cu * 2.2f + 7f, cv * 2.2f + 7f, 3.5f, seed + 7)) * (1f + 0.35f * broken);
+        float veil = (1f - Volume.Smooth(Volume.Saturate((r - edge * 0.8f) / (far - edge * 0.8f)))) * 0.5f * patchy * Volume.Lerp(1f, streaked, 0.5f);
+        // The tongues: wavering a little sideways along their length, widening outward, ragged at the end.
+        float clear = 1f;
+        for (int k = 0; k < at.Length; k++)
+        {
+            float d = Angle(th - at[k] - 0.6f * wide[k] * (Noise.Value(r * 5f + k * 7.1f, k * 3.1f, 0.5f, seed + 10 + k) - 0.5f));
+            float w = wide[k] * (0.55f + 0.9f * r / reach[k]);
+            float across = MathF.Exp(-1.6f * (d / w) * (d / w));
+            float tip = reach[k] * (0.75f + 0.35f * Noise.Value(cu * 14f, cv * 14f, k * 1.7f, seed + 20) + 0.3f * broken);
+            float along = Volume.Saturate((r - edge * 0.5f) / (edge * 0.4f + 0.01f)) * MathF.Pow(Volume.Saturate(1f - r / tip), 0.6f);
+            clear *= 1f - across * along * strength[k];
+        }
+        float tongues = (1f - clear) * Volume.Lerp(1f, streaked, 0.85f) * (0.55f + 0.45f * patchy);
+        float dash = Dashes(r, th, edge, 1f - clear);
+        // All of it together, its colour by how thick the soot lies: black where thick, brown where thin.
+        float soot = 1f - (1f - charred * (0.8f + 0.15f * grit)) * (1f - veil) * (1f - tongues * 0.92f) * (1f - dash * 0.8f);
+        soot *= 0.88f + 0.12f * mottle;
+        float thick = Volume.Saturate(soot * 1.25f);
+        float blotch = Volume.Saturate((mottle - 0.35f) * 1.6f) * charred;
+        cr = Volume.Lerp(0.17f, Volume.Lerp(0.03f, 0.1f, blotch), thick); cg = Volume.Lerp(0.13f, Volume.Lerp(0.028f, 0.085f, blotch), thick); cb = Volume.Lerp(0.095f, Volume.Lerp(0.026f, 0.07f, blotch), thick);
+        a = soot * 0.93f;
+        // Pale ash in patches over the char, most toward its middle.
+        float ash = charred * Volume.Smooth(Volume.Saturate((Noise.Value(u * 7f + 3f, v * 7f - 2f, 9.5f, seed + 30) - 0.45f) / 0.3f)) * Volume.Saturate(1.1f - r / edge) * 0.4f;
+        cr = Volume.Lerp(cr, 0.3f, ash); cg = Volume.Lerp(cg, 0.29f, ash); cb = Volume.Lerp(cb, 0.27f, ash);
+        a *= Volume.Smooth(Volume.Saturate((1f - r) / 0.1f));
+    }
+
+    /// <summary>Short dark dashes, each from where a thrown piece first struck, thinning outward to its end; most just beyond the char, fewer further out, none on it.</summary>
+    float Dashes(float r, float th, float edge, float tongue)
+    {
+        float best = 0f;
+        int i = (int)MathF.Floor((th + MathF.PI) / (2f * MathF.PI) * DashesRound), j = (int)MathF.Floor(r * DashesOut);
+        for (int dj = -3; dj <= 0; dj++)
+            for (int di = -1; di <= 1; di++)
+            {
+                int ci = ((i + di) % DashesRound + DashesRound) % DashesRound, cj = j + dj;
+                if (cj < 0) continue;
+                float rc = (cj + Noise.Speck(ci, cj, seed + 41)) / DashesOut;
+                float likely = (0.03f + 0.22f * tongue) * Volume.Saturate((rc - edge * 0.9f) / 0.05f) * MathF.Exp(-2.5f * MathF.Max(0f, rc - edge));
+                if (Noise.Speck(ci, cj, seed + 40) > likely) continue;
+                float thc = (ci + Noise.Speck(ci, cj, seed + 42)) / DashesRound * 2f * MathF.PI - MathF.PI;
+                float length = (0.012f + 0.05f * Noise.Speck(ci, cj, seed + 43)) * (0.6f + rc);
+                float width = 0.004f + 0.006f * Noise.Speck(ci, cj, seed + 44);
+                float t = (r - rc) / length;
+                if (t < -0.3f || t > 1f) continue;
+                float side = MathF.Abs(r * Angle(th - thc)), w = width * (1f - 0.7f * MathF.Max(t, 0f));
+                float d = t < 0f ? MathF.Sqrt(side * side + t * length * t * length) : side;
+                float one = Volume.Saturate(1f - d / w) * Volume.Saturate((1f - t) * 5f) * (0.5f + 0.5f * Noise.Speck(ci, cj, seed + 45));
+                if (one > best) best = one;
+            }
+        return best;
+    }
+
+    /// <summary>How brightly the mark still glows at (u, v) while fresh: embers where the char is, in cracks and specks, and a few bits burning out along its strongest tongues.</summary>
+    public float Embers(float u, float v)
+    {
+        float r = MathF.Sqrt(u * u + v * v), th = MathF.Atan2(v, u), cu = MathF.Cos(th), cv = MathF.Sin(th);
+        float edge = Reach(cu, cv, th);
+        float body = Volume.Smooth(Volume.Saturate((edge * 0.85f - r) / (edge * 0.5f)));
+        float cracks = 1f - MathF.Abs(2f * Noise.Value(u * 7f, v * 7f, 2.5f, seed + 51) - 1f);
+        float specks = Volume.Saturate((Noise.Value(u * 26f, v * 26f, 5.5f, seed + 52) - 0.62f) / 0.1f);
+        float glow = body * (0.2f + 1.3f * MathF.Pow(cracks, 5f)) + body * specks * 0.7f + 0.35f * body * body;
+        for (int k = 0; k < at.Length; k++)
+        {
+            if (strength[k] < 0.6f) continue;
+            float bx = MathF.Cos(at[k]) * reach[k] * 0.55f, by = MathF.Sin(at[k]) * reach[k] * 0.55f, s = 0.025f + 0.02f * strength[k];
+            float dx = u - bx, dy = v - by;
+            glow += 0.8f * MathF.Exp(-(dx * dx + dy * dy) / (s * s)) * (0.6f + 0.4f * specks + 0.4f * cracks);
+        }
+        return Volume.Saturate(glow);
+    }
+
+    static float Angle(float d)
+    {
+        d %= 2f * MathF.PI;
+        if (d > MathF.PI) d -= 2f * MathF.PI;
+        else if (d < -MathF.PI) d += 2f * MathF.PI;
+        return d;
     }
 }
 

@@ -65,6 +65,29 @@ namespace VolumetricExplosions
             return system;
         }
 
+        /// <summary>
+        /// Dust thrown off airless ground by an engine's jet (see Site.Regolith): streaks flying out low along the ground in straight
+        /// lines, nothing to slow them or hold them up, falling back at the world's own pull. They fly in the world, not with the
+        /// ship whose jet threw them.
+        /// </summary>
+        public static ParticleSystem Regolith(Transform parent, float gravity)
+        {
+            ParticleSystem system = New(parent, "Regolith", Assets.Dust, -15f, 6000);
+            ParticleSystem.MainModule main = system.main;
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            Fall(system, gravity, 0f);
+            Fade(system, new[] { Color.white, Color.white, Color.white }, new[] { 0.9f, 0.6f, 0f }, 0.35f);
+            ParticleSystem.SizeOverLifetimeModule size = system.sizeOverLifetime;
+            size.enabled = true;
+            size.size = new ParticleSystem.MinMaxCurve(1f, new AnimationCurve(new Keyframe(0f, 0.5f), new Keyframe(1f, 2.5f)));
+            var streaks = system.GetComponent<ParticleSystemRenderer>();
+            streaks.renderMode = ParticleSystemRenderMode.Stretch;
+            streaks.velocityScale = 0.07f;
+            streaks.lengthScale = 1.2f;
+            system.Play(false);
+            return system;
+        }
+
         /// <summary>Bits of the thing that blew up, tumbling.</summary>
         public static ParticleSystem Shards(Transform parent, float gravity, float air, bool ground)
         {

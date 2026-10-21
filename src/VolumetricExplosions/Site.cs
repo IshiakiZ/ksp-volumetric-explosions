@@ -64,12 +64,16 @@ namespace VolumetricExplosions
         const float Downhill = 4f;           // metres a second: how fast heavy smoke lying on the ground would run down a slope that was all but sheer (see the mover)
 
         struct Thermal { public float x, y, z, a, w, top, turn; }
-        struct Lamp { public float x, y, z, vx, vy, vz, r, peak, power, age, life, climb, flash; public byte tint; public bool steady, quiet; public int owner; }      // (vx, vy, vz: the fire it is the light of was thrown on at this speed, which the air takes away)
+        struct Lamp { public float x, y, z, vx, vy, vz, r, peak, power, age, life, climb, flash, seed; public byte tint; public bool steady, quiet; public int owner; }      // (vx, vy, vz: the fire it is the light of was thrown on at this speed, which the air takes away)
         struct Fire { public float x, y, z, r, left, total, rate, due, soot, shade, scale, puff, tall, lick, smoky; public byte tint; public int lamp; public bool patch; }      // (smoky: the share of its bits that turn to smoke; patch: one of the patches of spilt fuel burning round about the pool, see AddFire)
-        struct Frag { public float x, y, z, vx, vy, vz, age, life, due, size; public byte tint; public bool white, down; }
+        struct Frag { public float x, y, z, vx, vy, vz, age, life, due, size, downAt; public byte tint; public bool white, down; }
         struct Ball { public float x, y, z, vx, vy, vz, r, speed; }
         struct Jet { public float x, y, z, dx, dy, dz, r, speed, length; }
-        struct Wave { public float x, y, z, start, radius, reach, age, power; public bool ground; }
+        // (cloud: the blast's size, the cube root of its charge in kilograms of TNT, in metres, where its front leaves a cloud behind it in damp air, else 0;
+        // dew: how far the air at its middle is above its dew point, kelvin; lapse: how much less that is a metre higher; fire: its fireball's radius;
+        // gone: how far the front has spread when the last of its cloud is gone. See Shock.)
+        struct Wave { public float x, y, z, start, radius, reach, age, power, cloud, dew, lapse, fire, gone; public bool ground; public float dust, dustSize, dustFrom, dustReach, dustCarry; public Color dustColour; }
+        static readonly int weatherSun = Shader.PropertyToID("_WeatherShadowSun"), weatherFade = Shader.PropertyToID("_WeatherShadowFade");
 
         // ---- where
         public readonly CelestialBody body;
@@ -114,6 +118,7 @@ namespace VolumetricExplosions
         int thermalCount, lampCount, fireCount, fragCount, ballCount, jetCount, waveCount;
         float sound = 340f;                  // the speed of sound here, metres a second
         readonly Light[] lights = new Light[2];
+        static float lampSeed;
         static int lightsOn;
 
         // ---- the surroundings
@@ -129,6 +134,7 @@ namespace VolumetricExplosions
         /// <summary>How thin the air is, as an engine's flame feels it: 0 at the ground, a quarter at a tenth of the air, 1 with none (by how many times thinner, counted in tens).</summary>
         float Thin => vacuum ? 1f : Mathf.Pow(Mathf.Clamp01(-Mathf.Log10(Mathf.Max(air, 1e-4f)) / 3.2f), 1.2f);
         bool vacuum, sunUp;
+        float daylight = 1f;        // (Look) how much of a day it is here: 0 at night, 1 with the sun more than ten degrees up
         Vector3 sunL;                        // towards the sun, in the site's frame
         internal bool cloudy;                // a thermal feeds this patch (ExhaustKind.Thermal): it is cloud, and lit as cloud
         float cloudFar;                      // and how far from where it began to be fed it goes on taking thermals (see Feeds)
@@ -146,6 +152,7 @@ namespace VolumetricExplosions
         float blazeWide, blazeSeen = -100f;      // the widest fire burning on the ship this patch goes along with, and when last (see Blaze)
         int tick, chunks;
         Vector3 camL;
+        float pixelAngle;
         readonly Action<int> chunkBody;
         static Light sunLamp;
         static readonly float[] sine = Sines();
@@ -155,10 +162,77 @@ namespace VolumetricExplosions
                                 && (sparks == null || sparks.particleCount == 0) && (shards == null || shards.particleCount == 0);
 
         /// <summary>A patch of air where something has happened. (rides: a patch that goes along with a ship, for the flames of its engines: see Frame, and Under.)</summary>
+        // ---- what a patch takes, made ahead (see Spares)
+        static System.Threading.Tasks.Task toppingUp;
+
+        /// <summary>
+        /// (The air, once a frame while there are patches.) Keep two patches' worth of grids ready, made on a worker thread a
+        /// patch's worth at a time, and a patch's worth of volume textures, made here, one a frame, and sent to the card at once.
+        /// </summary>
+        internal static void TopUp()
+        {
+            if (toppingUp == null || toppingUp.IsCompleted)
+            {
+                if (Spares.Count<float>(G3) < 4 * 2) toppingUp = System.Threading.Tasks.Task.Run(() => PutBy());
+            }
+            if (Assets.Volume == null) return;
+            if (Spares.Count(G, TextureFormat.RGBA32) < 2) Spares.PutByNew(G, TextureFormat.RGBA32, FilterMode.Bilinear);
+            else if (Spares.Count(A, TextureFormat.RGBA32) < 3) Spares.PutByNew(A, TextureFormat.RGBA32, FilterMode.Bilinear);
+            else if (Spares.Count(A, Assets.Sixteen) < 5) Spares.PutByNew(A, Assets.Sixteen, FilterMode.Bilinear);
+            else if (Spares.Count(A, TextureFormat.R8) < 1) Spares.PutByNew(A, TextureFormat.R8, FilterMode.Point);
+        }
+
+        /// <summary>
+        /// (The warm-up.) Volume textures for so many patches in all put by, each sent to the card once and its name asked for at once,
+        /// out of sight: so that the patches of a climb send their grids without the game's thread waiting (see Sending).
+        /// </summary>
+        internal static void PutByTextures(int patches)
+        {
+            if (Assets.Volume == null) return;
+            // (at most so many made, whatever the counts say)
+            for (int k = 0; k < 12 * patches; k++)
+            {
+                if (Spares.Count(G, TextureFormat.RGBA32) < 2 * patches) Spares.PutByNew(G, TextureFormat.RGBA32, FilterMode.Bilinear);
+                else if (Spares.Count(A, TextureFormat.RGBA32) < 3 * patches) Spares.PutByNew(A, TextureFormat.RGBA32, FilterMode.Bilinear);
+                else if (Spares.Count(A, Assets.Sixteen) < 5 * patches) Spares.PutByNew(A, Assets.Sixteen, FilterMode.Bilinear);
+                else if (Spares.Count(A, TextureFormat.R8) < patches) Spares.PutByNew(A, TextureFormat.R8, FilterMode.Point);
+                else break;
+            }
+            Sending.Name(1000);
+        }
+
+        /// <summary>A patch's worth of grids, put by: those of its fields and its constructor (see them), the same sizes.</summary>
+        static void PutBy()
+        {
+            try
+            {
+                for (int k = 0; k < 4; k++) Spares.Give(new float[G3], true);
+                for (int k = 0; k < 2; k++) Spares.Give(new Color32[G3], true);
+                for (int k = 0; k < 3; k++) Spares.Give(new Color32[A3], true);
+                for (int k = 0; k < 2; k++) Spares.Give(new byte[A3], true);
+                for (int k = 0; k < 2 + 2 * Carried; k++) Spares.Give(new float[A3], true);
+                for (int k = 0; k < 5; k++) Spares.Give(new ushort[A3 * 4], true);
+            }
+            catch (Exception) { }
+        }
+
+        /// <summary>A new patch (in the development build, timed from here: see MadeTimes).</summary>
+        public static Site Make(Plan plan, Transform rides = null)
+        {
+#if DEV
+            Mark(0);
+#endif
+            return new Site(plan, rides);
+        }
+
         public Site(Plan plan, Transform rides = null)
         {
             body = plan.body;
             riding = rides != null;
+            Spares.Patches++; if (riding) Spares.Riding++;
+#if DEV
+            Mark(1);
+#endif
             space = plan.space && !riding;
             if (riding) frame = new Frame(body, plan.world, rides);
             else
@@ -170,10 +244,16 @@ namespace VolumetricExplosions
             root = new GameObject("VolumetricExplosions site") { layer = Recipe.Layer };
             t = root.transform;
             frame.Apply(t);
+#if DEV
+            Mark(2);
+#endif
             cloudMaterial = new Material(Assets.Cloud);
             cloud = Recipe.Drawn(t, "Cloud", cloudMaterial, 0f, Settings.MaxParticles, true);
             glowBack = Recipe.Drawn(t, "Glow", Assets.GlowBehind, 80f, glows.Length, false);
             glowFront = Recipe.Drawn(t, "Flash", Assets.Glow, -60f, glows.Length, false);
+#if DEV
+            Mark(3);
+#endif
             if (Assets.Volume != null)
             {
                 box = new GameObject("Volume") { layer = Recipe.Layer };
@@ -182,11 +262,12 @@ namespace VolumetricExplosions
                 boxRenderer = box.AddComponent<MeshRenderer>();
                 boxRenderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;      // (see the shadow's box, TuneShadow)
                 boxMaterial = new Material(Assets.Volume) { renderQueue = 3000 };
-                volume = new Texture3D(G, G, G, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
-                amounts = new Texture3D(G, G, G, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
-                around = new Texture3D(A, A, A, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
-                flow = new Texture3D(A, A, A, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
-                for (int n = 0; n < rests.Length; n++) rests[n] = new Texture3D(A, A, A, Assets.Sixteen, UnityEngine.Experimental.Rendering.TextureCreationFlags.None) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
+                // (each from a patch that has ended, where there is one: see Spares)
+                volume = Spares.Volume(G, TextureFormat.RGBA32, FilterMode.Bilinear);
+                amounts = Spares.Volume(G, TextureFormat.RGBA32, FilterMode.Bilinear);
+                around = Spares.Volume(A, TextureFormat.RGBA32, FilterMode.Bilinear);
+                flow = Spares.Volume(A, TextureFormat.RGBA32, FilterMode.Bilinear);
+                for (int n = 0; n < rests.Length; n++) rests[n] = Spares.Volume(A, Assets.Sixteen, FilterMode.Bilinear);
                 boxMaterial.SetTexture("_Volume", volume);
                 boxMaterial.SetTexture("_Amount", amounts);
                 boxMaterial.SetTexture("_Around", around);
@@ -194,9 +275,9 @@ namespace VolumetricExplosions
                 boxMaterial.SetTexture("_Flow", flow);
                 for (int n = 0; n < rests.Length; n++) boxMaterial.SetTexture("_Rest" + (char)('A' + n), rests[n]);
                 // (one byte a cell, read cell by cell: see Clearance)
-                clear = new Texture3D(A, A, A, TextureFormat.R8, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Point };
+                clear = Spares.Volume(A, TextureFormat.R8, FilterMode.Point);
                 boxMaterial.SetTexture("_Clear", clear);
-                turns = new Texture3D(A, A, A, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
+                turns = Spares.Volume(A, TextureFormat.RGBA32, FilterMode.Bilinear);
                 boxMaterial.SetTexture("_Turns", turns);
                 boxRenderer.sharedMaterial = boxMaterial;
                 if (Assets.Enlarge != null) shownMaterial = new Material(Assets.Enlarge) { renderQueue = 3000 };
@@ -208,6 +289,9 @@ namespace VolumetricExplosions
                 boxRenderer.receiveShadows = false;
                 boxRenderer.enabled = false;
             }
+#if DEV
+            Mark(4);
+#endif
             chunkBody = RunChunk;
             lightBody = Lighting;
             depositBody = Deposit;
@@ -219,13 +303,19 @@ namespace VolumetricExplosions
             aroundSmooth = AroundSmooth;
             carryBody = () => { long t = System.Diagnostics.Stopwatch.GetTimestamp(); Carry(); Air.Stage[5] = System.Diagnostics.Stopwatch.GetTimestamp() - t; };
             carrySmooth = CarrySmooth;
-            for (int c = 0; c < Carried; c++) { carryNext[c] = new float[A3]; carryNow[c] = new float[A3]; }
-            for (int n = 0; n < cellsRest.Length; n++) cellsRest[n] = new ushort[A3 * 4];
+            for (int c = 0; c < Carried; c++) { carryNext[c] = Spares.Take<float>(A3); carryNow[c] = Spares.Take<float>(A3); }
+            for (int n = 0; n < cellsRest.Length; n++) cellsRest[n] = Spares.Take<ushort>(A3 * 4);
             sunBody = () => { long t = System.Diagnostics.Stopwatch.GetTimestamp(); Follow(gridSun, sunNext, 0.45f, layers[0], layers[1]); Air.Stage[2] = System.Diagnostics.Stopwatch.GetTimestamp() - t; };        // (less than the smoke really blocks: light also finds its way round inside a cloud)
             skyBody = () => { long t = System.Diagnostics.Stopwatch.GetTimestamp(); Follow(gridUp, skyNext, 0.55f, layers[2], layers[3]); Air.Stage[3] = System.Diagnostics.Stopwatch.GetTimestamp() - t; };
             jobBody = Moving;
+#if DEV
+            Mark(5);
+#endif
             if (Native.Ready) NativeBegin();
             if (nativeWork == IntPtr.Zero) NeedRoom();
+#if DEV
+            Mark(6);
+#endif
             Look();
             Wind(plan);
             if (plan.surfaceBelow && !space && !riding) Ground(plan.surfacePoint, plan.surfaceNormal);
@@ -234,7 +324,29 @@ namespace VolumetricExplosions
             float strongest = Mathf.Max(plan.dust.r, Mathf.Max(plan.dust.g, plan.dust.b));
             if (strongest > 0.01f) dustHue = new Vector3(plan.dust.r, plan.dust.g, plan.dust.b) / strongest;
             bx0 = by0 = bz0 = -1f; bx1 = by1 = bz1 = 1f;
+#if DEV
+            Mark(7);
+            {
+                double ms(int a, int b) => (marks[b] - marks[a]) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                // (the fields' time only where Mark(0) was set just before this patch was asked for)
+                string fields = marks[0] != 0 && ms(0, 1) < 1000.0 ? ms(0, 1).ToString("F1") : "?";
+                marks[0] = 0;
+                MadeTimes.Add("at " + Time.realtimeSinceStartup.ToString("F1") + " s, " + (riding ? "riding: " : "plain: ") + "fields " + fields + ", frame " + ms(1, 2).ToString("F1") + ", sprites " + ms(2, 3).ToString("F1") + ", volume " + ms(3, 4).ToString("F1")
+                              + ", grids " + ms(4, 5).ToString("F1") + ", library " + ms(5, 6).ToString("F1") + ", the rest " + ms(6, 7).ToString("F1") + " ms; " + Spares.Report().Split(';')[0]);
+                if (MadeTimes.Count > 60) MadeTimes.RemoveAt(0);
+            }
+#endif
         }
+
+#if DEV
+        static readonly long[] marks = new long[8];
+        /// <summary>(Development build: where the time goes in making a patch, for the last forty made where Mark(0) was set just before.)</summary>
+        public static readonly List<string> MadeTimes = new List<string>();
+        public static void Mark(int k) => marks[k] = System.Diagnostics.Stopwatch.GetTimestamp();
+        public static string Made() { string t = string.Join("\n", MadeTimes.ToArray()) + "\nnow " + Time.realtimeSinceStartup.ToString("F1") + " s"; MadeTimes.Clear(); return t; }
+#endif
+
+        bool givenBack;
 
         public void Dispose()
         {
@@ -246,13 +358,29 @@ namespace VolumetricExplosions
             if (lighting != null) { try { lighting.Wait(); } catch (Exception) { } lighting = null; }
             NativeEnd();
             RemovePieces();
-            if (volume != null) UnityEngine.Object.Destroy(volume);
-            if (amounts != null) UnityEngine.Object.Destroy(amounts);
-            if (around != null) UnityEngine.Object.Destroy(around);
-            if (flow != null) UnityEngine.Object.Destroy(flow);
-            if (clear != null) UnityEngine.Object.Destroy(clear);
-            if (turns != null) UnityEngine.Object.Destroy(turns);
-            foreach (Texture3D rest in rests) if (rest != null) UnityEngine.Object.Destroy(rest);
+            // (its grids and textures kept for the patches to come: nothing is working on them now, see above; once only)
+            if (!givenBack)
+            {
+                givenBack = true;
+                Spares.Give(volume); Spares.Give(amounts); Spares.Give(around); Spares.Give(flow); Spares.Give(clear); Spares.Give(turns);
+                for (int n = 0; n < rests.Length; n++) { Spares.Give(rests[n]); rests[n] = null; }
+                volume = amounts = around = flow = clear = turns = null;
+                Spares.Give(sunThrough); Spares.Give(skyThrough); Spares.Give(sunNext); Spares.Give(skyNext);
+                Spares.Give(cellsA); Spares.Give(cellsB); Spares.Give(cellsC); Spares.Give(cellsD); Spares.Give(cellsE); Spares.Give(cellsClear); Spares.Give(carryKnown);
+                Spares.Give(strainNext); Spares.Give(strainNow);
+                Spares.GiveAll(carryNext); Spares.GiveAll(carryNow); Spares.GiveAll(cellsRest);
+                if (field != null)
+                {
+                    Spares.GiveAll(field);
+                    if (wide != null) foreach (float[][] level in wide) Spares.GiveAll(level);
+                    if (spare != null) foreach (float[][] two in spare) Spares.GiveAll(two);
+                    Spares.GiveAll(layers); Spares.Give(anything); Spares.Give(roundSmoke); Spares.Give(roundPale); Spares.Give(roundDust);
+                    Spares.GiveAll(carryTemp); Spares.Give(clearWork);
+                }
+                foreach (float[][][] part in apart) if (part != null) foreach (float[][] level in part) Spares.GiveAll(level);
+                Spares.GiveAll(stands); Spares.GiveAll(rows);
+                sunThrough = skyThrough = sunNext = skyNext = strainNext = strainNow = null;
+            }
             if (boxMaterial != null) UnityEngine.Object.Destroy(boxMaterial);
             if (motionMaterial != null) UnityEngine.Object.Destroy(motionMaterial);
             if (shownMaterial != null) UnityEngine.Object.Destroy(shownMaterial);
@@ -266,19 +394,39 @@ namespace VolumetricExplosions
         /// <summary>Hand the grid that has just been finished to the shader, with the box it fills.</summary>
         void ShowVolume()
         {
-            volume.SetPixels32(cellsA);
-            volume.Apply(false);
-            amounts.SetPixels32(cellsB);
-            amounts.Apply(false);
-            around.SetPixels32(cellsC);
-            around.Apply(false);
-            flow.SetPixels32(cellsD);
-            flow.Apply(false);
-            for (int n = 0; n < rests.Length; n++) { rests[n].SetPixelData(cellsRest[n], 0); rests[n].Apply(false); }
-            clear.SetPixelData(cellsClear, 0);
-            clear.Apply(false);
-            turns.SetPixels32(cellsE);
-            turns.Apply(false);
+#if DEV
+            long q0 = System.Diagnostics.Stopwatch.GetTimestamp();
+#endif
+            // (sent from the render thread by the library where it can, see Sending; else, and the first time for each texture,
+            // through Unity, which also makes the texture known to the library for the next)
+            if (!SendByLibrary())
+            {
+                volume.SetPixels32(cellsA);
+                amounts.SetPixels32(cellsB);
+                around.SetPixels32(cellsC);
+                flow.SetPixels32(cellsD);
+                for (int n = 0; n < rests.Length; n++) rests[n].SetPixelData(cellsRest[n], 0);
+                clear.SetPixelData(cellsClear, 0);
+                turns.SetPixels32(cellsE);
+                volume.Apply(false);
+                amounts.Apply(false);
+                around.Apply(false);
+                flow.Apply(false);
+                for (int n = 0; n < rests.Length; n++) rests[n].Apply(false);
+                clear.Apply(false);
+                turns.Apply(false);
+                if (Sending.Ready)
+                {
+                    Sending.Sent(volume); Sending.Sent(amounts); Sending.Sent(around); Sending.Sent(flow); Sending.Sent(clear); Sending.Sent(turns);
+                    for (int n = 0; n < rests.Length; n++) Sending.Sent(rests[n]);
+                }
+#if DEV
+                ShowTimes[2] += 1;
+#endif
+            }
+#if DEV
+            ShowTimes[0] += (System.Diagnostics.Stopwatch.GetTimestamp() - q0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency; ShowTimes[3] += 1;
+#endif
             var size = new Vector3(nx1 - nx0, ny1 - ny0, nz1 - nz0);
             var middle = new Vector3((nx0 + nx1) * 0.5f, (ny0 + ny1) * 0.5f, (nz0 + nz1) * 0.5f);
             boxMiddle = middle;
@@ -291,10 +439,28 @@ namespace VolumetricExplosions
             boxRenderer.enabled = true;
         }
 
+        /// <summary>The grid just made, sent by the library (see Sending), if every one of this patch's textures has been on the card before.</summary>
+        bool SendByLibrary()
+        {
+            if (nativeWork == IntPtr.Zero || !Sending.Ready) return false;
+            if (!Sending.Known(volume) || !Sending.Known(amounts) || !Sending.Known(around) || !Sending.Known(flow) || !Sending.Known(clear) || !Sending.Known(turns)) return false;
+            for (int n = 0; n < rests.Length; n++) if (!Sending.Known(rests[n])) return false;
+            int sixteen = Assets.SixteenAsHalves ? 3 : 2;
+            bool ok = Sending.Put(volume, 0, heldAt[cellsA], G3 * 4) && Sending.Put(amounts, 0, heldAt[cellsB], G3 * 4)
+                   && Sending.Put(around, 0, heldAt[cellsC], A3 * 4) && Sending.Put(flow, 0, heldAt[cellsD], A3 * 4)
+                   && Sending.Put(clear, 1, heldAt[cellsClear], A3) && Sending.Put(turns, 0, heldAt[cellsE], A3 * 4);
+            for (int n = 0; ok && n < rests.Length; n++) ok = Sending.Put(rests[n], sixteen, restAt[n], A3 * 8);
+            return ok;
+        }
+
         /// <summary>The settings of the volume that change every frame.</summary>
         void TuneVolume()
         {
             if (box == null || !boxRenderer.enabled) return;
+            // (the shader without the testing switches' code whenever none is set: the walk 6-13 % cheaper, the same picture to the bit;
+            // research/rendering/experiments/smoke-shader-variants.md. The values set on the material stay with it.)
+            Shader want = Assets.VolumeRelease != null && Settings.TestView == 0f && Settings.TestRounds == 0f ? Assets.VolumeRelease : Assets.Volume;
+            if (want != null && boxMaterial.shader != want) boxMaterial.shader = want;
             // The grid in use was made from the smoke as it was a moment ago; the shader carries it on by as far as
             // the smoke has moved since (see Carry), and where the whole cloud is flying along, the box goes with it
             // (see shownDrift). (For testing: 1 leaves the smoke where the grid has it.)
@@ -312,6 +478,10 @@ namespace VolumetricExplosions
             bool within = eye.x > gx0 && eye.y > gy0 && eye.z > gz0 && eye.x < gx0 + G / gix && eye.y < gy0 + G / giy && eye.z < gz0 + G / giz;
             cloudMaterial.renderQueue = within ? 2995 : 3001;
             float billows = Mathf.Clamp01(grip * 1.6f);                           // it takes air to make smoke billow: none in a vacuum, less where the air is thin
+            // (Water thrown up by a blast at the sea's surface is not smoke: spray and mist, bright and finely grained, not rolled into
+            // big rounded billows. Cut as smoke is, a splash read as one soft lump stamped over and over, grey in its own shade: the
+            // owner, 2026-10-20, "a very repetitive volumetric texture". So cut less deep, and shaded less by its own lumps.)
+            if (seaBorn) billows *= Mathf.Clamp01(Settings.SeaBillows);
             float repeat = detailRepeat;                                          // fixed for the site: detail that changed scale with the cloud would swim
             Vector3 gone = new Vector3((float)shownGoneTurned.x, (float)shownGoneTurned.y, (float)shownGoneTurned.z);
             boxMaterial.SetVector("_VolDetail", new Vector4(gone.x, gone.y, gone.z, 1f / repeat));
@@ -325,11 +495,12 @@ namespace VolumetricExplosions
             // Drawn at half size and enlarged, or straight onto the screen. At half size a pixel is two of the screen's
             // wide, so steps may be twice as long and the smallest lumps drawn twice as big.
             // (A ship's flames are drawn whole, not at half size: their fine tongues and streaks are what makes them fire,
-            // and enlarged from half size they were a blur of colour. Their box is small; it costs little.)
+            // and enlarged from half size they were a blur of colour. Their box is small; it costs little. Except where the
+            // ships' boxes cover much of the screen: see Layers.ShipsHalf.)
             // (Since 0.5.0 every patch's smoke is put on the screen together, in depth order, by Air's Layers: the box itself is not
             // drawn then, only walked into a picture of its own. See Layers.)
             bool layered = Air.Layered;
-            halved = Settings.Half && !riding && (layered || shownMaterial != null);
+            halved = Settings.Half && (riding ? layered && Layers.ShipsHalf : layered || shownMaterial != null);
             Material shown = halved && !layered ? shownMaterial : boxMaterial;
             if (boxRenderer.sharedMaterial != shown) boxRenderer.sharedMaterial = shown;
             if (boxRenderer.forceRenderingOff != layered) boxRenderer.forceRenderingOff = layered;
@@ -343,7 +514,7 @@ namespace VolumetricExplosions
             boxMaterial.SetVector("_VolPeak", new Vector4(halved ? 1f : 0f, smooth, Settings.TestLattice, fullLength));
             // (smoke too thin to see is passed over: up to this much of what is behind it hidden, in all, along a ray. See the shader.)
             // (and how long ago the grid in use was made: the billows have gone on taking their turns since)
-            boxMaterial.SetVector("_VolThin", new Vector4(Mathf.Clamp(Settings.Thin, 0f, 8f) / 255f, Settings.TestFreeze >= 2f ? 0f : Mathf.Clamp(time - shownTime, 0f, 0.3f), 0f, 0f));
+            boxMaterial.SetVector("_VolThin", new Vector4(Mathf.Clamp(Settings.Thin, 0f, 8f) / 255f, Settings.TestFreeze >= 2f ? 0f : Mathf.Clamp(time - shownTime, 0f, 0.3f), Settings.TestRounds, 0f));
             boxMaterial.SetVector("_VolSun", new Vector4(sunR, sunG, sunB, 1.5f));
             boxMaterial.SetVector("_VolSunDir", (Vector3)(frame.east * sunL.x + frame.up * sunL.y + frame.north * sunL.z));
             Vector3 sunTurned = ToGrid(sunL);
@@ -384,7 +555,8 @@ namespace VolumetricExplosions
                 // (An engine's flame is far brighter than a fire in the open: several times as bright as white paper in the sun.)
                 // (and where the air is thin the gas is thin, and what is seen of it is its light alone: brighter for what there is of it;
                 // not a re-entry glow's, whose brightness its maker gives by how hot the air is made)
-                float gain = riding ? JetShines[n - 1] * Plumes[Mathf.Min((int)flameKind, FireKinds - 1)].shines * (flameKind == PlasmaKind ? 1f : Mathf.Lerp(1f, 3f, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.25f, 0.6f, Thin)))) : 1f;
+                float gain = !riding ? 1f : flameKind == PlasmaKind ? PlasmaShines[n - 1]
+                           : JetShines[n - 1] * Plumes[Mathf.Min((int)flameKind, FireKinds - 1)].shines * Mathf.Lerp(1f, 3f, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.25f, 0.6f, Thin)));
                 boxMaterial.SetVector("_VolHot" + n, new Vector4(gain * Mathf.Lerp(Flames[at], Flames[at + 3], mix), gain * Mathf.Lerp(Flames[at + 1], Flames[at + 4], mix), gain * Mathf.Lerp(Flames[at + 2], Flames[at + 5], mix), 0f));
             }
         }
@@ -406,7 +578,9 @@ namespace VolumetricExplosions
             if (time - blazeSeen < 1f) biggest = Mathf.Max(biggest, 0.6f * blazeWide); else blazeWide = 0f;
             if (biggest <= 0f) biggest = 0.6f;
             float size = Mathf.Clamp(biggest, 0.3f, 2.5f);
-            boxMaterial.SetVector(fireNote, new Vector4(time * 1.8f, 1f / size, vacuum ? 0.3f : 0.9f, Settings.TestFire >= 1f ? 0f : 1f));
+            // (w: 2 draws a fire in the open folded, its light stopped by its smoke, its hot smoke shining, as since 2026-10-18; 1 as
+            // until then, for TestFire 2; 0 as a glow, as until 2026-10-10, for TestFire 1; 3 folded but lit as on that morning, for TestDusk 1)
+            boxMaterial.SetVector(fireNote, new Vector4(time * 1.8f, 1f / size, vacuum ? 0.3f : 0.9f, Settings.TestFire == 1f ? 0f : Settings.TestFire == 2f ? 1f : Settings.TestDusk == 1f ? 3f : 2f));
             // A fire that burns where it is, fed from its fuel as fast as its gas rises off it, stands where it is from one grid to the
             // next; flame that goes somewhere (a fireball rising, burning wreckage flying, a burning ship going by) is carried on with
             // its gas between grids, as smoke is (see _VolFireGone in volume.glsl). (Carried on as smoke is, a pool's fire rose off
@@ -427,6 +601,10 @@ namespace VolumetricExplosions
         // several times as bright as white paper in the sun and the cooled orange end of it a dull glow. (Nearly the same at
         // every heat, as it was at first, the orange end was as bright as the core and the picture cut it off to a flat yellow.)
         static readonly float[] JetShines = { 0.28f, 0.67f, 1.4f, 2.8f };
+        // (A re-entry glow's colours at its four heats: bright, but within what the film shows, so that its gold, orange and
+        // pink-violet are seen. With an engine's gains and its own 2.4, as until 2026-10-18, its hottest was 6.7 times white paper
+        // in the sun before the steep end: every part of it white, and the film's glow a halo round it many times its size.)
+        static readonly float[] PlasmaShines = { 1.44f, 1.76f, 2.24f, 2.72f };
 
         /// <summary>
         /// What each kind of engine's flame is like: how it is made (Flame, in SiteExhaust) and how it is drawn (TuneJet).
@@ -454,18 +632,31 @@ namespace VolumetricExplosions
             public float endCool;       // how much cooler its far end is drawn
             public float streaks;       // how far the pattern's streaks differ in heat at the nozzle,
             public float streaksFar;    // and far down the jet
+            public float outer;         // how wide and how long its plume shows where there is no air to hold it in: 1 kerosene's (its soot
+                                        // glows as the gas spreads: a broad orange cone many nozzles long), more a solid motor's (burning
+                                        // metal), next to nothing hydrogen's (clear gas, cold as soon as it has spread)
         }
         static readonly Plume[] Plumes =
         {
-            /* fuel (kerosene)  */ new Plume { dense = 1f,    hot = 1.9f, cool = 0.41f, edge = 0.75f, shines = 1f,   tongues = 0.8f,  soot = 0.05f,  diamonds = 0.12f, count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0f,   endTorn = 0.7f, endCool = 0.45f, streaks = 1.25f, streaksFar = 4f },
-            /* solid fuel       */ new Plume { dense = 1.5f,  hot = 2f,   cool = 0.41f, edge = 0.6f,  shines = 1.3f, tongues = 0.75f, soot = 0.012f, diamonds = 0f,    count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0f,   endTorn = 0.7f, endCool = 0.4f,  streaks = 1.25f, streaksFar = 4f },
-            /* monopropellant   */ new Plume { dense = 0.12f, hot = 1f,   cool = 0.8f,  edge = 0.3f,  shines = 1.5f, tongues = 0.25f, soot = 0f,     diamonds = 0f,    count = 4f, body = 3f,   clear = 0.5f, soft = 0.8f, fades = 1f,   endTorn = 0.2f, endCool = 0.3f,  streaks = 0.8f,  streaksFar = 1.5f },
-            /* (electrical)     */ new Plume { dense = 1f,    hot = 1.9f, cool = 0.41f, edge = 0.75f, shines = 1f,   tongues = 0.8f,  soot = 0.05f,  diamonds = 0.12f, count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0f,   endTorn = 0.7f, endCool = 0.45f, streaks = 1.25f, streaksFar = 4f },
-            /* hydrogen         */ new Plume { dense = 0.08f, hot = 1.5f, cool = 0.6f,  edge = 0.3f,  shines = 0.8f, tongues = 0.1f,  soot = 0f,     diamonds = 1.6f,  count = 5f, body = 7f,   clear = 0.7f, soft = 1f,   fades = 1f,   endTorn = 0f,   endCool = 0.3f,  streaks = 0.6f,  streaksFar = 1f },
-            /* methane          */ new Plume { dense = 0.25f, hot = 1.6f, cool = 0.45f, edge = 0.5f,  shines = 1.6f, tongues = 0.4f,  soot = 0f,     diamonds = 0.5f,  count = 4f, body = 4f,   clear = 0.8f, soft = 0.5f, fades = 0.7f, endTorn = 0.4f, endCool = 0.4f,  streaks = 1f,    streaksFar = 2.5f },
-            /* fuels that keep  */ new Plume { dense = 0.3f,  hot = 1.6f, cool = 0.55f, edge = 0.5f,  shines = 1f,   tongues = 0.4f,  soot = 0.02f,  diamonds = 0.15f, count = 4f, body = 3f,   clear = 0.7f, soft = 0.5f, fades = 0.8f, endTorn = 0.3f, endCool = 0.4f,  streaks = 1f,    streaksFar = 2.5f },
-            /* a reactor's      */ new Plume { dense = 0.15f, hot = 1f,   cool = 0.7f,  edge = 0.3f,  shines = 1.5f, tongues = 0.2f,  soot = 0f,     diamonds = 0f,    count = 4f, body = 3f,   clear = 0.5f, soft = 1f,   fades = 1f,   endTorn = 0f,   endCool = 0.3f,  streaks = 0.6f,  streaksFar = 1f },
-            /* re-entry glow    */ new Plume { dense = 0.3f,  hot = 1.2f, cool = 0.5f,  edge = 0.5f,  shines = 2.4f, tongues = 0.8f,  soot = 0f,     diamonds = 0f,    count = 4f, body = 2.5f, clear = 0.8f, soft = 0.6f, fades = 1f,   endTorn = 0.6f, endCool = 0.4f,  streaks = 1.4f,  streaksFar = 3f },
+            /* fuel (kerosene)  */ new Plume { dense = 1f,    hot = 1.9f, cool = 0.41f, edge = 0.75f, shines = 1f,   tongues = 0.8f,  soot = 0.05f,  diamonds = 0.12f, count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0f,   endTorn = 0.7f, endCool = 0.45f, streaks = 1.25f, streaksFar = 4f, outer = 1f },
+            /* solid fuel       */ new Plume { dense = 1.5f,  hot = 2f,   cool = 0.41f, edge = 0.6f,  shines = 1.3f, tongues = 0.75f, soot = 0.012f, diamonds = 0f,    count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0f,   endTorn = 0.7f, endCool = 0.4f,  streaks = 1.25f, streaksFar = 4f, outer = 1.25f },
+            /* monopropellant   */ new Plume { dense = 0.12f, hot = 1f,   cool = 0.8f,  edge = 0.3f,  shines = 1.5f, tongues = 0.25f, soot = 0f,     diamonds = 0f,    count = 4f, body = 3f,   clear = 0.5f, soft = 0.8f, fades = 1f,   endTorn = 0.2f, endCool = 0.3f,  streaks = 0.8f,  streaksFar = 1.5f, outer = 0.15f },
+            /* (electrical)     */ new Plume { dense = 1f,    hot = 1.9f, cool = 0.41f, edge = 0.75f, shines = 1f,   tongues = 0.8f,  soot = 0.05f,  diamonds = 0.12f, count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0f,   endTorn = 0.7f, endCool = 0.45f, streaks = 1.25f, streaksFar = 4f, outer = 1f },
+            /* hydrogen         */ new Plume { dense = 0.08f, hot = 1.5f, cool = 0.6f,  edge = 0.3f,  shines = 0.8f, tongues = 0.1f,  soot = 0f,     diamonds = 1.6f,  count = 5f, body = 7f,   clear = 0.7f, soft = 1f,   fades = 1f,   endTorn = 0f,   endCool = 0.3f,  streaks = 0.6f,  streaksFar = 1f, outer = 0.1f },
+            /* methane          */ new Plume { dense = 0.25f, hot = 1.6f, cool = 0.45f, edge = 0.5f,  shines = 1.6f, tongues = 0.4f,  soot = 0f,     diamonds = 0.5f,  count = 4f, body = 4f,   clear = 0.8f, soft = 0.5f, fades = 0.7f, endTorn = 0.4f, endCool = 0.4f,  streaks = 1f,    streaksFar = 2.5f, outer = 0.35f },
+            /* fuels that keep  */ new Plume { dense = 0.3f,  hot = 1.2f, cool = 0.55f, edge = 0.5f,  shines = 0.8f, tongues = 0.4f,  soot = 0.02f,  diamonds = 0.55f, count = 4f, body = 3f,   clear = 0.7f, soft = 0.5f, fades = 0.8f, endTorn = 0.3f, endCool = 0.4f,  streaks = 1f,    streaksFar = 2.5f, outer = 0.35f },
+            /* a reactor's      */ new Plume { dense = 0.15f, hot = 1f,   cool = 0.7f,  edge = 0.3f,  shines = 1.5f, tongues = 0.2f,  soot = 0f,     diamonds = 0f,    count = 4f, body = 3f,   clear = 0.5f, soft = 1f,   fades = 1f,   endTorn = 0f,   endCool = 0.3f,  streaks = 0.6f,  streaksFar = 1f, outer = 0.2f },
+            // (A re-entry glow's shock layer is the air rammed hot just ahead of the face: a smooth, steady layer with a sharp
+            // edge, not a flame torn by the air at its rim; what tears is the wake. Soft-edged and torn as a flame, as until
+            // 2026-10-21 (soft 0.6, tongues 0.8), the glow round a craft was "a soft, smoky glowing cloud, brightest nowhere in
+            // particular" (the main chat, after the owner's "that fire doesnt look like a real re-entry, does it?"); see Plasma.)
+            /* re-entry glow    */ new Plume { dense = 0.3f,  hot = 1.2f, cool = 0.5f,  edge = 0.5f,  shines = 2.4f, tongues = 0.35f, soot = 0f,     diamonds = 0f,    count = 4f, body = 2.5f, clear = 0.8f, soft = 0.25f, fades = 1f,  endTorn = 0.6f, endCool = 0.4f,  streaks = 1.4f,  streaksFar = 3f, outer = 0f },
+            // (since 0.8.0) A jet's afterburner: thin, clear flame, blue-violet where it burns and yellow-white in its row of shock
+            // diamonds, where the gas is squeezed and the fuel left in it lights again, with an orange tail; most of what shows is
+            // the diamonds. And a kerosene engine's igniter (triethylaluminium and triethylborane, which light by themselves in air):
+            // the green of the boron, for the moment the engine starts.
+            /* an afterburner   */ new Plume { dense = 0.3f,  hot = 1.3f, cool = 0.5f,  edge = 0.5f,  shines = 1f,   tongues = 0.3f,  soot = 0f,     diamonds = 1.2f,  count = 6f, body = 3f,   clear = 0.7f, soft = 0.6f, fades = 0.9f, endTorn = 0.35f, endCool = 0.4f, streaks = 0.9f,  streaksFar = 2f, outer = 0.2f },
+            /* an igniter's     */ new Plume { dense = 0.8f,  hot = 1.5f, cool = 0.45f, edge = 0.6f,  shines = 1.4f, tongues = 0.6f,  soot = 0f,     diamonds = 0f,    count = 4f, body = 2f,   clear = 1f,   soft = 0.3f, fades = 0.6f, endTorn = 0.6f, endCool = 0.4f,  streaks = 1.2f,  streaksFar = 3f, outer = 0.5f },
         };
 
         // ---- how a ship's flames are drawn (see jetPattern in tools/shaderpack/volume.glsl)
@@ -496,7 +687,10 @@ namespace VolumetricExplosions
                 jetStrongest = 0f; jetMouths = 0;
                 return;
             }
-            float thin = Thin;
+            // (A re-entry glow is not thinned by the thin air it is made in: it is there because of that air, rushing past at kilometres a
+            // second, and its streaks and torn wake are the flow's. Thinned as an engine's flame is, as until 2026-10-18, at 70 km it was
+            // drawn as a clear, smooth bell of light: "glowing volumetric things", the owner, 2026-10-17.)
+            float thin = jetKind == PlasmaKind ? 0f : Thin;
             // Thirty of its own sizes a second at the nozzle, and a quarter of that by the flame's end: half its own size in a
             // frame there, which the game's smoothing between frames makes streaks of, as the eye makes of gas going that
             // fast; and by the flame's end slow enough that its lumps are seen, and seen to go. (Six, until 0.6.4: the
@@ -509,6 +703,8 @@ namespace VolumetricExplosions
             boxMaterial.SetVector(jetNote, new Vector4(axis.x, axis.y, axis.z, jetScroll));
             boxMaterial.SetVector(jetFromNote, new Vector4(from.x, from.y, from.z, jetNozzle));
             Plume look = Plumes[Mathf.Clamp(jetKind, 0, FireKinds - 1)];
+            // (a re-entry glow drawn as until 2026-10-21, for setting one against the other: soft-edged and torn as a flame)
+            if (jetKind == PlasmaKind && Settings.TestPlasma == 1f) { look.soft = 0.6f; look.tongues = 0.8f; }
             // (how far the flame reaches in this air: see Flame)
             float reach = jetLong * Mathf.Lerp(1f, 0.45f, thin);
             boxMaterial.SetVector(jetLookNote, new Vector4(look.tongues * (1f - thin), look.soot * (1f - thin), look.diamonds * (1f - thin) * (1f - thin), size));
@@ -521,7 +717,14 @@ namespace VolumetricExplosions
             // (A diamond's own glow: so much that looked through, across the jet, it hides about a third of what is behind it,
             // whatever the nozzle's size. And cooled gas is gone from sight for the clear flames, and for every flame where the
             // air is thin: there is no soot to see without the air it is made in.)
-            boxMaterial.SetVector(jetGlowNote, new Vector4(0.36f, Mathf.Lerp(look.fades, 1f, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.1f, 0.6f, thin))), 0f, 0f));
+            // (And the diamonds stand where the gas puts them: a jet comes out of its nozzle at about the pressure of the air at the
+            // ground, and where the air is thinner it goes on spreading until it is at the air's, and its shock cells are longer
+            // and wider for it, about as the square root of how much thinner the air is (Prandtl's spacing of the cells grows
+            // with the jet's own speed once it has spread, and its width with that): a climbing rocket's diamonds draw apart,
+            // fewer within the flame, and are gone into one long core by the time the air is a twentieth as thick. Until 0.8.0
+            // they stood a nozzle's width and a third apart at any height. In air thicker than the ground's, closer.)
+            float spread = Mathf.Clamp(Mathf.Sqrt(1f / Mathf.Max(air, 0.04f)), 0.75f, 5f);
+            boxMaterial.SetVector(jetGlowNote, new Vector4(0.36f, Mathf.Lerp(look.fades, 1f, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.1f, 0.6f, thin))), spread, Mathf.Pow(spread, 0.4f)));
             for (int n = 0; n < jetAtNotes.Length; n++)
             {
                 if (n >= jetMouths) { boxMaterial.SetVector(jetAtNotes[n], Vector4.zero); continue; }
@@ -610,7 +813,10 @@ namespace VolumetricExplosions
             shadeMaterial.SetVector(shadowY, into.GetRow(1));
             shadeMaterial.SetVector(shadowZ, into.GetRow(2));
             shadeMaterial.SetVector(shadowSun, new Vector4(sunBox.x, sunBox.y, sunBox.z, 0.7f * day));
-            shadeMaterial.SetVector(shadowSunWorld, new Vector4(sunWorld.x, sunWorld.y, sunWorld.z, 0f));
+            // (and how wide the sun looks from here, for how soft the shadow is by how far it falls: see the shader)
+            CelestialBody star = Planetarium.fetch != null ? Planetarium.fetch.Sun : null;
+            float wideSun = star != null ? (float)(2.0 * star.Radius / System.Math.Max((star.position - frame.origin).magnitude, star.Radius * 2.0)) : 0.0093f;
+            shadeMaterial.SetVector(shadowSunWorld, new Vector4(sunWorld.x, sunWorld.y, sunWorld.z, wideSun));
             // (carried on between one grid and the next as the smoke itself is: see the shader)
             shadeMaterial.SetTexture("_Volume", volume);
             shadeMaterial.SetTexture("_Flow", flow);
@@ -687,6 +893,11 @@ namespace VolumetricExplosions
         public bool Halved => halved && !Air.Layered && box != null && boxRenderer.enabled;
         /// <summary>Whether this site has smoke to draw as a volume (a grid has been made for it), and where the middle of its box is.</summary>
         public bool Shown => box != null && boxRenderer.enabled;
+        /// <summary>(How many patches with smoke are nearer the camera than this one, as the air last ranked them: see Relight.)</summary>
+        public int GridRank;
+        float awayNow;
+        public float AwayNow => awayNow;
+        public bool SunUp => sunUp;
         public Vector3 BoxCentre => box.transform.position;
         public Material Marching => boxMaterial;
 
@@ -791,7 +1002,22 @@ namespace VolumetricExplosions
         /// <summary>How far from the camera the farthest corner of the cloud is.</summary>
         public float Farthest => camL.magnitude + 0.5f * Mathf.Sqrt((bx1 - bx0) * (bx1 - bx0) + (by1 - by0) * (by1 - by0) + (bz1 - bz0) * (bz1 - bz0));
 
-        public void Place() => frame.Apply(t);
+        Part ridesPart;
+        bool ridesLooked;
+
+        public void Place()
+        {
+            frame.Apply(t);
+            // (a patch that goes along with its ship is drawn where that ship is drawn, and one kept beside the ship flown in space
+            // where the ship flown is: see Riders. The ship is looked up through the part it rides, which outlasts the ship it was
+            // in when a craft splits or docks)
+            if (riding)
+            {
+                if (!ridesLooked && frame.rides != null) { ridesLooked = true; ridesPart = frame.rides.GetComponent<Part>(); }
+                Riders.Carry(t, ridesPart != null ? ridesPart.vessel : null);
+            }
+            else if (space) Riders.Along(t);
+        }
 #if DEV
         public Vector3 Local(Vector3d world) { frame.Refresh(); return frame.ToLocal(world); }
         public Vector3d World(Vector3 local) { frame.Refresh(); return frame.ToWorld(local); }
@@ -828,8 +1054,9 @@ namespace VolumetricExplosions
             Vector3 drawn = t.TransformPoint(at), meant = (Vector3)frame.ToWorld(at);
             return "a place 10 m along the patch's first axis is drawn " + (drawn - meant).magnitude.ToString("F2") + " m from where the frame has it; the root's own right is " + Vector3.Dot(t.right, (Vector3)frame.east).ToString("F2") + " along the frame's 'east'";
         }
-        public Vector3d FrameOrigin { get { frame.Refresh(); return frame.origin; } }
 #endif
+        /// <summary>Where the patch's frame is just now, in the world (the warm-up finds its own patches by it).</summary>
+        public Vector3d FrameOrigin { get { frame.Refresh(); return frame.origin; } }
 
         /// <summary>Whether a new explosion belongs in this patch of air.</summary>
         public bool Takes(Plan plan)
@@ -888,19 +1115,31 @@ namespace VolumetricExplosions
 
             Vector3d sunward = (Planetarium.fetch.Sun.position - here).normalized;
             sunL = frame.DirToLocal(sunward);
-            float day = space ? 1f : Mathf.Clamp01(sunL.y * 6f + 0.3f);
+            // (high up, the sun is up for longer: it is reckoned over the patch's own horizon, see SunOverHorizon)
+            float lifted = SunOverHorizon(here, sunL.y);
+            float day = space ? 1f : Mathf.Clamp01(lifted * 6f + 0.3f);
             sunUp = day > 0.02f;
+            daylight = day;
             if (sunLamp == null && Sun.Instance != null) sunLamp = Sun.Instance.GetComponent<Light>();
             Color sun = sunLamp != null ? sunLamp.color * sunLamp.intensity : new Color(0.9f, 0.9f, 0.9f);
             // Through a lot of air the low sun is warmer. Light is added up here as amounts of light, not as screen colours.
-            float low = body.atmosphere && !space ? Mathf.Clamp01(1f - sunL.y * 4f) : 0f;
+            float low = body.atmosphere && !space ? Mathf.Clamp01(1f - lifted * 4f) : 0f;
             sunR = sun.r * sun.r * day;
             sunG = sun.g * sun.g * day * (1f - 0.35f * low);
             sunB = sun.b * sun.b * day * (1f - 0.62f * low);
+            // (and only as much of it as the weather's clouds let through: Natural Weather dims the sun only while the cameras
+            // draw, which is not when it is looked at here, and says by how much in what it gives its shaders. Before, smoke under
+            // an overcast was lit by the full sun.)
+            Vector4 shading = Shader.GetGlobalVector(weatherSun), fade = Shader.GetGlobalVector(weatherFade);
+            float hidden = 0f, clearDay = 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB;
+            if (shading.w > 0.5f) { float through = Mathf.Clamp01(fade.x); hidden = 1f - through; through *= through; sunR *= through; sunG *= through; sunB *= through; }
             Color sky = RenderSettings.ambientLight;
             ambR = sky.r * sky.r + 0.0004f;
             ambG = sky.g * sky.g + 0.0004f;
             ambB = sky.b * sky.b + 0.0005f;
+            // (what the clouds take of the sun's light is not lost: it comes from the whole sky instead, and grey. In the open
+            // the sky gives about a sixth of what the sun does, under an overcast about a third of what the sun would have)
+            if (hidden > 0f) { float spread = 0.3f * hidden * clearDay; ambR = Mathf.Max(ambR, 0.97f * spread); ambG = Mathf.Max(ambG, spread); ambB = Mathf.Max(ambB, 1.06f * spread); }
             Breezes();
         }
 
@@ -941,7 +1180,7 @@ namespace VolumetricExplosions
         void Weathered(bool now)
         {
             // (a player who asks for still air has it, whatever the weather says)
-            if (Sources.Wind == null || space || vacuum || Settings.Wind <= 0f || Settings.Breeze == 0 || Settings.TestWind >= 0f) { weathered = false; return; }
+            if (Sources.Wind == null || space || vacuum || Settings.Wind <= 0f || Settings.Breeze == 0 || Settings.TestWind >= 0f) { weathered = false; heights = null; return; }
             Sources.Breeze breeze;
             double ut = Planetarium.GetUniversalTime();
             float floor = hasGround ? GroundAt(0f, 0f) : 0f;
@@ -949,6 +1188,12 @@ namespace VolumetricExplosions
             catch (Exception) { weathered = false; return; }
             try { WeatherAloft(ut, floor, breeze); }
             catch (Exception) { }
+            bool one = hasGround || riding;
+#if DEV
+            one |= oneWind;
+#endif
+            if (one) heights = null;
+            else if (now || heights == null || time - heightsAsked > 5f) { heightsAsked = time; try { ByHeight(ut); } catch (Exception) { heights = null; } }
             Vector3 local = frame.DirToLocal(breeze.wind);
             float speed = Mathf.Sqrt(local.x * local.x + local.z * local.z) * Settings.Wind;
             float x = speed > 1e-3f ? local.x / speed * Settings.Wind : windX, z = speed > 1e-3f ? local.z / speed * Settings.Wind : windZ;
@@ -962,6 +1207,36 @@ namespace VolumetricExplosions
             gustScale += (gusts - gustScale) * k;
             calm = (0.35f + 0.18f * wind10) * Mathf.Min(1f, grip);
         }
+
+        /// <summary>
+        /// (Since 0.8.0.) A patch with no ground under it (a trail's, high up) takes the weather's wind at each height in it, and not
+        /// the wind at its middle for all of it. Aloft the wind turns and strengthens with height (towards the jet stream, and
+        /// sharply through a thin layer of shear here and there), and a trail climbing through it is kinked and twisted within
+        /// minutes, as every launch's is in the films taken after it; given one wind each, the patches a trail is laid in (two
+        /// kilometres of it each, at speed) drifted apart as blocks and the trail broke at their joins. Asked every five seconds
+        /// at every 250 m from 2.5 km under the patch's middle to 2.5 km over it (beyond that, the end's), in the patch's axes.
+        /// </summary>
+        void ByHeight(double ut)
+        {
+            int count = (int)(2f * HeightSpan / HeightStep) + 1;
+            float[] e = new float[count], n = new float[count];
+            for (int i = 0; i < count; i++)
+            {
+                Vector3 l = frame.DirToLocal(Sources.Wind(frame.origin + frame.up * (double)(-HeightSpan + i * HeightStep), ut).wind);
+                e[i] = l.x * Settings.Wind; n[i] = l.z * Settings.Wind;
+            }
+            // (put in whole, the two together: the mover reads them on other threads)
+            heights = new HeightWinds { e = e, n = n };
+        }
+        sealed class HeightWinds { public float[] e, n; }
+#if DEV
+        static bool oneWind;
+        /// <summary>(Development build: "one" gives every patch one wind again, its middle's, as before 0.8.0; anything else the wind at each height.)</summary>
+        public static string Winds(string v) { oneWind = v == "one"; return oneWind ? "one wind a patch" : "the wind at each height, in patches with no ground"; }
+#endif
+        HeightWinds heights;
+        float heightsAsked = -100f;
+        const float HeightSpan = 2500f, HeightStep = 250f;
 
         static readonly float[] AskedAt = { 0.25f, 0.5f, 1f, 2f, 4f, 7f, 10f, 15f, 25f, 45f, 80f, 150f, 260f, 400f };
         readonly float[] askedSpeed = new float[14];
@@ -1082,6 +1357,10 @@ namespace VolumetricExplosions
         {
             if (Settings.TestFreeze >= 3f) dt = 0f;                // (for testing: nothing whatever changes, so that two pictures can be compared exactly)
             long began = System.Diagnostics.Stopwatch.GetTimestamp(), lap = began;
+#if DEV
+            if (partsBefore == null) partsBefore = new long[Air.Part.Length];
+            Array.Copy(Air.Part, partsBefore, partsBefore.Length);
+#endif
             if (job != null) { Task last = job; job = null; last.Wait(); }
             long waited = System.Diagnostics.Stopwatch.GetTimestamp();
             lap = waited;
@@ -1119,6 +1398,8 @@ namespace VolumetricExplosions
             Survey(dt);
             Camera eye = FlightCamera.fetch != null ? FlightCamera.fetch.mainCamera : Camera.main;
             camL = eye != null ? frame.ToLocal(eye.transform.position) : new Vector3(0f, 1e6f, 0f);
+            // (how wide a pixel is, as an angle: the near and the far camera share it; see Thinnest)
+            pixelAngle = eye != null ? 2f * Mathf.Tan(eye.fieldOfView * 0.5f * Mathf.Deg2Rad) / Mathf.Max(1, eye.pixelHeight) : 0f;
             Air.Lap(4, ref lap);
 
             foreach (Plan plan in waiting) Burst(plan);
@@ -1130,10 +1411,15 @@ namespace VolumetricExplosions
             Waves(dt);
             Lamps(dt);
             Air.Lap(6, ref lap);
+            long sub = lap;
             Fires(dt);
+            Air.SubLap(0, ref sub);
             Frags(dt);
+            Air.SubLap(1, ref sub);
             Vents(dt);
+            Air.SubLap(2, ref sub);
             if (trenches.Count > 0) Ends(dt, Air.SmokeQuality);
+            Air.SubLap(3, ref sub);
             Air.Lap(7, ref lap);
             Pieces(dt);
             Air.Lap(8, ref lap);
@@ -1168,7 +1454,33 @@ namespace VolumetricExplosions
             Air.Lap(13, ref lap);
             long done = System.Diagnostics.Stopwatch.GetTimestamp();
             Air.Cost[0] += waited - began; Air.Cost[1] += done - waited; Air.Cost[2] += moved;
+#if DEV
+            // (a new patch's first three steps, and any step over 8 ms, lap by lap: see Made)
+            double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            if (stepsDone < 3 || (done - began) * f > 8.0)
+            {
+                var t = new System.Text.StringBuilder("  at " + Time.realtimeSinceStartup.ToString("F1") + " s, " + (riding ? "riding" : "plain") + " step " + stepsDone + ": " + ((done - began) * f).ToString("F1") + " ms (waited " + ((waited - began) * f).ToString("F1") + ")");
+                for (int k = 0; k < 14 && k < Air.Part.Length; k++) { double d = (Air.Part[k] - partsBefore[k]) * f; if (d >= 0.5) t.Append(", lap " + k + ": " + d.ToString("F1")); }
+                MadeTimes.Add(t.ToString());
+                if (MadeTimes.Count > 80) MadeTimes.RemoveAt(0);
+            }
+            stepsDone++;
+#endif
         }
+
+#if DEV
+        int stepsDone;
+        long[] partsBefore;
+        /// <summary>(Development build: what showing grids has cost: copying them in, sending the two big textures, sending the rest; and how many.)</summary>
+        public static readonly double[] ShowTimes = new double[4];
+        public static string ShowCost()
+        {
+            double n = Math.Max(1.0, ShowTimes[3]);
+            string t = ShowTimes[3] + " grids shown, " + (ShowTimes[0] / n).ToString("F2") + " ms each on the game's thread (" + ShowTimes[2] + " of them through Unity); " + Sending.Report();
+            for (int k = 0; k < 4; k++) ShowTimes[k] = 0;
+            return t;
+        }
+#endif
 
         // ---- running into things
         NativeArray<RaycastCommand> rays;
@@ -1323,6 +1635,7 @@ namespace VolumetricExplosions
             float sR = sunR, sG = sunG, sB = sunB, aR = ambR, aG = ambG, aB = ambB, fR = fireR, fG = fireG, fB = fireB;
             float wX = windX, wZ = windZ, w10 = wind10, gs = gustScale;
             float[] al = aloft;
+            HeightWinds hw = heights;
             bool sun = sunUp, floored = hasGround;
             float gY = groundY, gSX = groundSX, gSZ = groundSZ;
             int grates = grateCount;                                           // (a launch pad's grate under a ship's patch: see Grates)
@@ -1389,13 +1702,24 @@ namespace VolumetricExplosions
                         float height = 10f, slopeE = 0f, slopeN = 0f;
                         if (lie != null) height = q.y - Height(lie, lieX0, lieZ0, lieInv, q.x, q.z, out slopeE, out slopeN);
                         else if (floored) { height = q.y - (gY - q.x * gSX - q.z * gSZ); slopeE = -gSX; slopeN = -gSZ; }
-                        float w = w10 * AloftFrom(al, height);
+                        float w = w10 * AloftFrom(al, height), dX = wX, dZ = wZ;
+                        // (high up, with no ground under the patch: the weather's wind at this particle's own height, see ByHeight)
+                        if (hw != null && !floored && lie == null)
+                        {
+                            float[] hE = hw.e, hN = hw.n;
+                            float at = (q.y + HeightSpan) * (1f / HeightStep);
+                            int k = at <= 0f ? 0 : at >= hE.Length - 1 ? hE.Length - 2 : (int)at;
+                            float f = at - k; f = f < 0f ? 0f : f > 1f ? 1f : f;
+                            float we = hE[k] + (hE[k + 1] - hE[k]) * f, wn = hN[k] + (hN[k + 1] - hN[k]) * f;
+                            w = Mathf.Sqrt(we * we + wn * wn);
+                            if (w > 1e-3f) { dX = we / w; dZ = wn / w; }
+                        }
                         // The wind comes in gusts, short ones upon long ones, which travel down the wind; and it swings from side
                         // to side, so a plume wanders instead of running dead straight.
-                        float down = q.x * wX + q.z * wZ, across = q.z * wX - q.x * wZ;
+                        float down = q.x * dX + q.z * dZ, across = q.z * dX - q.x * dZ;
                         float gust = 1f + gs * (0.22f * sin[(int)((0.7f * tm - 0.02f * down) * 651.8986f) & 4095] + 0.16f * sin[(int)((0.23f * tm - 0.008f * down + 1.3f) * 651.8986f) & 4095]);
                         float swing = (0.2f * sin[(int)((0.31f * tm - 0.012f * down + 0.011f * across) * 651.8986f) & 4095] + 0.12f * sin[(int)((0.11f * tm + 2.1f) * 651.8986f) & 4095]) * w;
-                        float ux = wX * w * gust - wZ * swing, uy = 0f, uz = wZ * w * gust + wX * swing;
+                        float ux = dX * w * gust - dZ * swing, uy = 0f, uz = dZ * w * gust + dX * swing;
                         float stir = still;
 
                         for (int n = 0; n < nThermals; n++)
@@ -1765,14 +2089,17 @@ namespace VolumetricExplosions
         }
 
         /// <summary>How many kinds of fire there are (see Flames, Plumes), and the one that is air made to glow at re-entry (see Plasma).</summary>
-        internal const int FireKinds = 9;
+        internal const int FireKinds = 11;
         internal const byte PlasmaKind = 8;
+        /// <summary>(Since 0.8.0.) A jet's afterburner, and a kerosene engine's igniter at the moment it starts (see Plumes).</summary>
+        internal const byte AfterburnerKind = 9, IgniterKind = 10;
 
         // Flame colours as they look on the screen, coolest to hottest, six steps for each kind of fire:
         // fuel, solid propellant and burning metal, monopropellant, electrical, hydrogen; and, for engines' flames alone,
         // methane, the fuels that keep (a small upper-stage engine's), and gas heated by a reactor; and (since 0.7.0) air made
         // to glow by a craft coming into it fast: white and pale gold where hottest, orange, then the pink-violet of nitrogen's
         // own light where it is thin and cooling (see Plasma).
+        // (Since 0.8.0: a jet's afterburner, violet through salmon to yellow-white; a kerosene engine's igniter, green.)
         static readonly float[] Flames =
         {
             0f, 0f, 0f,   0.55f, 0.10f, 0.02f,   1.00f, 0.36f, 0.06f,   1.00f, 0.62f, 0.16f,   1.00f, 0.84f, 0.42f,   1.00f, 0.95f, 0.74f,
@@ -1781,9 +2108,11 @@ namespace VolumetricExplosions
             0f, 0f, 0f,   0.06f, 0.10f, 0.45f,   0.20f, 0.35f, 0.90f,   0.45f, 0.65f, 1.00f,   0.75f, 0.88f, 1.00f,   0.92f, 0.97f, 1.00f,
             0f, 0f, 0f,   0.10f, 0.10f, 0.25f,   0.30f, 0.32f, 0.60f,   0.55f, 0.60f, 0.85f,   0.80f, 0.85f, 1.00f,   0.95f, 0.97f, 1.00f,
             0f, 0f, 0f,   0.14f, 0.08f, 0.30f,   0.38f, 0.26f, 0.66f,   0.66f, 0.50f, 0.90f,   0.90f, 0.78f, 1.00f,   1.00f, 0.93f, 1.00f,
-            0f, 0f, 0f,   0.30f, 0.14f, 0.26f,   0.62f, 0.36f, 0.54f,   0.86f, 0.62f, 0.76f,   0.98f, 0.86f, 0.92f,   1.00f, 0.96f, 0.98f,
+            0f, 0f, 0f,   0.32f, 0.10f, 0.08f,   0.70f, 0.32f, 0.24f,   0.92f, 0.56f, 0.44f,   1.00f, 0.80f, 0.68f,   1.00f, 0.94f, 0.88f,
             0f, 0f, 0f,   0.30f, 0.06f, 0.04f,   0.62f, 0.18f, 0.10f,   0.85f, 0.38f, 0.22f,   1.00f, 0.62f, 0.42f,   1.00f, 0.82f, 0.66f,
             0f, 0f, 0f,   0.42f, 0.06f, 0.24f,   0.85f, 0.22f, 0.30f,   1.00f, 0.45f, 0.24f,   1.00f, 0.68f, 0.38f,   1.00f, 0.88f, 0.70f,
+            0f, 0f, 0f,   0.12f, 0.06f, 0.25f,   0.35f, 0.20f, 0.60f,   0.85f, 0.45f, 0.45f,   1.00f, 0.72f, 0.42f,   1.00f, 0.92f, 0.75f,
+            0f, 0f, 0f,   0.05f, 0.25f, 0.05f,   0.15f, 0.60f, 0.12f,   0.35f, 0.90f, 0.25f,   0.65f, 1.00f, 0.50f,   0.88f, 1.00f, 0.80f,
         };
 
         /// <summary>Which of two families a kind of fire is of, the yellow or the blue: one patch of air shows its fire in the colours of one kind, and those of a family are near enough alike to share one.</summary>
@@ -1800,6 +2129,22 @@ namespace VolumetricExplosions
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static float Sin(float angle) => sine[(int)(angle * 651.8986f) & 4095];
+
+        // A quick source of chance, for the loops that run once for every bit laid (an engine's gas, thousands a frame where
+        // a ship has many engines): Unity's Random is a call out of the managed code, and in the game's runtime here each one
+        // cost as much as a page of arithmetic. (Marsaglia's xorshift: its numbers are as even as these uses need.)
+        uint luck;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        uint LuckBits()
+        {
+            uint x = luck;
+            if (x == 0u) x = (uint)GetHashCode() * 2654435761u | 1u;
+            x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+            luck = x;
+            return x;
+        }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        float Luck(float a, float b) => a + (b - a) * ((LuckBits() >> 8) * (1f / 16777216f));
 
         // ================================================================== light through the cloud
 
@@ -1818,10 +2163,10 @@ namespace VolumetricExplosions
         float[][][][] apart = new float[0][][][];                // what each thread puts on those coarser grids, kept apart until they are added up
         float[][][] spare;
         readonly bool[] wideUsed = new bool[Levels];
-        float[] sunThrough = new float[G3], skyThrough = new float[G3], sunNext = new float[G3], skyNext = new float[G3];      // how much smoke lies between each cell and the sun, and the open sky
-        readonly Color32[] cellsA = new Color32[G3], cellsB = new Color32[G3], cellsC = new Color32[A3];
-        readonly Color32[] cellsD = new Color32[A3];
-        readonly byte[] cellsClear = new byte[A3];
+        float[] sunThrough = Spares.Take<float>(G3), skyThrough = Spares.Take<float>(G3), sunNext = Spares.Take<float>(G3), skyNext = Spares.Take<float>(G3);      // how much smoke lies between each cell and the sun, and the open sky (the grids from those of patches that have ended, where there are any: see Spares)
+        readonly Color32[] cellsA = Spares.Take<Color32>(G3), cellsB = Spares.Take<Color32>(G3), cellsC = Spares.Take<Color32>(A3);
+        readonly Color32[] cellsD = Spares.Take<Color32>(A3);
+        readonly byte[] cellsClear = Spares.Take<byte>(A3);
         byte[] clearWork;
         readonly Action<int> clearLayer;
         readonly ushort[][] cellsRest = new ushort[5][];
@@ -1857,7 +2202,7 @@ namespace VolumetricExplosions
 
         /// <summary>Whether this patch goes along with a ship, and with what.</summary>
         public bool Riding => riding;
-        /// <summary>Whether there is no air here to hold smoke.</summary>
+        /// <summary>Whether there is no air here to hold smoke. (A ship's patch then draws none of its engines' young smoke, and their trail is laid straight from the nozzle: young smoke in a vacuum's patch, as it was tried, went by the ship faster than the patch's grid is made, and showed as a string of beads.)</summary>
         public bool Airless => vacuum;
         /// <summary>Whether a ship's patch has held a flame yet (or only its young smoke).</summary>
         public bool HasFlame => hasFlame;
@@ -1982,8 +2327,8 @@ namespace VolumetricExplosions
         float[][] carryTemp;                                      // (room for the smoothing of each to be worked out in)
         readonly Action carryBody;
         readonly Action<int> carrySmooth;
-        float[] strainNext = new float[A3], strainNow = new float[A3];      // how fast the smoke is being pulled out of shape at each cell of the coarser grid, per second: for the grid being made, and for the one in use (see Afresh)
-        readonly Color32[] cellsE = new Color32[A3];              // whose turn it is at each cell, for the shader: the point of its round the smoke there is at, for the big billows' three reckonings and for the small ones' (see Carry)
+        float[] strainNext = Spares.Take<float>(A3), strainNow = Spares.Take<float>(A3);      // how fast the smoke is being pulled out of shape at each cell of the coarser grid, per second: for the grid being made, and for the one in use (see Afresh)
+        readonly Color32[] cellsE = Spares.Take<Color32>(A3);     // whose turn it is at each cell, for the shader: the point of its round the smoke there is at, for the big billows' three reckonings and for the small ones' (see Carry)
         float shownTime, nextFastest = 2f, shownFastest = 2f;     // when the particles the grid in use was made from were as it shows them; the speed the grid of velocities is scaled by
         // Which way the cloud as a whole is flying, where it is flying fast (the fire of a ship that blew up at speed, a
         // crash thrown on ahead of where it hit): for the grid being made, and for the one in use. Between one grid and
@@ -2065,6 +2410,11 @@ namespace VolumetricExplosions
             // carrying it on between them. Handing a grid to the graphics card is the dearest thing a patch does on the game's own
             // thread: with three heaps of cloud each given twenty-five grids a second, that was 4 ms of every frame.)
             if (cloudy) wait = Mathf.Clamp(0.3f + away * 0.0002f, 0.3f, 0.8f) * (Settings.TestCloudGrids > 0f ? Settings.TestCloudGrids : 1f);
+            // (And with many patches at once, the nearest the camera first: each further one waits the longer between grids, the
+            // shader carrying its smoke on meanwhile. Four boosters dropped while still burning are four ships, each with its own
+            // patch remaking its grid thirty times a second: the frame went from 25 ms to 48. Not a blast's first moments.)
+            awayNow = away;
+            if (GridRank > 0 && !(time - lastBlast < 2.5f && !vented)) wait = Mathf.Max(wait, 0.033f) * (1f + 0.6f * GridRank);
             lightDue = Time.unscaledTime + wait + Settings.TestGrids;
             // The grid is made from a copy of the particles as they are at this moment. (Made from the list itself, which
             // goes on being moved about and tidied while the grid is worked out, it now and then missed a particle or
@@ -2085,6 +2435,7 @@ namespace VolumetricExplosions
                     // (not the smoke handed on from a ship's patch, which comes on here as it fades there, in step: see Hand)
                     if ((copy[i].flags & (Exhausted | Kept)) == Exhausted && copy[i].age < copy[i].fadeIn) { float a = copy[i].age + early; copy[i].age = a < 0f ? 0f : a; }
             }
+            Thinnest(count);
             lightCount = count;
             lightTime = time;
             lightGone = airGone;
@@ -2093,6 +2444,36 @@ namespace VolumetricExplosions
             lightRepeat = detailRepeat;
             Air.Few.MaxDegreeOfParallelism = Settings.Threads > 0 ? Settings.Threads : -1;      // (the setting "threads" holds for the making of a grid as for everything else)
             lighting = Task.Run(lightBody);
+        }
+
+        /// <summary>
+        /// (Since 0.8.0.) Smoke too thin to cover a pixel and a half from where the camera is (a trail seen from kilometres off, above
+        /// all) is laid on the grid that wide and as much fainter: in the copy the grid is made from, its puffs widened to that and
+        /// their depth through the middle cut by as much (mass ∝ depth × width², so the mass goes up by the width's share, the
+        /// flame down by it), so that the depth times the width across the line on the screen is kept. Each ray through a pixel
+        /// meets smoke or misses it; a trail thinner than a pixel, crossing the pixels at a slant, was a row of dashes from twenty
+        /// kilometres off, and from further nothing at all: a real one is a faint line, as a camera shows it. Worked out afresh at
+        /// every grid from how far each puff is, so that the width follows the camera's distance (a grid is seen for a tenth to a
+        /// quarter of a second: a camera closing in fast sees the line a little wider for that long).
+        /// </summary>
+        void Thinnest(int count)
+        {
+            if (pixelAngle <= 0f || Settings.TestThin == 1f) return;
+            float least = 0.75f * pixelAngle;            // (a radius, per metre away: a pixel and a half across)
+            float cx = camL.x, cy = camL.y, cz = camL.z;
+            P[] copy = seen;
+            for (int i = 0; i < count; i++)
+            {
+                float r = copy[i].r;
+                if (r <= 0.01f || copy[i].life < 0f) continue;
+                float dx = copy[i].x - cx, dy = copy[i].y - cy, dz = copy[i].z - cz;
+                float want = least * Mathf.Sqrt(dx * dx + dy * dy + dz * dz);
+                if (want <= r) continue;
+                float k = want / r;
+                copy[i].r = want;
+                copy[i].mass *= k;
+                copy[i].flame /= k;
+            }
         }
 
         /// <summary>
@@ -2301,7 +2682,8 @@ namespace VolumetricExplosions
                     for (int level = 1; level < Levels; level++)
                     {
                         int side = G >> level;
-                        more[part][level] = new[] { new float[side * side * side], new float[side * side * side], new float[side * side * side], new float[side * side * side], new float[side * side * side] };
+                        int cube = side * side * side;
+                        more[part][level] = new[] { Spares.Take<float>(cube), Spares.Take<float>(cube), Spares.Take<float>(cube), Spares.Take<float>(cube), Spares.Take<float>(cube) };
                     }
                 }
                 apart = more;
@@ -2310,7 +2692,7 @@ namespace VolumetricExplosions
             {
                 var room = new float[lightParts][];
                 var which = new int[lightParts][];
-                for (int part = 0; part < lightParts; part++) { room[part] = new float[G2]; which[part] = new int[2 * G]; }
+                for (int part = 0; part < lightParts; part++) { room[part] = part < stands.Length ? stands[part] : Spares.Take<float>(G2); which[part] = part < rows.Length ? rows[part] : Spares.Take<int>(2 * G); }
                 stands = room; rows = which;
             }
             for (int level = 1; level < Levels; level++)
@@ -2345,19 +2727,20 @@ namespace VolumetricExplosions
             for (int level = 1; level < Levels; level++)
             {
                 int side = G >> level;
-                wideNew[level] = new[] { new float[side * side * side], new float[side * side * side], new float[side * side * side], new float[side * side * side], new float[side * side * side] };
+                int cube = side * side * side;
+                wideNew[level] = new[] { Spares.Take<float>(cube), Spares.Take<float>(cube), Spares.Take<float>(cube), Spares.Take<float>(cube), Spares.Take<float>(cube) };
             }
             wide = wideNew;
             var spareNew = new float[5][][];
-            for (int c = 0; c < spareNew.Length; c++) spareNew[c] = new[] { new float[G * G / 2 * G / 2], new float[G * G * G / 2] };
+            for (int c = 0; c < spareNew.Length; c++) spareNew[c] = new[] { Spares.Take<float>(G * G / 2 * G / 2), Spares.Take<float>(G * G * G / 2) };
             spare = spareNew;
-            layers = new[] { new float[G2], new float[G2], new float[G2], new float[G2] };
-            anything = new float[A3]; roundSmoke = new float[A3]; roundPale = new float[A3]; roundDust = new float[A3];
+            layers = new[] { Spares.Take<float>(G2), Spares.Take<float>(G2), Spares.Take<float>(G2), Spares.Take<float>(G2) };
+            anything = Spares.Take<float>(A3); roundSmoke = Spares.Take<float>(A3); roundPale = Spares.Take<float>(A3); roundDust = Spares.Take<float>(A3);
             var temp = new float[Carried][];
-            for (int c = 0; c < Carried; c++) temp[c] = new float[A3];
+            for (int c = 0; c < Carried; c++) temp[c] = Spares.Take<float>(A3);
             carryTemp = temp;
-            clearWork = new byte[(A + 2) * (A + 2) * (A + 2)];
-            field = new[] { new float[G3], new float[G3], new float[G3], new float[G3], new float[G3] };
+            clearWork = Spares.Take<byte>((A + 2) * (A + 2) * (A + 2));
+            field = new[] { Spares.Take<float>(G3), Spares.Take<float>(G3), Spares.Take<float>(G3), Spares.Take<float>(G3), Spares.Take<float>(G3) };
         }
 
         // ---- the same in C (see Native, and Native/vfxgrid.c)
@@ -2767,6 +3150,7 @@ namespace VolumetricExplosions
 
         float heldX, heldY, heldZ;                                // the cell sizes in use
         float detailRepeat = 9f, fullLength = 1.5f;               // metres before the detail repeats, and of the thickest smoke that count as "full": set by the first blast
+        bool seaBorn;                                             // whether that blast was at the sea's surface, throwing up water: a splash, not smoke (see TuneVolume)
 
         /// <summary>The smallest of the set sizes that is big enough; the size already in use is kept unless too small or much too big.</summary>
         static float Rung(float wanted, ref float held)
@@ -3331,7 +3715,7 @@ namespace VolumetricExplosions
             }
         }
 
-        readonly byte[] carryKnown = new byte[A3];
+        readonly byte[] carryKnown = Spares.Take<byte>(A3);
         readonly float[] carrySums = new float[Carried];
 
         /// <summary>A distance of up to RestFar either way, as a number of sixteen bits.</summary>
