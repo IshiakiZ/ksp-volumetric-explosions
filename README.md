@@ -3,7 +3,7 @@
 The game's flat explosion sprites replaced by a small simulation of fire, smoke and dust, drawn as a true volume and
 lit by the sun, the sky and the fire. It changes nothing but the look.
 
-![A rocket with solid boosters and a fuel-and-oxidizer core strikes the ground by the launch pad and blows up](src/VolumetricExplosions/img/volumetric-explosions.gif)
+![A tank of fuel bursts beside the launch pad: the fireball lifts on its own heat into dark smoke, burning pieces fly clear trailing smoke, and fire burns on where the fuel spilt](src/VolumetricExplosions/img/volumetric-explosions.gif)
 
 ![The game's own explosion and this mod's](src/VolumetricExplosions/img/explosions-compare.jpg)
 
