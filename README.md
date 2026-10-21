@@ -9,7 +9,7 @@ lit by the sun, the sky and the fire. It changes nothing but the look.
 
 *Left: the game's own explosion. Right: the same blast with the mod.*
 
-![A fuel tank's fireball beside the launch pad, rolling up into dark smoke](src/VolumetricExplosions/img/volumetric-explosions-fireball.gif)
+![A fuel tank's fireball beside the launch pad at night, lighting the pad as it rolls up into dark smoke](src/VolumetricExplosions/img/volumetric-explosions-fireball.gif)
 
 ![The fires a fuel explosion leaves burning on the ground, their smoke climbing](src/VolumetricExplosions/img/volumetric-explosions-fire.gif)
 
