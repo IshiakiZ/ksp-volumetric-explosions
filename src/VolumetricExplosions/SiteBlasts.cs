@@ -22,6 +22,22 @@ namespace VolumetricExplosions
             return wide > 1.001f && speed > 0.01f && sum > 0.01f ? (wide - 1f) * r * kloss / (sum * speed * wide) : 0f;
         }
 
+        /// <summary>
+        /// Room made at once for so many more particles (a blast's, known before it lays them). Add grows the lists a doubling at
+        /// a time, and a big tank's blast had them copied and made again up to three times over in the middle of its frame
+        /// (4096 to 30000 particles; read on the PC, 2026-10-24): once here, to the size it will need.
+        /// </summary>
+        void Room(int more)
+        {
+            int want = Math.Min(Settings.MaxParticles, count + more);
+            if (want <= p.Length) return;
+            int size = p.Length;
+            while (size < want) size *= 2;
+            size = Math.Min(Settings.MaxParticles, size);
+            Array.Resize(ref p, size);
+            Array.Resize(ref draw, size);
+        }
+
         int Add()
         {
             if (Air.Alive >= Settings.MaxParticles) return -1;
@@ -171,12 +187,28 @@ namespace VolumetricExplosions
             float strongest = Mathf.Max(pl.dust.r, Mathf.Max(pl.dust.g, pl.dust.b));
             if (strongest > 0.01f) dustHue = new Vector3(pl.dust.r, pl.dust.g, pl.dust.b) / strongest;
 
+#if DEV
+            BurstLap(-1);
+#endif
             if (count > 0 && !vacuum) Shove(c, Mathf.Max(R, pl.reach * 0.7f));
+            StartKnock(pl, c, onGround);
+#if DEV
+            BurstLap(0);
+#endif
             if (R > 0.3f) Fireball(pl, c, v0, R, q, onGround);
+#if DEV
+            BurstLap(1);
+#endif
             if (pl.vapour > 0.5f) Vapour(pl, c, v0, q, onGround);
             if (pl.water && (pl.ground || pl.underwater)) { Splash(pl, c, v0, q); SeaBlow(pl, c); }
             else if (pl.dirt > 0f) Dust(pl, c, v0, q);
+#if DEV
+            BurstLap(2);
+#endif
             Sparks(pl, c, v0, q, onGround);
+#if DEV
+            BurstLap(3);
+#endif
 
             if (R > 0.3f)
             {
@@ -187,12 +219,40 @@ namespace VolumetricExplosions
                 // where the blast was, it was a glowing ball hanging in the air behind a fire already far away.
                 Vector3 thrown = vacuum ? v0 : v0 * Mathf.Lerp(1f, 0.75f * (0.4f + 0.6f * Mathf.Clamp01(v0.magnitude / 120f)), Mathf.Clamp01(grip));
                 lamps[lamp].vx = thrown.x; lamps[lamp].vy = thrown.y; lamps[lamp].vz = thrown.z;
-                if (lift > 0f) AddThermal(c.x + v0.x * 0.15f, c.y + up, c.z + v0.z * 0.15f, R * 0.72f, lift, c.y + R * Random.Range(6f, 10f));
+                if (lift > 0f) AddThermal(c.x + v0.x * 0.15f, c.y + up, c.z + v0.z * 0.15f, R * 0.72f, lift, c.y + R * Luck(6f, 10f));
+#if DEV
+                BurstLap(4);
+#endif
                 Chunks(pl, c, v0, q, onGround);
+#if DEV
+                BurstLap(5);
+#endif
             }
             if (pl.burn > 0f && onGround) AddFire(pl, c, R, q);
+#if DEV
+            BurstLap(6);
+#endif
             if (Settings.Shockwave && air > 0.12f && R > 2f && time - lastRing > 0.5f) Shock(c, R, onGround, pl.fire, onGround && !pl.water && !pl.paved ? pl.dirt : 0f, pl.dust);
+#if DEV
+            BurstLap(7);
+            Bursts.Add("    burst R " + R.ToString("F1") + ", q " + q.ToString("F2") + ": shove " + BurstMs[0].ToString("F1") + ", fireball " + BurstMs[1].ToString("F1") + ", vapour/splash/dust " + BurstMs[2].ToString("F1")
+                       + ", sparks " + BurstMs[3].ToString("F1") + ", lamp " + BurstMs[4].ToString("F1") + ", chunks " + BurstMs[5].ToString("F1") + ", fire " + BurstMs[6].ToString("F1") + ", shock " + BurstMs[7].ToString("F1") + " ms; " + count + " particles");
+#endif
         }
+
+#if DEV
+        // (for the development build: where a burst's time goes, written beside the patch's step in Made)
+        static readonly double[] BurstMs = new double[8];
+        static long burstLap;
+        internal static readonly List<string> Bursts = new List<string>();
+        static void BurstLap(int k)
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (k >= 0) BurstMs[k] = (now - burstLap) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            else for (int n = 0; n < BurstMs.Length; n++) BurstMs[n] = 0;
+            burstLap = now;
+        }
+#endif
 
         /// <summary>A blast shoves aside the smoke that was already hanging there.</summary>
         void Shove(Vector3 c, float R)
@@ -215,6 +275,8 @@ namespace VolumetricExplosions
         void Fireball(Plan pl, Vector3 c, Vector3 v0, float R, float q, bool onGround)
         {
             int n = (int)(q * Mathf.Clamp(95f * Mathf.Pow(R, 1.45f), 260f, 9000f));
+            // (its rind and its dust come to at most about half as many again: see Room)
+            Room(n + n / 2);
             // Fewer particles are made bigger, so that the fireball stays filled in.
             float rp = Mathf.Clamp(0.105f * Mathf.Pow(R, 0.75f) + 0.1f, 0.18f, 1.6f) / Mathf.Pow(Mathf.Clamp(q, 0.08f, 3f), 0.33f);
             float burns = vacuum ? 0.25f + 0.045f * R : (0.8f + 0.30f * R) * Mathf.Lerp(0.55f, 1f, Mathf.Clamp01(grip));      // seconds; shorter where the air is thin
@@ -229,10 +291,10 @@ namespace VolumetricExplosions
             var more = new float[9];
             for (int m = 0; m < lobes.Length; m++)
             {
-                Vector3 way = Random.onUnitSphere;
+                Vector3 way = LuckSphere();
                 if (onGround) way = OffGround(way, blastUp, 1f);
                 lobes[m] = way;
-                more[m] = Random.Range(0.1f, 1.0f) * Random.Range(0.4f, 1f);
+                more[m] = Luck(0.1f, 1.0f) * Luck(0.4f, 1f);
             }
             // Something that hit at speed throws its fire on ahead of it.
             float carried = Mathf.Clamp01(v0.magnitude / 120f);
@@ -245,26 +307,96 @@ namespace VolumetricExplosions
             // the smoky bits were dark from the first moment: the fireball came up speckled with black balls.)
             var patchWay = new Vector3[6];
             var patchOf = new float[6];
-            for (int m = 0; m < patchWay.Length; m++) { patchWay[m] = Random.onUnitSphere; patchOf[m] = Random.Range(-1f, 1f); }
+            for (int m = 0; m < patchWay.Length; m++) { patchWay[m] = LuckSphere(); patchOf[m] = Luck(-1f, 1f); }
             bool speckled = Settings.TestSoot >= 1f;                                   // (for testing: as it was)
 
-            for (int k = 0; k < n; k++)
+            // (from 2026-10-24 a big one is laid over two of the patch's steps: see HalfLaid)
+            var f = new HalfLaid { pl = pl, c = c, v0 = v0, up = blastUp, R = R, rp = rp, burns = burns, spreads = spreads, smokeLasts = smokeLasts, mixes = mixes,
+                               smoky = smoky, shade = shade, carried = carried, onGround = onGround, speckled = speckled, lobes = lobes, more = more,
+                               patchWay = patchWay, patchOf = patchOf, n = n, at = time };
+            f.rind = smoky > 0f ? (int)(n * (speckled ? 0.3f : 0.42f) * pl.soot) : 0;
+            bool split = n >= SplitFrom;
+#if DEV
+            if (TestWhole) split = false;
+#endif
+            f.next = split ? n / 2 : n;
+            f.rindNext = split ? f.rind / 2 : f.rind;
+            Lay(f, 0, f.next, 0, f.rindNext, 0f);
+            if (split) firesLeft.Add(f);
+        }
+
+        // ---- a big fireball laid over two of the patch's steps
+        // (On the PC, 2026-10-24: a fuel fireball of some 9,000 bits took 8 to 10 ms of one step to lay, nearly all of a crash's blast in
+        // its frame (Made's "burst ... fireball"). Now one of SplitFrom bits or more is laid half at its blast and half at the patch's
+        // next step, the frame after, each bit of that half moved on, cooled and aged by the time between (Aged), as if it had been laid
+        // with the rest: what the eye gets is the same fireball a frame on, the frame's work split in two.)
+        const int SplitFrom = 2400;
+#if DEV
+        /// <summary>(Development build: every fireball laid whole at its blast, as until 2026-10-24, to film the two ways against each other.)</summary>
+        public static bool TestWhole;
+        public static string Whole(string v) { TestWhole = v != "off"; return TestWhole ? "fireballs laid whole" : "big fireballs laid over two steps"; }
+#endif
+
+        sealed class HalfLaid
+        {
+            public Plan pl;
+            public Vector3 c, v0, up;
+            public float R, rp, burns, spreads, smokeLasts, mixes, smoky, shade, carried, at;
+            public bool onGround, speckled;
+            public Vector3[] lobes, patchWay;
+            public float[] more, patchOf;
+            public int n, next, rind, rindNext;
+        }
+
+        readonly List<HalfLaid> firesLeft = new List<HalfLaid>();
+
+        /// <summary>The rest of the fireballs begun at the patch's last step, laid as if with the rest (at the start of this one, before its own blasts).</summary>
+        void FiresLeft()
+        {
+            foreach (HalfLaid f in firesLeft)
+            {
+                Room((f.n - f.next) + (f.rind - f.rindNext));
+                Lay(f, f.next, f.n, f.rindNext, f.rind, time - f.at);
+            }
+            firesLeft.Clear();
+        }
+
+        /// <summary>A bit laid so long after its blast: where it would have got to, as hot as it would still be, as old.</summary>
+        void Aged(int i, float late)
+        {
+            ref P o = ref p[i];
+            o.x += (o.vx + o.kx) * late; o.y += (o.vy + o.ky) * late; o.z += (o.vz + o.kz) * late;
+            o.heat *= Mathf.Exp(-o.cool * late);
+            o.age += late;
+            o.life -= late;
+        }
+
+        /// <summary>Some of a fireball's bits (from, to) and of its rind's (rindFrom, rindTo), laid so long after its blast (late).</summary>
+        void Lay(HalfLaid f, int from, int to, int rindFrom, int rindTo, float late)
+        {
+            Plan pl = f.pl;
+            Vector3 c = f.c, v0 = f.v0, up = f.up;
+            float R = f.R, rp = f.rp, burns = f.burns, spreads = f.spreads, smokeLasts = f.smokeLasts, mixes = f.mixes, smoky = f.smoky, shade = f.shade, carried = f.carried;
+            bool onGround = f.onGround, speckled = f.speckled;
+            Vector3[] lobes = f.lobes, patchWay = f.patchWay;
+            float[] more = f.more, patchOf = f.patchOf;
+            for (int k = from; k < to; k++)
             {
                 int i = Add();
                 if (i < 0) break;
                 ref P o = ref p[i];
-                Vector3 way = Random.onUnitSphere;
-                if (onGround) way = OffGround(way, blastUp, 0.5f).normalized;
+                Vector3 way = LuckSphere();
+                if (onGround) way = OffGround(way, up, 0.5f).normalized;
                 float gain = 1f;
                 for (int m = 0; m < lobes.Length; m++)
                 {
                     float along = Vector3.Dot(way, lobes[m]);
                     if (along > 0f) { float a2 = along * along; gain += more[m] * a2 * a2; }
                 }
-                float rho = Mathf.Pow(Random.value, 0.4f);                                  // most of it is toward the outside
-                float reach = R * (0.2f + 0.8f * rho) * gain, start = R * 0.2f * Random.value;
+                float rho = Mathf.Pow(Luck(0f, 1f), 0.4f);                                  // most of it is toward the outside
+                float reach = R * (0.2f + 0.8f * rho) * gain, start = R * 0.2f * Luck(0f, 1f);
                 o.x = c.x + way.x * start; o.y = c.y + way.y * start; o.z = c.z + way.z * start;
-                o.r = rp * Random.Range(0.7f, 1.35f);
+                o.r = rp * Luck(0.7f, 1.35f);
                 if (vacuum)
                 {
                     // Nothing stops it: it flies out, thins and is gone.
@@ -279,7 +411,7 @@ namespace VolumetricExplosions
                     float speed = reach / spreads;
                     o.kx = way.x * speed; o.ky = way.y * speed; o.kz = way.z * speed;
                     // (thick air takes much of the wreck's speed out of it at once; thin air only as it goes, in the mover)
-                    float keeps = Mathf.Lerp(1f, Random.Range(0.5f, 1f) * (0.4f + 0.6f * carried), Mathf.Clamp01(grip));
+                    float keeps = Mathf.Lerp(1f, Luck(0.5f, 1f) * (0.4f + 0.6f * carried), Mathf.Clamp01(grip));
                     o.vx = v0.x * keeps; o.vy = v0.y * keeps; o.vz = v0.z * keeps;
                     o.kloss = 1f / spreads;
                     o.swell = Swell(way, speed, o.kloss, o.r);
@@ -296,25 +428,25 @@ namespace VolumetricExplosions
                 // The middle is hottest and stays hot longest; the outside cools first into smoke, the top and the patches of the
                 // pattern above soonest (see patchWay).
                 float patch = speckled ? 0f : Patch(way, patchWay, patchOf);
-                float cap = speckled ? 0f : Mathf.Max(0f, Vector3.Dot(way, blastUp));
+                float cap = speckled ? 0f : Mathf.Max(0f, Vector3.Dot(way, up));
                 // (The outside not at once: filmed frame by frame, a large fuel fireball is luminous all through for its first second, a
                 // bright yellow-white edge, and only in its second does soot build up, a tenth of its surface dark by the end of it, as
                 // its colour goes over to red (Crawley 1982, an 80-tonne fireball). So here the outside goes dark from about 0.8 s on
                 // where the pattern has it cool first, 1.2 s on the whole, and later where it stays hot. Until 2026-10-09 the outermost
                 // bits were dark within a quarter of a second.)
-                o.heat = speckled ? 1.12f - 0.42f * rho + 0.12f * (gain - 1f) + Random.Range(-0.08f, 0.08f)
-                                  : 1.12f - 0.26f * rho + 0.12f * (gain - 1f) + 0.05f * patch + Random.Range(-0.02f, 0.02f);
+                o.heat = speckled ? 1.12f - 0.42f * rho + 0.12f * (gain - 1f) + Luck(-0.08f, 0.08f)
+                                  : 1.12f - 0.26f * rho + 0.12f * (gain - 1f) + 0.05f * patch + Luck(-0.02f, 0.02f);
                 // In air the fire cools into smoke. With no air it stays bright and simply thins away as it flies apart.
-                o.cool = vacuum ? 0.7f / burns : speckled ? (1.3f + 2.2f * rho * rho) / burns * Random.Range(0.8f, 1.25f)
-                                                          : (1.3f + 1.6f * rho * rho) / burns * (1f - 0.2f * patch + 0.2f * cap * rho) * Random.Range(0.95f, 1.05f);
-                o.flame = Random.Range(0.75f, 1.15f);
+                o.cool = vacuum ? 0.7f / burns : speckled ? (1.3f + 2.2f * rho * rho) / burns * Luck(0.8f, 1.25f)
+                                                          : (1.3f + 1.6f * rho * rho) / burns * (1f - 0.2f * patch + 0.2f * cap * rho) * Luck(0.95f, 1.05f);
+                o.flame = Luck(0.75f, 1.15f);
                 o.tint = (byte)pl.tint;
                 o.tile = Lumpy();
-                if (Random.value < smoky)
+                if (Luck(0f, 1f) < smoky)
                 {
                     float later = o.r * 2.2f;                                               // about the size it has grown to when the smoke shows
-                    o.mass = Random.Range(0.6f, 2.2f) * Mathf.Pow(Mathf.Max(0.05f, pl.soot), 0.7f) * later * later;
-                    o.life = smokeLasts * Random.Range(0.45f, 1.15f);
+                    o.mass = Luck(0.6f, 2.2f) * Mathf.Pow(Mathf.Max(0.05f, pl.soot), 0.7f) * later * later;
+                    o.life = smokeLasts * Luck(0.45f, 1.15f);
                     if (!speckled)
                     {
                         // (The same soot spread wider: half as wide again, so a third as thick, and each bit's smoke runs into its
@@ -326,11 +458,12 @@ namespace VolumetricExplosions
                     }
                     // (Until 2026-10-09 some of it was soot from the first moment, meant for the dark blotches that roll about in a
                     // fuel fire: each was a black ball on the fireball from its first frame. The blotches come from the pattern now.)
-                    if (speckled && Random.value < 0.08f * pl.soot) { o.heat *= 0.42f; o.cool *= 0.6f; }
-                    float tone = shade * Random.Range(0.7f, 1.5f);
+                    if (speckled && Luck(0f, 1f) < 0.08f * pl.soot) { o.heat *= 0.42f; o.cool *= 0.6f; }
+                    float tone = shade * Luck(0.7f, 1.5f);
                     o.ar = tone; o.ag = tone * 0.97f; o.ab = tone * 0.93f;
                 }
-                else o.life = vacuum ? burns * Random.Range(1.6f, 3f) : 4.2f / o.cool;     // flame only: gone when it is out (or, with no air, when it has thinned to nothing)
+                else o.life = vacuum ? burns * Luck(1.6f, 3f) : 4.2f / o.cool;     // flame only: gone when it is out (or, with no air, when it has thinned to nothing)
+                if (late > 0f) Aged(i, late);
                 Born(i);
             }
 
@@ -339,41 +472,41 @@ namespace VolumetricExplosions
             // at first, its soot glowing unseen, which turns to smoke as it cools (see Deposit): from about a third of the way through
             // the burning, soonest on top and where the pattern has the fire cool first, and over as long again; so it closes round
             // the fire as a skin. More of it, and smaller, for that.)
-            int rind = smoky > 0f ? (int)(n * (speckled ? 0.3f : 0.42f) * pl.soot) : 0;
-            for (int k = 0; k < rind; k++)
+            for (int k = rindFrom; k < rindTo; k++)
             {
                 int i = Add();
                 if (i < 0) break;
                 ref P o = ref p[i];
-                Vector3 way = Random.onUnitSphere;
-                if (onGround) way = OffGround(way, blastUp, 0.5f).normalized;
-                float reach = R * Random.Range(0.8f, 1.25f), speed = reach / spreads;
+                Vector3 way = LuckSphere();
+                if (onGround) way = OffGround(way, up, 0.5f).normalized;
+                float reach = R * Luck(0.8f, 1.25f), speed = reach / spreads;
                 o.x = c.x; o.y = c.y; o.z = c.z;
                 o.kx = way.x * speed; o.ky = way.y * speed; o.kz = way.z * speed;
                 float kept = Mathf.Lerp(1f, 0.4f, Mathf.Clamp01(grip));
                 o.vx = v0.x * kept; o.vy = v0.y * kept; o.vz = v0.z * kept;
                 o.kloss = 1f / spreads;
                 o.drag = 3.5f;
-                o.r = rp * (speckled ? Random.Range(1.2f, 2.2f) : Random.Range(0.9f, 1.5f));
+                o.r = rp * (speckled ? Luck(1.2f, 2.2f) : Luck(0.9f, 1.5f));
                 o.swell = Swell(way, speed, o.kloss, o.r);
                 o.grow = mixes;
                 o.turb = 0.5f + 0.1f * speed;
                 o.rise = (Settings.TestFire == 2f || Settings.TestRise == 1f ? 0.3f : 0.8f) * Mathf.Sqrt(R);      // (the rind rises with the fireball it wraps: see above)
-                o.mass = Random.Range(0.8f, 2.2f) * pl.soot * o.r * o.r * 2.5f;
-                o.life = smokeLasts * Random.Range(0.4f, 1.1f);
-                if (speckled) o.fadeIn = burns * Random.Range(0.45f, 0.9f);
+                o.mass = Luck(0.8f, 2.2f) * pl.soot * o.r * o.r * 2.5f;
+                o.life = smokeLasts * Luck(0.4f, 1.1f);
+                if (speckled) o.fadeIn = burns * Luck(0.45f, 0.9f);
                 else
                 {
                     // (from hot to the start of smoke, a third of the burning or so, and as long again to full smoke: cooling as it does,
                     // by a share of its heat a second, that is heat 1.46 and 3.6 / burns a second, whatever the moment)
-                    float shows = burns * Mathf.Clamp(0.32f + 0.12f * Patch(way, patchWay, patchOf) - 0.1f * Mathf.Max(0f, Vector3.Dot(way, blastUp)) + Random.Range(-0.03f, 0.03f), 0.12f, 0.55f);
+                    float shows = burns * Mathf.Clamp(0.32f + 0.12f * Patch(way, patchWay, patchOf) - 0.1f * Mathf.Max(0f, Vector3.Dot(way, up)) + Luck(-0.03f, 0.03f), 0.12f, 0.55f);
                     o.cool = 3.6f / burns;
                     o.heat = 0.5f * Mathf.Exp(o.cool * shows);
                     o.fadeIn = 0.1f;
                 }
-                float tone = shade * Random.Range(0.8f, 1.5f);
+                float tone = shade * Luck(0.8f, 1.5f);
                 o.ar = tone; o.ag = tone * 0.97f; o.ab = tone * 0.93f;
                 o.tile = Lumpy();
+                if (late > 0f) Aged(i, late);
                 Born(i);
             }
         }
@@ -404,11 +537,11 @@ namespace VolumetricExplosions
                 int i = Add();
                 if (i < 0) break;
                 ref P o = ref p[i];
-                Vector3 way = Random.onUnitSphere;
+                Vector3 way = LuckSphere();
                 if (onGround) way = OffGround(way, blastUp, 0.4f);
-                float far = reach * Random.Range(0.2f, 1.1f);
+                float far = reach * Luck(0.2f, 1.1f);
                 o.x = c.x; o.y = c.y; o.z = c.z;
-                o.r = (0.25f + 0.05f * reach) * Random.Range(0.7f, 1.4f);
+                o.r = (0.25f + 0.05f * reach) * Luck(0.7f, 1.4f);
                 if (vacuum)
                 {
                     // (In a vacuum what is let out boils at once where it is liquid, and the boiling freezes the rest: a cloud of fine
@@ -431,9 +564,9 @@ namespace VolumetricExplosions
                     o.grow = 0.5f;
                     o.turb = 0.6f + 0.08f * speed;
                     o.rise = -0.3f;                                                        // cold and heavy: it sinks and spreads
-                    o.life = Random.Range(2.5f, 7f) * Mathf.Max(0.3f, Settings.Smoke);
+                    o.life = Luck(2.5f, 7f) * Mathf.Max(0.3f, Settings.Smoke);
                 }
-                o.mass = Random.Range(0.4f, 1.0f) * o.r * o.r * 4f;
+                o.mass = Luck(0.4f, 1.0f) * o.r * o.r * 4f;
                 if (vacuum)
                 {
                     // (How thick the cloud is, and so how long it is seen: what flashes off a liquid in a vacuum freezes, some two
@@ -445,14 +578,14 @@ namespace VolumetricExplosions
                     // square of its size, and gone when its column is a fiftieth: some twenty seconds for a tonne, forty for ten.
                     // Until 2026-10-19 it was a sixth as thick and lived three to eight seconds: a haze gone almost at once.)
                     float all = 18f * 0.66f * pl.vapour;
-                    o.mass = all / Mathf.Max(1, n) * Random.Range(0.6f, 1.4f);
+                    o.mass = all / Mathf.Max(1, n) * Luck(0.6f, 1.4f);
                     float fastest = reach * 1.1f / 0.35f;
-                    o.life = Mathf.Clamp(Mathf.Sqrt(all / 0.02f) / Mathf.Max(fastest, 1f) * Random.Range(0.8f, 1.2f), 3f, 90f);
+                    o.life = Mathf.Clamp(Mathf.Sqrt(all / 0.02f) / Mathf.Max(fastest, 1f) * Luck(0.8f, 1.2f), 3f, 90f);
                 }
                 // (ice crystals in sunlight are near white; a cold cloud in air a little greyer)
-                float tone = vacuum ? Random.Range(0.88f, 1f) : Random.Range(0.7f, 0.9f);
+                float tone = vacuum ? Luck(0.88f, 1f) : Luck(0.7f, 0.9f);
                 o.ar = tone; o.ag = tone; o.ab = tone * 1.04f;
-                o.tile = Random.value < 0.5f ? Wispy() : Lumpy();
+                o.tile = Luck(0f, 1f) < 0.5f ? Wispy() : Lumpy();
                 Born(i);
             }
         }
@@ -477,14 +610,14 @@ namespace VolumetricExplosions
                 int i = Add();
                 if (i < 0) break;
                 ref P o = ref p[i];
-                float turn = Random.Range(0f, Mathf.PI * 2f), tilt = Random.value;
+                float turn = Luck(0f, Mathf.PI * 2f), tilt = Luck(0f, 1f);
                 tilt = tilt * tilt * 1.2f;                                                  // most of it low, a little straight up
                 Vector3 way = lay * new Vector3(Mathf.Cos(turn) * Mathf.Cos(tilt), Mathf.Sin(tilt), Mathf.Sin(turn) * Mathf.Cos(tilt));
                 way = (way + ahead * (0.7f * thrown)).normalized;                           // an object that came in at a slant throws it on ahead
-                float far = reach * Random.Range(0.5f, 2.3f);
-                o.x = c.x + way.x * 0.3f * reach * Random.value; o.z = c.z + way.z * 0.3f * reach * Random.value;
+                float far = reach * Luck(0.5f, 2.3f);
+                o.x = c.x + way.x * 0.3f * reach * Luck(0f, 1f); o.z = c.z + way.z * 0.3f * reach * Luck(0f, 1f);
                 o.y = GroundAt(o.x, o.z) + 0.2f;
-                float tone = Random.Range(0.75f, 1.15f);
+                float tone = Luck(0.75f, 1.15f);
                 o.ar = Mathf.Lerp(pl.dust.r, pl.smokeShade, sooted) * tone; o.ag = Mathf.Lerp(pl.dust.g, pl.smokeShade, sooted) * tone; o.ab = Mathf.Lerp(pl.dust.b, pl.smokeShade, sooted) * tone;
                 if (vacuum)
                 {
@@ -494,22 +627,22 @@ namespace VolumetricExplosions
                     way = lay * new Vector3(Mathf.Cos(turn) * Mathf.Cos(angle), Mathf.Sin(angle), Mathf.Sin(turn) * Mathf.Cos(angle));
                     o.vx = way.x * speed; o.vy = way.y * speed; o.vz = way.z * speed;
                     o.flags = Ballistic | DiesOnGround;
-                    o.r = (0.2f + 0.04f * reach) * Random.Range(0.6f, 1.3f);
+                    o.r = (0.2f + 0.04f * reach) * Luck(0.6f, 1.3f);
                     o.grow = 0.08f * speed;
-                    o.mass = Random.Range(0.15f, 0.45f) * o.r * o.r * 6f;
+                    o.mass = Luck(0.15f, 0.45f) * o.r * o.r * 6f;
                     o.life = 60f;
-                    o.tile = Random.value < 0.4f ? Specks() : Lumpy();
+                    o.tile = Luck(0f, 1f) < 0.4f ? Specks() : Lumpy();
                 }
                 else
                 {
                     float speed = far / 0.3f;
                     o.kx = way.x * speed; o.ky = way.y * speed; o.kz = way.z * speed;
                     o.kloss = 3.3f; o.drag = 3f;
-                    o.r = (0.3f + 0.06f * reach) * Random.Range(0.6f, 1.4f);
+                    o.r = (0.3f + 0.06f * reach) * Luck(0.6f, 1.4f);
                     o.grow = 0.15f;
                     o.turb = 0.5f + 0.08f * speed;
-                    o.rise = -Random.Range(0.1f, 0.7f);                                     // it settles
-                    o.mass = Random.Range(0.5f, 1.5f) * o.r * o.r * 4f;
+                    o.rise = -Luck(0.1f, 0.7f);                                     // it settles
+                    o.mass = Luck(0.5f, 1.5f) * o.r * o.r * 4f;
                     if (Settings.TestSoot < 1f)
                     {
                         // (The same dust spread half as wide again, so a third as thick, and raised over a moment rather than there at
@@ -517,11 +650,11 @@ namespace VolumetricExplosions
                         // with clear air between them: the rest of the "blobs" on a fireball in its first second. It runs together into
                         // a skirt of dust now.)
                         o.r *= 1.5f;
-                        o.fadeIn = Random.Range(0.12f, 0.3f);
+                        o.fadeIn = Luck(0.12f, 0.3f);
                     }
                     o.swell = Swell(way, speed, o.kloss, o.r);
-                    o.life = Random.Range(6f, 18f) * Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.5f, 1f, Mathf.Clamp01(air));
-                    o.tile = Random.value < 0.25f ? Wispy() : Lumpy();
+                    o.life = Luck(6f, 18f) * Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.5f, 1f, Mathf.Clamp01(air));
+                    o.tile = Luck(0f, 1f) < 0.25f ? Wispy() : Lumpy();
                 }
                 Born(i);
             }
@@ -542,7 +675,12 @@ namespace VolumetricExplosions
         /// </summary>
         void SeaBlow(Plan pl, Vector3 c)
         {
-            if (Settings.TestRing == 1f) return;
+            // (Never the warm-up's: its crash, set off out of sight 20 km and more ahead at every flight's start (Air.WarmUp), lands
+            // out at sea from the pad, and the sea's dent of it cost the game's thread 25 ms a frame for the 50 s it lasts, the
+            // first minute of every flight (found 2026-10-24: "a craft struck the sea: cavity 14.4 m ... from 1679.8 MJ" in the
+            // game's log after every load). Marked on its plan as it is taken in: its burst, and this with it, comes a frame or
+            // more later, when Air.WarmingNow no longer holds.)
+            if (Settings.TestRing == 1f || pl.warm) return;
             if (!seaLooked)
             {
                 seaLooked = true;
@@ -587,38 +725,38 @@ namespace VolumetricExplosions
                 int i = Add();
                 if (i < 0) break;
                 ref P o = ref p[i];
-                float turn = Random.Range(0f, Mathf.PI * 2f), kind = Random.value;
-                float tone = Random.Range(0.8f, 0.95f);
+                float turn = Luck(0f, Mathf.PI * 2f), kind = Luck(0f, 1f);
+                float tone = Luck(0.8f, 0.95f);
                 o.ar = tone; o.ag = tone; o.ab = tone;
-                o.x = c.x + Mathf.Cos(turn) * reach * 0.25f * Random.value; o.z = c.z + Mathf.Sin(turn) * reach * 0.25f * Random.value;
+                o.x = c.x + Mathf.Cos(turn) * reach * 0.25f * Luck(0f, 1f); o.z = c.z + Mathf.Sin(turn) * reach * 0.25f * Luck(0f, 1f);
                 o.y = level + 0.2f;
                 if (kind < 0.8f)
                 {
                     // Water: thrown, and it falls back. (Under the water most of it goes up the column, and higher.)
                     bool column = kind < (under ? 0.6f : 0.35f);
-                    float tilt = column ? Random.Range(1.25f, 1.55f) : Random.Range(0.7f, 1.2f);
-                    float high = reach * (column ? Random.Range(1.5f, under ? 5.5f : 4.5f) : Random.Range(0.5f, 1.6f));
+                    float tilt = column ? Luck(1.25f, 1.55f) : Luck(0.7f, 1.2f);
+                    float high = reach * (column ? Luck(1.5f, under ? 5.5f : 4.5f) : Luck(0.5f, 1.6f));
                     float speed = Mathf.Sqrt(2f * g * high) / Mathf.Sin(tilt);
                     o.vx = Mathf.Cos(turn) * Mathf.Cos(tilt) * speed + v0.x * 0.3f; o.vy = Mathf.Sin(tilt) * speed; o.vz = Mathf.Sin(turn) * Mathf.Cos(tilt) * speed + v0.z * 0.3f;
                     o.flags = Ballistic | DiesOnGround;
-                    o.r = (0.25f + 0.05f * reach) * Random.Range(0.6f, 1.4f);
+                    o.r = (0.25f + 0.05f * reach) * Luck(0.6f, 1.4f);
                     o.grow = 0.5f + 0.04f * speed;
-                    o.mass = Random.Range(0.6f, 1.6f) * o.r * o.r * 5f;
-                    o.life = Random.Range(2f, 7f);
-                    o.tile = Random.value < 0.6f ? Specks() : Lumpy();
+                    o.mass = Luck(0.6f, 1.6f) * o.r * o.r * 5f;
+                    o.life = Luck(2f, 7f);
+                    o.tile = Luck(0f, 1f) < 0.6f ? Specks() : Lumpy();
                 }
                 else if (!vacuum)
                 {
                     // Mist, which stays.
-                    float speed = reach * Random.Range(1f, 4f);
-                    o.kx = Mathf.Cos(turn) * speed; o.ky = Random.Range(0.5f, 2f) * speed; o.kz = Mathf.Sin(turn) * speed;
+                    float speed = reach * Luck(1f, 4f);
+                    o.kx = Mathf.Cos(turn) * speed; o.ky = Luck(0.5f, 2f) * speed; o.kz = Mathf.Sin(turn) * speed;
                     o.kloss = 3f; o.drag = 3f;
-                    o.r = (0.4f + 0.08f * reach) * Random.Range(0.7f, 1.4f);
+                    o.r = (0.4f + 0.08f * reach) * Luck(0.7f, 1.4f);
                     o.grow = 0.3f;
                     o.turb = 1f;
-                    o.rise = Random.Range(0.1f, 0.6f);
-                    o.mass = Random.Range(0.3f, 0.8f) * o.r * o.r * 4f;
-                    o.life = Random.Range(5f, 14f) * Mathf.Max(0.3f, Settings.Smoke);
+                    o.rise = Luck(0.1f, 0.6f);
+                    o.mass = Luck(0.3f, 0.8f) * o.r * o.r * 4f;
+                    o.life = Luck(5f, 14f) * Mathf.Max(0.3f, Settings.Smoke);
                     o.tile = Wispy();
                 }
                 else { o.life = 0.01f; }
@@ -636,14 +774,14 @@ namespace VolumetricExplosions
                 Color32 colour = pl.tint == 3 ? new Color32(190, 225, 255, 255) : pl.tint == 1 ? new Color32(255, 255, 245, 255) : new Color32(255, 232, 195, 255);
                 for (int k = 0; k < n; k++)
                 {
-                    Vector3 way = Random.onUnitSphere;
+                    Vector3 way = LuckSphere();
                     if (onGround) way = OffGround(way, blastUp, 1f);
                     var e = new ParticleSystem.EmitParams
                     {
                         position = c + way * 0.3f,
-                        velocity = v0 * 0.6f + way * (fast * Random.Range(0.3f, 2.2f)),
-                        startLifetime = vacuum ? Random.Range(1.5f, 3.2f) : Random.Range(0.4f, 1.9f),
-                        startSize = Random.Range(0.05f, 0.13f) * (1f + 0.03f * pl.reach),
+                        velocity = v0 * 0.6f + way * (fast * Luck(0.3f, 2.2f)),
+                        startLifetime = vacuum ? Luck(1.5f, 3.2f) : Luck(0.4f, 1.9f),
+                        startSize = Luck(0.05f, 0.13f) * (1f + 0.03f * pl.reach),
                         startColor = colour,
                     };
                     sparks.Emit(e, 1);
@@ -656,15 +794,15 @@ namespace VolumetricExplosions
             float thrown = 5f + 2.5f * Mathf.Sqrt(pl.reach);
             for (int k = 0; k < bits; k++)
             {
-                Vector3 way = Random.onUnitSphere;
+                Vector3 way = LuckSphere();
                 if (onGround) way = OffGround(way, blastUp, 1f);
                 var e = new ParticleSystem.EmitParams
                 {
                     position = c + way * 0.3f,
-                    velocity = v0 * 0.7f + way * (thrown * Random.Range(0.4f, 2.4f)),
-                    startLifetime = Random.Range(1.5f, 3.6f),
-                    startSize = Random.Range(0.06f, 0.2f),
-                    rotation = Random.Range(0f, 360f),
+                    velocity = v0 * 0.7f + way * (thrown * Luck(0.4f, 2.4f)),
+                    startLifetime = Luck(1.5f, 3.6f),
+                    startSize = Luck(0.06f, 0.2f),
+                    rotation = Luck(0f, 360f),
                     startColor = new Color32(255, 255, 255, 255),
                 };
                 shards.Emit(e, 1);
@@ -851,7 +989,7 @@ namespace VolumetricExplosions
             w.dustCarry = Mathf.Min(want - n, 400f);
             for (int k = 0; k < n; k++)
             {
-                float rr = Random.Range(from, to), turn = Random.Range(0f, Mathf.PI * 2f);
+                float rr = Luck(from, to), turn = Luck(0f, Mathf.PI * 2f);
                 float cx = Mathf.Cos(turn), cz = Mathf.Sin(turn);
                 float px = w.x + cx * rr, pz = w.z + cz * rr;
                 float floor = GroundFar(px, pz, w.y, out bool wet);
@@ -862,21 +1000,21 @@ namespace VolumetricExplosions
                 // (how hard the blast wind blows there: full within eight of the blast's sizes, a third of that at the ring's end)
                 float strength = Mathf.Clamp01(Mathf.Pow(8f * w.dustSize / Mathf.Max(rr, 1f), 1.2f));
                 o.x = px; o.z = pz;
-                o.y = floor + Random.Range(0.3f, 1.2f) * (0.6f + 0.15f * w.dustSize);
-                float wind = Mathf.Clamp(40f * strength, 4f, 40f) * Random.Range(0.6f, 1.2f);
-                o.kx = cx * wind; o.kz = cz * wind; o.ky = wind * Random.Range(0.08f, 0.3f);
+                o.y = floor + Luck(0.3f, 1.2f) * (0.6f + 0.15f * w.dustSize);
+                float wind = Mathf.Clamp(40f * strength, 4f, 40f) * Luck(0.6f, 1.2f);
+                o.kx = cx * wind; o.kz = cz * wind; o.ky = wind * Luck(0.08f, 0.3f);
                 o.kloss = 1.6f; o.drag = 2f;
-                o.r = (1.2f + 0.05f * rr) * Random.Range(0.8f, 1.3f);
+                o.r = (1.2f + 0.05f * rr) * Luck(0.8f, 1.3f);
                 o.grow = 0.25f + 0.004f * rr;
                 o.turb = 0.4f + 0.04f * wind;
-                o.rise = -Random.Range(0.02f, 0.15f);
-                o.mass = Random.Range(0.3f, 0.8f) * o.r * o.r * 1.2f * (0.35f + 0.65f * strength);
-                o.fadeIn = Random.Range(0.05f, 0.15f);
-                o.life = Random.Range(5f, 12f) * Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.5f, 1f, Mathf.Clamp01(air));
-                float tone = Random.Range(0.8f, 1.1f);
+                o.rise = -Luck(0.02f, 0.15f);
+                o.mass = Luck(0.3f, 0.8f) * o.r * o.r * 1.2f * (0.35f + 0.65f * strength);
+                o.fadeIn = Luck(0.05f, 0.15f);
+                o.life = Luck(5f, 12f) * Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.5f, 1f, Mathf.Clamp01(air));
+                float tone = Luck(0.8f, 1.1f);
                 o.ar = w.dustColour.r * tone; o.ag = w.dustColour.g * tone; o.ab = w.dustColour.b * tone;
                 o.swell = Swell(new Vector3(cx, 0.2f, cz), wind, o.kloss, o.r);
-                o.tile = Random.value < 0.5f ? Wispy() : Lumpy();
+                o.tile = Luck(0f, 1f) < 0.5f ? Wispy() : Lumpy();
                 Born(i);
             }
         }
@@ -1146,26 +1284,26 @@ namespace VolumetricExplosions
             if (sunL.y < 0.174f && Settings.TestBlaze != 3f) return;
             int patches = R < 3.5f ? 0 : R < 7f ? 1 : R < 13f ? 2 : 3;
             var flung = new Vector3(pl.going.x, 0f, pl.going.z);
-            float carried = Mathf.Clamp01(flung.magnitude / 120f), first = Random.Range(0f, Mathf.PI * 2f);
+            float carried = Mathf.Clamp01(flung.magnitude / 120f), first = Luck(0f, Mathf.PI * 2f);
             if (carried > 0.05f) flung.Normalize();
             for (int k = 0; k < patches && fireCount < fires.Length - 2; k++)
             {
                 // (each in its own part of the round, so that they do not fall in a heap)
-                float turn = first + (k + Random.Range(-0.3f, 0.3f)) * (Mathf.PI * 2f / patches);
+                float turn = first + (k + Luck(-0.3f, 0.3f)) * (Mathf.PI * 2f / patches);
                 var way = new Vector3(Mathf.Cos(turn), 0f, Mathf.Sin(turn));
                 if (carried > 0.05f) way = (way + flung * (1.6f * carried)).normalized;
-                float far = R * Random.Range(0.9f, 1.6f) * (1f + 0.8f * carried);
+                float far = R * Luck(0.9f, 1.6f) * (1f + 0.8f * carried);
                 Fire g = f;
                 g.x = c.x + way.x * far; g.z = c.z + way.z * far;
                 g.y = GroundAt(g.x, g.z) + 0.2f;
-                g.r = Mathf.Max(0.5f, wide * Random.Range(0.25f, 0.45f));
-                g.left = g.total = pl.burn * Random.Range(0.45f, 0.85f);
+                g.r = Mathf.Max(0.5f, wide * Luck(0.25f, 0.45f));
+                g.left = g.total = pl.burn * Luck(0.45f, 0.85f);
                 // (no two quite alike: some burn harder than others)
-                g.rate = q * Mathf.Clamp(0.3f * (18f + 9f * R), 14f, 66f) * Random.Range(0.7f, 1.15f);
+                g.rate = q * Mathf.Clamp(0.3f * (18f + 9f * R), 14f, 66f) * Luck(0.7f, 1.15f);
                 g.scale = Mathf.Clamp(0.25f + 0.05f * R, 0.3f, 1f);
                 g.smoky = 0.15f;
                 g.patch = true;
-                g.due = Random.value; g.puff = 0f;
+                g.due = Luck(0f, 1f); g.puff = 0f;
                 Stands(ref g);
                 // (its light is on the smoke round it and no more: the light thrown on the ground and the wreck is the pool's)
                 g.lamp = AddLamp(g.x, g.y + Mathf.Max(g.r * 0.5f, 0.3f * g.tall), g.z, g.r * 1.6f, 1.2f, g.total, g.tint, true, 0f, 0f);
@@ -1208,9 +1346,9 @@ namespace VolumetricExplosions
                 f.puff -= dt;
                 if (f.puff <= 0f && !vacuum && grip > 0.2f && !f.patch)
                 {
-                    f.puff = 0.667f * Mathf.Sqrt(Mathf.Max(0.5f, 2f * f.r)) * Random.Range(0.85f, 1.15f);
-                    float lift = 0.34f * Mathf.Sqrt(gravity * 2f * f.r) * strength * Mathf.Min(1f, grip) * Random.Range(0.85f, 1.15f);
-                    if (lift > 0.5f) AddThermal(f.x + Random.Range(-0.2f, 0.2f) * f.r, f.y + 0.8f * f.r, f.z + Random.Range(-0.2f, 0.2f) * f.r, 0.8f * f.r * Random.Range(0.85f, 1.15f), lift, f.y + f.r * Random.Range(9f, 16f), 0.5f);
+                    f.puff = 0.667f * Mathf.Sqrt(Mathf.Max(0.5f, 2f * f.r)) * Luck(0.85f, 1.15f);
+                    float lift = 0.34f * Mathf.Sqrt(gravity * 2f * f.r) * strength * Mathf.Min(1f, grip) * Luck(0.85f, 1.15f);
+                    if (lift > 0.5f) AddThermal(f.x + Luck(-0.2f, 0.2f) * f.r, f.y + 0.8f * f.r, f.z + Luck(-0.2f, 0.2f) * f.r, 0.8f * f.r * Luck(0.85f, 1.15f), lift, f.y + f.r * Luck(9f, 16f), 0.5f);
                 }
                 while (f.due <= 0f)
                 {
@@ -1218,18 +1356,18 @@ namespace VolumetricExplosions
                     int i = Add();
                     if (i < 0) break;
                     ref P o = ref p[i];
-                    float turn = Random.Range(0f, Mathf.PI * 2f), out_ = f.r * Random.value * Random.value;
+                    float turn = Luck(0f, Mathf.PI * 2f), out_ = f.r * Luck(0f, 1f) * Luck(0f, 1f);
                     o.x = f.x + Mathf.Cos(turn) * out_; o.z = f.z + Mathf.Sin(turn) * out_;
                     o.y = hasGround ? GroundAt(o.x, o.z) + 0.2f : f.y;                       // (the fire lies on the ground, whichever way that slopes)
-                    o.r = f.scale * Random.Range(0.6f, 1.2f) * (0.6f + 0.4f * strength);
-                    o.ky = Random.Range(1f, 3f);
+                    o.r = f.scale * Luck(0.6f, 1.2f) * (0.6f + 0.4f * strength);
+                    o.ky = Luck(1f, 3f);
                     o.kloss = 2f; o.drag = 3f;
-                    o.heat = Random.Range(0.8f, 1.02f);
-                    o.cool = Random.Range(1.2f, 2.2f);
+                    o.heat = Luck(0.8f, 1.02f);
+                    o.cool = Luck(1.2f, 2.2f);
                     o.flame = 1f;
                     o.tint = f.tint;
                     // (it has some lift of its own, but it is mostly the bubbles of hot gas going up from the fire that carry it)
-                    o.rise = Random.Range(2.5f, 5f) * Mathf.Sqrt(f.scale * 2f) * (0.7f + 0.45f * puff) * (vacuum || grip <= 0.2f ? 1f : 0.45f);
+                    o.rise = Luck(2.5f, 5f) * Mathf.Sqrt(f.scale * 2f) * (0.7f + 0.45f * puff) * (vacuum || grip <= 0.2f ? 1f : 0.45f);
                     o.grow = 0.1f;
                     o.turb = 1.4f;
                     o.tile = Lumpy();
@@ -1238,17 +1376,17 @@ namespace VolumetricExplosions
                     bool tall = Settings.TestFire < 1f && !vacuum;
                     if (tall)
                     {
-                        float lick = f.lick * Random.Range(0.7f, 1.1f) * (0.6f + 0.4f * strength);
+                        float lick = f.lick * Luck(0.7f, 1.1f) * (0.6f + 0.4f * strength);
                         o.ky = lick; o.kloss = 1.2f;
                         o.rise = 0.8f * lick;
-                        o.cool = 1.2f * lick / Mathf.Max(f.tall * (0.6f + 0.4f * strength), 0.5f) * Random.Range(0.85f, 1.2f);
+                        o.cool = 1.2f * lick / Mathf.Max(f.tall * (0.6f + 0.4f * strength), 0.5f) * Luck(0.85f, 1.2f);
                     }
-                    if (Random.value < f.smoky * Mathf.Lerp(0.5f, 1f, f.soot))
+                    if (Luck(0f, 1f) < f.smoky * Mathf.Lerp(0.5f, 1f, f.soot))
                     {
                         float later = o.r * 2.2f;
-                        o.mass = Random.Range(1f, 2.4f) * Mathf.Max(0.15f, f.soot) * later * later;
-                        o.life = Random.Range(10f, 26f) * lasts;
-                        float tone = f.shade * Random.Range(0.8f, 1.4f);
+                        o.mass = Luck(1f, 2.4f) * Mathf.Max(0.15f, f.soot) * later * later;
+                        o.life = Luck(10f, 26f) * lasts;
+                        float tone = f.shade * Luck(0.8f, 1.4f);
                         o.ar = tone; o.ag = tone * 0.97f; o.ab = tone * 0.93f;
                     }
                     else if (tall)
@@ -1274,20 +1412,20 @@ namespace VolumetricExplosions
             float g = Mathf.Max(0.5f, gravity), R = pl.radius;
             for (int k = 0; k < n && fragCount < frags.Length; k++)
             {
-                Vector3 way = Random.onUnitSphere;
+                Vector3 way = LuckSphere();
                 // (away from the ground, as the ground lies; in the air, upward)
                 float off = Vector3.Dot(way, blastUp);
-                way += blastUp * (Mathf.Abs(off) * Random.Range(0.4f, 1f) + (onGround ? 0.25f : 0f) - off);
+                way += blastUp * (Mathf.Abs(off) * Luck(0.4f, 1f) + (onGround ? 0.25f : 0f) - off);
                 way.Normalize();
                 // (Thrown out of the fireball and well clear of it, at three to seven of its radii a second (up to 120 m/s), each
                 // trailing a streak as thick as the fire's own lumps: the "octopus" of a big explosion in footage, burning pieces
                 // arcing out with their smoke behind them. Thrown as high as one to three radii, as they first were, at about
                 // twenty-five metres a second, and trailing half a metre, they never left the fireball, and were not seen at all.)
-                float speed = Mathf.Min(120f, R * Random.Range(3f, 7f) + 6f);
+                float speed = Mathf.Min(120f, R * Luck(3f, 7f) + 6f);
                 frags[fragCount++] = new Frag
                 {
                     x = c.x, y = c.y + 0.3f, z = c.z, vx = v0.x * 0.7f + way.x * speed, vy = v0.y * 0.7f + way.y * speed, vz = v0.z * 0.7f + way.z * speed,
-                    life = Mathf.Clamp(2f * speed / g + 1.5f, 3f, 14f), size = Mathf.Clamp(0.25f + 0.05f * R, 0.35f, 1.5f) * Random.Range(0.7f, 1.3f),
+                    life = Mathf.Clamp(2f * speed / g + 1.5f, 3f, 14f), size = Mathf.Clamp(0.25f + 0.05f * R, 0.35f, 1.5f) * Luck(0.7f, 1.3f),
                     tint = (byte)pl.tint, white = pl.whiteTrails,
                     // (its trail begun only once it is out of the fireball: laid inside it, the trail's first puffs, cooling to
                     // smoke at once, were dark spots on the fire's face)
@@ -1322,7 +1460,7 @@ namespace VolumetricExplosions
                         if (Settings.TestRing != 1f) Strike(f.x, f.y, f.z, f.vx, f.vz, struck, f.size);
                         f.down = true; f.downAt = f.age;
                         f.vx = f.vy = f.vz = 0f;
-                        f.life = groundWet ? f.age : Settings.TestRing == 1f ? Mathf.Min(f.life, f.age + Random.Range(1.5f, 5f)) : f.age + Random.Range(3f, 10f);
+                        f.life = groundWet ? f.age : Settings.TestRing == 1f ? Mathf.Min(f.life, f.age + Luck(1.5f, 5f)) : f.age + Luck(3f, 10f);
                     }
                 }
                 f.due -= dt;
@@ -1358,33 +1496,33 @@ namespace VolumetricExplosions
                 int i = Add();
                 if (i < 0) return;
                 ref P o = ref p[i];
-                float turn = Random.Range(0f, Mathf.PI * 2f), outward = struck * Random.Range(0.05f, 0.15f);
+                float turn = Luck(0f, Mathf.PI * 2f), outward = struck * Luck(0.05f, 0.15f);
                 o.x = x; o.y = y + 0.15f; o.z = z;
-                float tone = Random.Range(0.85f, 1.1f);
+                float tone = Luck(0.85f, 1.1f);
                 o.ar = what.r * tone; o.ag = what.g * tone; o.ab = what.b * tone;
                 if (vacuum)
                 {
-                    float up = struck * Random.Range(0.1f, 0.35f);
+                    float up = struck * Luck(0.1f, 0.35f);
                     o.vx = Mathf.Cos(turn) * outward * 2f; o.vy = up; o.vz = Mathf.Sin(turn) * outward * 2f;
                     o.flags = Ballistic | DiesOnGround;
-                    o.r = 0.15f + 0.3f * size * Random.Range(0.6f, 1.2f);
+                    o.r = 0.15f + 0.3f * size * Luck(0.6f, 1.2f);
                     o.grow = 0.1f * outward;
-                    o.mass = Random.Range(0.15f, 0.45f) * o.r * o.r * 6f;
+                    o.mass = Luck(0.15f, 0.45f) * o.r * o.r * 6f;
                     o.life = 20f;
                     o.tile = Specks();
                 }
                 else
                 {
-                    o.kx = Mathf.Cos(turn) * outward + vx * 0.1f; o.kz = Mathf.Sin(turn) * outward + vz * 0.1f; o.ky = struck * Random.Range(0.08f, 0.2f);
+                    o.kx = Mathf.Cos(turn) * outward + vx * 0.1f; o.kz = Mathf.Sin(turn) * outward + vz * 0.1f; o.ky = struck * Luck(0.08f, 0.2f);
                     o.kloss = 3f; o.drag = 3f;
-                    o.r = 0.2f + size * Random.Range(0.6f, 1.2f);
+                    o.r = 0.2f + size * Luck(0.6f, 1.2f);
                     o.grow = groundWet ? 0.5f : 0.3f;
                     o.turb = 0.5f;
                     o.rise = groundWet ? -0.6f : -0.1f;
-                    o.mass = Random.Range(0.4f, 0.9f) * o.r * o.r * 3f;
-                    o.life = groundWet ? Random.Range(1f, 2.2f) : Random.Range(2f, 5f) * Mathf.Max(0.3f, Settings.Smoke);
+                    o.mass = Luck(0.4f, 0.9f) * o.r * o.r * 3f;
+                    o.life = groundWet ? Luck(1f, 2.2f) : Luck(2f, 5f) * Mathf.Max(0.3f, Settings.Smoke);
                     o.fadeIn = 0.05f;
-                    o.tile = groundWet ? Specks() : Random.value < 0.5f ? Wispy() : Lumpy();
+                    o.tile = groundWet ? Specks() : Luck(0f, 1f) < 0.5f ? Wispy() : Lumpy();
                 }
                 Born(i);
             }
@@ -1396,14 +1534,14 @@ namespace VolumetricExplosions
             int i = Add();
             if (i < 0) return false;
             ref P o = ref p[i];
-            o.x = x + Random.Range(-0.1f, 0.1f); o.y = y + Random.Range(-0.1f, 0.1f); o.z = z + Random.Range(-0.1f, 0.1f);
-            o.vx = vx * 0.12f + Random.Range(-0.5f, 0.5f); o.vy = vy * 0.12f + Random.Range(-0.5f, 0.5f); o.vz = vz * 0.12f + Random.Range(-0.5f, 0.5f);
-            o.r = size * Random.Range(0.8f, 1.4f);
-            o.heat = Random.Range(0.7f, 0.95f);
+            o.x = x + Luck(-0.1f, 0.1f); o.y = y + Luck(-0.1f, 0.1f); o.z = z + Luck(-0.1f, 0.1f);
+            o.vx = vx * 0.12f + Luck(-0.5f, 0.5f); o.vy = vy * 0.12f + Luck(-0.5f, 0.5f); o.vz = vz * 0.12f + Luck(-0.5f, 0.5f);
+            o.r = size * Luck(0.8f, 1.4f);
+            o.heat = Luck(0.7f, 0.95f);
             o.cool = 3f;
             o.flame = 1f;
             o.tint = tint;
-            o.tile = Random.value < 0.3f ? Wispy() : Lumpy();
+            o.tile = Luck(0f, 1f) < 0.3f ? Wispy() : Lumpy();
             if (vacuum)
             {
                 o.flags = Ballistic;
@@ -1417,17 +1555,17 @@ namespace VolumetricExplosions
                 // second: they gathered into a black ball sitting over the piece.)
                 o.flame = 0.6f;
                 o.drag = 4f; o.kloss = 2f;
-                o.ky = Random.Range(0.8f, 1.6f);
-                o.r = size * Random.Range(0.55f, 0.9f);
+                o.ky = Luck(0.8f, 1.6f);
+                o.r = size * Luck(0.55f, 0.9f);
                 o.grow = 0.15f;
-                o.turb = Random.Range(0.8f, 1.4f);
-                o.rise = Random.Range(2.2f, 3.2f);
-                o.heat = Random.Range(0.42f, 0.55f);
-                o.cool = Random.Range(1.4f, 2f);
-                o.mass = Random.Range(0.6f, 1.3f) * o.r * o.r * 2.2f;
-                o.life = Random.Range(3f, 6f) * lasts;
+                o.turb = Luck(0.8f, 1.4f);
+                o.rise = Luck(2.2f, 3.2f);
+                o.heat = Luck(0.42f, 0.55f);
+                o.cool = Luck(1.4f, 2f);
+                o.mass = Luck(0.6f, 1.3f) * o.r * o.r * 2.2f;
+                o.life = Luck(3f, 6f) * lasts;
                 o.fadeIn = 0.15f;
-                float tone = white ? Random.Range(0.45f, 0.7f) : Random.Range(0.03f, 0.07f);
+                float tone = white ? Luck(0.45f, 0.7f) : Luck(0.03f, 0.07f);
                 o.ar = tone; o.ag = tone; o.ab = tone;
             }
             else
@@ -1436,9 +1574,9 @@ namespace VolumetricExplosions
                 o.grow = 0.06f;
                 o.turb = 0.8f;
                 o.rise = 0.6f;
-                o.mass = Random.Range(0.6f, 1.3f) * o.r * o.r * 4f;
-                o.life = Random.Range(2.5f, 6f) * lasts;
-                float tone = white ? Random.Range(0.45f, 0.7f) : Random.Range(0.03f, 0.07f);
+                o.mass = Luck(0.6f, 1.3f) * o.r * o.r * 4f;
+                o.life = Luck(2.5f, 6f) * lasts;
+                float tone = white ? Luck(0.45f, 0.7f) : Luck(0.03f, 0.07f);
                 o.ar = tone; o.ag = tone; o.ab = tone;
                 if (Settings.TestSoot < 1f)
                 {
@@ -1446,10 +1584,10 @@ namespace VolumetricExplosions
                     // or so, by which time the piece is out of the fireball it was thrown from. (It went dark within a fifth of a
                     // second, still inside the fire: each piece's trail was a string of black beads on the fireball, which was the
                     // most of the "blobs" on a fireball in its first second.) Thinner, as so many more puffs make it.
-                    o.r = size * Random.Range(0.7f, 1.1f);
-                    o.heat = Random.Range(0.85f, 1f);
-                    o.cool = Random.Range(1.3f, 1.8f);
-                    o.mass = Random.Range(0.6f, 1.3f) * o.r * o.r * 2.2f;
+                    o.r = size * Luck(0.7f, 1.1f);
+                    o.heat = Luck(0.85f, 1f);
+                    o.cool = Luck(1.3f, 1.8f);
+                    o.mass = Luck(0.6f, 1.3f) * o.r * o.r * 2.2f;
                 }
             }
             Born(i);

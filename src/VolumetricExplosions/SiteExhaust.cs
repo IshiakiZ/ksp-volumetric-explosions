@@ -526,7 +526,10 @@ namespace VolumetricExplosions
                     detailRepeat = Settings.TestCloudRepeat > 0f ? Mathf.Clamp(Settings.TestCloudRepeat * e.nozzle, 4f, 400f) : Mathf.Max(detailRepeat, Mathf.Clamp(0.9f * e.nozzle, 20f, 160f));
                 }
                 else vent.due += Mathf.Max(stretch / (0.6f * wide), dt * standing) * q * (0.45f + 0.55f * Mathf.Sqrt(e.amount));
-                int puffs = Mathf.Min((int)vent.due, 48);
+                // (at most 48 a frame at sixty frames a second, as many a second however slow the frames: a cap of 48 a frame whatever its
+                // length left a small engine's trail at 20 frames a second and 1 km/s a puff every metre for puffs no wider, a row of
+                // beads, as SmokeScreen's "decluster" is there to prevent (the study of other mods, 2026-10-24))
+                int puffs = Mathf.Min((int)vent.due, Mathf.Clamp(Mathf.CeilToInt(48f * dt * 60f), 48, 192));
                 vent.due -= (int)vent.due;
                 float thrown = Mathf.Clamp(32f + 42f * e.nozzle, 35f, 110f) * (0.4f + 0.6f * e.running);
                 float stays = e.lasts * hangs / (1f + speed / 250f);

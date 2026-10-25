@@ -99,7 +99,19 @@ namespace VolumetricExplosions
             int rate = distance > 1500f ? Rate / 2 : Rate;
             // How long the rumble goes on: the fire's roar and the echoes, longer the larger and the further.
             float tail = Mathf.Clamp(1.5f + 0.9f * cube + 1.2f * Mathf.Log10(Mathf.Max(distance, 10f) / 10f) + 0.6f * fireSeconds, 1.5f, 11f);
-            int n = (int)((tail + 0.5f) * rate);
+            // ---- (since 0.9.0) a recording of a real blast in place of the made roar, where the mod has recordings (see Recorded):
+            // the one nearest in kind to the distance, slowed (deeper and longer) the bigger the blast, as a bigger fireball's roar is
+            float[] heard = Recorded.On ? Recorded.For(distance, seed) : null;
+            float step = 1f;
+            int heardLength = 0;
+            if (heard != null && heard.Length > 2)
+            {
+                float pitch = Mathf.Clamp(1.4f * Mathf.Pow(cube, -0.25f), 0.6f, 1.25f) * (0.95f + 0.1f * Rnd());
+                step = pitch * Recorded.Rate / rate;
+                heardLength = (int)((heard.Length - 2) / step);
+            }
+            else heard = null;
+            int n = Math.Max((int)((tail + 0.5f) * rate), (int)(Lead * rate) + heardLength + rate / 4);
             var s = new float[n];
             // ---- the crack: a Friedlander wave, its positive phase as the cube root of the charge, a little longer with distance
             float td = Mathf.Clamp(0.0035f * cube * (1f + 0.12f * Mathf.Log(1f + distance / 50f)), 0.002f, 0.09f);
@@ -122,8 +134,21 @@ namespace VolumetricExplosions
             // twentieth of a second and dying away over the tail, as loud against the crack as the distance has made it (close by the
             // crack is everything; far off the rumble is most of what is heard)
             float roarLevel = Mathf.Lerp(0.18f, 0.55f, Mathf.Clamp01(Mathf.Log10(Mathf.Max(distance, 10f) / 30f) / 2.3f)) * (0.7f + 0.3f * Mathf.Clamp01(fireSeconds / 3f));
+            if (heard != null)
+            {
+                // (the recording read at its step, a sample's worth between two of its own taken in between; begun over 5 ms)
+                float heardLevel = 2f * roarLevel;
+                int fadeIn = Math.Max(1, rate / 200);
+                for (int i = 0; i < heardLength && start + i < n; i++)
+                {
+                    float pos = i * step;
+                    int i0 = (int)pos;
+                    float x = heard[i0] + (heard[i0 + 1] - heard[i0]) * (pos - i0);
+                    s[start + i] += heardLevel * x * Mathf.Clamp01(i / (float)fadeIn);
+                }
+            }
             float brown = 0f, crackle = 0f;
-            for (int i = 0; i < n - start; i++)
+            for (int i = 0; heard == null && i < n - start; i++)
             {
                 float t = i / (float)rate;
                 brown = brown * 0.98f + (Rnd() * 2f - 1f) * 0.2f;

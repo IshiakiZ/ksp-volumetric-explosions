@@ -353,6 +353,7 @@ namespace VolumetricExplosions
             if (job != null) { try { job.Wait(); } catch (Exception) { } job = null; }
             if (raysOut) { raysOut = false; rayJob.Complete(); rays.Dispose(); hits.Dispose(); }
             EndSurvey();
+            FireSoundOff(0f);
             for (int n = 0; n < lights.Length; n++)
                 if (lights[n] != null && lights[n].enabled) { lights[n].enabled = false; lightsOn = Mathf.Max(0, lightsOn - 1); }
             if (lighting != null) { try { lighting.Wait(); } catch (Exception) { } lighting = null; }
@@ -538,7 +539,10 @@ namespace VolumetricExplosions
             boxMaterial.SetVector("_VolLampA", LampFor(first));
             boxMaterial.SetVector("_VolLampB", LampFor(second));
             boxMaterial.SetVector("_VolLampC", LampFor(third));
-            boxMaterial.SetVector("_VolLamps", new Vector4(first < 0 ? 0f : 0.25f * lamps[first].power, second < 0 ? 0f : 0.25f * lamps[second].power, third < 0 ? 0f : 0.25f * lamps[third].power, 0f));
+            // (and which of them are fires burning in one place, the light of a fire on the ground that is not sliding: the smoke at the foot
+            // of such a fire's column is carried no more than its flame is, see standsAt in volume.glsl)
+            float standing = (Stands(first) ? 1f : 0f) + (Stands(second) ? 2f : 0f) + (Stands(third) ? 4f : 0f);
+            boxMaterial.SetVector("_VolLamps", new Vector4(first < 0 ? 0f : 0.25f * lamps[first].power, second < 0 ? 0f : 0.25f * lamps[second].power, third < 0 ? 0f : 0.25f * lamps[third].power, standing));
             boxMaterial.SetVector("_VolTint", dustHue);
             TuneCuts();
             TuneScene();
@@ -586,7 +590,11 @@ namespace VolumetricExplosions
             // its gas between grids, as smoke is (see _VolFireGone in volume.glsl). (Carried on as smoke is, a pool's fire rose off
             // its pool between one grid and the next, and dropped back on to it with the next, which came four times a second when
             // the game was busy: "the fire levitates a bit, resets, levitates a bit".)
-            bool goes = fireCount == 0 || fragCount > 0 || time - fireballAt < 4f || time - blazeSeen < 1f || Settings.TestFire >= 1f;
+            // (Burning fragments only while they fly: once down, each burns where it lies. Counted down or flying, as until 2026-10-21,
+            // every crash's fires were carried as smoke is for as long as any piece of wreckage still burned, and rose and dropped back.)
+            bool flying = false;
+            for (int n = 0; n < fragCount && !flying; n++) flying = !frags[n].down;
+            bool goes = fireCount == 0 || flying || time - fireballAt < 4f || time - blazeSeen < 1f || Settings.TestFire >= 1f;
             flameCarried = Mathf.MoveTowards(flameCarried, goes ? 1f : 0f, 2f * Time.deltaTime);
             // (And its flames' pattern is read where the smoke as a whole has gone by now, which goes on smoothly from frame to frame:
             // see firePattern. From where the shader has each bit of smoke, the grid's "was" carried on since it was made, that is so
@@ -880,6 +888,9 @@ namespace VolumetricExplosions
                 boxMaterial.SetVector(sceneDir[n], new Vector4(dir.x, dir.y, dir.z, 0f));
             }
         }
+
+        /// <summary>Whether a lamp is the light of a fire burning in one place: steady (a fire's, not a blast's flash), not sliding, not climbing.</summary>
+        bool Stands(int n) => n >= 0 && lamps[n].steady && lamps[n].vx * lamps[n].vx + lamps[n].vy * lamps[n].vy + lamps[n].vz * lamps[n].vz < 0.25f && Mathf.Abs(lamps[n].climb) < 0.5f;
 
         /// <summary>Where a fire is and the square of its size, as the shader is told it: in the grid's axes, and in the box as it stood when its grid was made.</summary>
         Vector4 LampFor(int n)
@@ -1402,6 +1413,7 @@ namespace VolumetricExplosions
             pixelAngle = eye != null ? 2f * Mathf.Tan(eye.fieldOfView * 0.5f * Mathf.Deg2Rad) / Mathf.Max(1, eye.pixelHeight) : 0f;
             Air.Lap(4, ref lap);
 
+            if (firesLeft.Count > 0) FiresLeft();
             foreach (Plan plan in waiting) Burst(plan);
             waiting.Clear();
             Air.Lap(5, ref lap);
@@ -1409,10 +1421,12 @@ namespace VolumetricExplosions
             Wakes(dt);
             Thermals(dt);
             Waves(dt);
+            Knocks(dt);
             Lamps(dt);
             Air.Lap(6, ref lap);
             long sub = lap;
             Fires(dt);
+            FireSound(dt);
             Air.SubLap(0, ref sub);
             Frags(dt);
             Air.SubLap(1, ref sub);
@@ -1462,8 +1476,10 @@ namespace VolumetricExplosions
                 var t = new System.Text.StringBuilder("  at " + Time.realtimeSinceStartup.ToString("F1") + " s, " + (riding ? "riding" : "plain") + " step " + stepsDone + ": " + ((done - began) * f).ToString("F1") + " ms (waited " + ((waited - began) * f).ToString("F1") + ")");
                 for (int k = 0; k < 14 && k < Air.Part.Length; k++) { double d = (Air.Part[k] - partsBefore[k]) * f; if (d >= 0.5) t.Append(", lap " + k + ": " + d.ToString("F1")); }
                 MadeTimes.Add(t.ToString());
-                if (MadeTimes.Count > 80) MadeTimes.RemoveAt(0);
+                foreach (string burst in Bursts) MadeTimes.Add(burst);
+                if (MadeTimes.Count > 80) MadeTimes.RemoveRange(0, MadeTimes.Count - 80);
             }
+            Bursts.Clear();
             stepsDone++;
 #endif
         }
@@ -2145,6 +2161,12 @@ namespace VolumetricExplosions
         }
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         float Luck(float a, float b) => a + (b - a) * ((LuckBits() >> 8) * (1f / 16777216f));
+        /// <summary>A way, every way as likely (see LuckBits): as far up the axis as a flat chance has it, and round it at a chance.</summary>
+        Vector3 LuckSphere()
+        {
+            float z = Luck(-1f, 1f), turn = Luck(0f, 2f * Mathf.PI), s = Mathf.Sqrt(Mathf.Max(0f, 1f - z * z));
+            return new Vector3(s * Mathf.Cos(turn), s * Mathf.Sin(turn), z);
+        }
 
         // ================================================================== light through the cloud
 

@@ -89,7 +89,7 @@ Shader "VolumetricExplosions/Volume"
             float4 _VolLampA;     // xyz: where the strongest fire is, in metres from the site's origin, w: its size squared;
             float4 _VolLampB;     // the second
             float4 _VolLampC;     // and the third
-            float4 _VolLamps;     // xyz: how bright each of the three is
+            float4 _VolLamps;     // xyz: how bright each of the three is; w: which of them are fires burning in one place (1, 2, 4 added: the first, second, third)
             float4 _VolSceneA;     // The lamps of the scene round about (floodlights, the pad's own lights, buildings' lamps), four of them: xyz where, in the grid's axes, w its reach squared (nought: none)
             float4 _VolSceneB;
             float4 _VolSceneC;
@@ -394,6 +394,27 @@ Shader "VolumetricExplosions/Volume"
                 return 0.62 * n1 + 0.38 * n2;
             }
 
+            // How much the smoke at a place is a fire's own column at its foot, where the fire burns in one place (0 to 1): within about the
+            // fire's width of it and up through the first few of its widths, the column widening a little as it rises. Smoke rising off such a
+            // fire is fed from it as fast as it rises, and its picture there stands from one grid to the next as the flame's does (see
+            // _VolFireGone.w): carried on with its gas between grids, as drifting smoke is, the column's foot rose off its fire and dropped back
+            // on to it with each new grid. (The owner, 2026-10-21, of a crash: "whenever you crash and the fire is generating smoke, the smoke
+            // lifts and then goes back down to generate a little more smoke".) The three strongest fires, those that stand.
+            float standsAt(float3 here)
+            {
+                float s = 0.0;
+                { [loop] for (int n = 0; n < 3; n++)
+                {
+                    if (Mod(floor(_VolLamps.w / exp2(float(n))), 2.0) < 0.5) continue;
+                    float4 lamp = n == 0 ? _VolLampA : n == 1 ? _VolLampB : _VolLampC;
+                    float r = sqrt(max(lamp.w, 1e-4));
+                    float3 d = here - lamp.xyz;
+                    float up = max(d.y, 0.0), across = length(d.xz) - 0.25 * up;
+                    s = max(s, (1.0 - smoothstep(r, 2.2 * r, across)) * (1.0 - smoothstep(2.0 * r, 6.0 * r, up)));
+                } }
+                return s;
+            }
+
             // What is left in the smoke where something has gone through it (see Wakes.cs): a tunnel as wide as the thing, filling in again from its
             // walls as it ages, the walls a little thicker for the smoke pushed into them; the smoke round it wound round the way the air left
             // turning there carries it (behind a blunt thing a little, one way and then the other along its path, a vortex street; round a wing's tip
@@ -589,6 +610,8 @@ Shader "VolumetricExplosions/Volume"
                     float3 gone = (going.xyz - 0.5) * _VolFlow.x;
                     gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
                     float3 here = p * _VolSize.xyz + _VolOffset.xyz;
+                    // (and at the foot of a fire's column, where the fire burns in one place, carried no more than its flame is: see standsAt)
+                    if (_VolLamps.w > 0.5 && _VolFireGone.w < 0.999) gone *= 1.0 - standsAt(here) * (1.0 - _VolFireGone.w);
                     float3 was = here - gone - _VolDetail.xyz;
                     float3 at = p + 0.5 - gone * perSize;
                     if (reread) heldTone = SampleLod(_Around, at, 0.0);

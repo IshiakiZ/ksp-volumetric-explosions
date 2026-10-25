@@ -382,6 +382,7 @@ namespace VolumetricExplosions
                     {
                         if (blast == null) continue;
                         Plan plan = Plan.Make((Vector3d)blast.transform.position, blast.strength);
+                        plan.warm = WarmingNow;
                         LastPlan = plan.label ?? "";
                         // (what went off, for its own bang (Bangs): its charge taken as a tenth of the propellant that burns, as for liquid
                         // propellants going off on a pad, and no less than a part breaking up gives; near the ground if within its reach of it;
@@ -1295,6 +1296,10 @@ namespace VolumetricExplosions
         /// <summary>(What the sun's view of the smoke was taken over last: see SunShadow.)</summary>
         public static string SunShadowNow() => SunShadow.Said + (Instance != null ? "; " + Instance.sunShadow.Probe() : "");
         public static string SunBlock(string arg) => Instance != null ? Instance.sunShadow.Block(arg) : "not running";
+#if DEV
+        /// <summary>(Development build: blasts push craft or not, for this run: "on", "off"; the settings file is not touched.)</summary>
+        public static string Pushes(string v) { Settings.Knock = v == "on"; return Settings.Knock ? "blasts push craft" : "blasts push nothing"; }
+#endif
 #endif
 
         /// <summary>(The lamps of the scene that may light smoke, as last looked for.)</summary>

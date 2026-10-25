@@ -20,6 +20,7 @@ namespace VolumetricExplosions
         public bool surfaceBelow;          // there is ground or water within reach below
         public Vector3d surfacePoint, surfaceNormal;
         public bool water, underwater, paved;
+        public bool warm;                  // the Air's warm-up's own, set off out of sight at a flight's start (no blow on the sea)
         public Color dust;                 // colour of the ground there
         public float daylight;             // 0 night to 1 day
 

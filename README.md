@@ -42,7 +42,8 @@ On a Mac, a copy downloaded with a browser runs slower until you allow its libra
 ## Settings
 
 In `GameData/VolumetricExplosions/PluginData/settings.cfg`: `quality` (0.2 light to 3 heavy), `size`, `smoke` (how
-long it hangs), `wind`, and `enabled = false` for the game's own explosions.
+long it hangs), `wind`, `blasts_push = true` for blasts that push craft and break what they knock too hard (0.9.0; off as
+it comes), and `enabled = false` for the game's own explosions.
 [All of them](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Settings).
 
 ## Good to know
@@ -52,7 +53,7 @@ long it hangs), `wind`, and `enabled = false` for the game's own explosions.
 
 ## Works on
 
-Mac: tried. Windows 11 (Direct3D 11 and OpenGL): this version tried (launches, crashes, the fire's mended light). Linux: never run.
+Mac: tried. Windows 11 (Direct3D 11 and OpenGL): 0.8.0 tried (launches, crashes, the fire's mended light, the smoke standing at a fire); 0.9.0's fireball laid over two frames made and filmed there, its blasts that push tried there. Linux: never run.
 
 **More:** [the long description](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/The-long-description) (everything in full,
 and what was tried on each system) and the rest of the [wiki](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki).
