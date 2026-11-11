@@ -132,6 +132,11 @@ Shader "VolumetricExplosions/Volume"
             float4 _VolCutF;
             float4 _VolSlot;     // xy: where in the picture it is drawn into this patch's own part of it begins, in pixels (see layers.glsl: the patches drawn at half size share one picture, each in a slot of its own)
             float4 _VolQuarter;     // a patch walked a quarter of its pixels a frame (Layers; carry.glsl): xy which pixel of each two by two of its slot this frame's are; z 1 while it is (each pixel drawn is then that one of its two by two)
+            float4 _VolHole;     // (since 2026-10-25) a rectangle of the camera's picture (0 to 1 each way, xy to zw, as the game draws into its pictures) given to a burning patch's flames, walked whole by themselves (see Layers.ForCamera, Site.FlameRect)
+            float4 _VolHoleWay;     // x: 0 none; 1 this walk (at half size) leaves that rectangle out; 2 this walk (whole) walks only the rectangle
+            float4 _VolFireLook;     // (since 2026-10-26) a fire in the open's flames (see firePattern, and the flame in the walk): x how much of a third, finer size of lump is in their pattern (0: two sizes, as until then); y how far the pattern is drawn out upward (0.62 until then: a lump half as tall again as it is wide); z half the width of the step from no flame to flame where it is torn into tongues (0.05 until then); w how much the billows cut it into tongues, against the pattern (0.4 until then)
+            float4 _VolFireLight;     // x: how bright a fire in the open's folded flame is (0.45 until 2026-10-26), y: how dim the creases between its billows are, against their tops (0.25 until then); z: how steeply the fires' light on the smoke round them falls off (1: as until then, as one over the square of the distance, past the fire's own size; 2 as one over the fourth power), w: how strong that light is (8 until then)
+            float4 _VolFireShine;     // x: how hot a fire's smoke is when it begins to shine of itself (0.28 until 2026-10-26; at full 0.27 hotter), y: how much it shines then (0.45 until then); z: how hot a fire's flame is drawn, against the heat of its gas (1 until then: gas that comes off hotter, to stand as high as a real fire's does, is drawn as it would be cooler, its foot yellow and not white); w: how much flame it takes to burn rather than be torn away (0.35 until then)
             float4 _VolSunMapFrom;     // what stands between the smoke and the sun (see SunShadow.cs): xyz where the sun's-eye picture is taken from, w: one over its width, metres
             float4 _VolSunMapRight;     // xyz: the picture's right, as the sun sees it
             float4 _VolSunMapUp;     // xyz: its up
@@ -385,13 +390,17 @@ Shader "VolumetricExplosions/Volume"
             // made, every frame: _VolFireGone.)
             float firePattern(float3 was, float level)
             {
-                float3 q = float3(was.x, was.y * 0.62, was.z) * _VolFire.y;
+                float3 q = float3(was.x, was.y * _VolFireLook.y, was.z) * _VolFire.y;
                 float rise = _VolFire.x * _VolFire.y;
                 // (as finely as the billows are read where they are, for the size of these lumps against theirs)
                 float l = max(level + log2(0.093 * _VolFire.y / max(_VolDetail.w, 1e-4)), 0.0);
                 float n1 = SampleLod(_Detail, (q - float3(0.0, rise, 0.0)) * 0.093 + float3(0.29, 0.61, 0.17), l).r;
                 float n2 = SampleLod(_Detail, (q - float3(0.0, 1.7 * rise, 0.0)) * 0.25 + float3(0.83, 0.07, 0.53), l + 1.4).r;
-                return 0.62 * n1 + 0.38 * n2;
+                float n = 0.62 * n1 + 0.38 * n2;
+                // (and a third size, finer, licking up faster again: the small tongues and wrinkles along a flame's edge; added about nought,
+                // so that the pattern is as bright and as torn on the whole as with two)
+                if (_VolFireLook.x > 0.0) n += _VolFireLook.x * (SampleLod(_Detail, (q - float3(0.0, 2.6 * rise, 0.0)) * 0.62 + float3(0.47, 0.91, 0.33), l + 2.7).r - 0.5);
+                return n;
             }
 
             // How much the smoke at a place is a fire's own column at its foot, where the fire burns in one place (0 to 1): within about the
@@ -484,6 +493,16 @@ Shader "VolumetricExplosions/Volume"
             {
                 float4 result = float4(0.0, 0.0, 0.0, 0.0);
                 float4 result1 = float4(0.0, 0.0, 0.0, 0.0);
+                // (Since 2026-10-25: a burning patch's flames are walked whole, by themselves, into the ships' picture, and the walk at half size
+                // leaves their rectangle to that one, but for a couple of its pixels inside the edge, which the picture passes over there (see
+                // _VolHoleA in layers.glsl): so that neither leaves a gap nor a seam. Enlarged from half size, a fire's tongues were a blur of
+                // colour. See Layers.ForCamera.)
+                if (_VolHoleWay.x > 0.5)
+                {
+                    float2 at = IN.vs_TEXCOORD1.xy / IN.vs_TEXCOORD1.w * 0.5 + 0.5;
+                    bool inside = at.x >= _VolHole.x && at.x < _VolHole.z && at.y >= _VolHole.y && at.y < _VolHole.w;
+                    if (inside == (_VolHoleWay.x < 1.5)) discard;
+                }
                 float3 eye = _WorldSpaceCameraPos;
                 float3 rd = normalize(IN.vs_TEXCOORD0 - eye);
                 // The same ray in the box's own coordinates (-0.5 to 0.5 each way). The distance along it stays in metres.
@@ -846,7 +865,7 @@ Shader "VolumetricExplosions/Volume"
                             // (Most of a fire's flame burns whole: only where it is thin is it torn. Cut more keenly, as first tried, a young
                             // fireball, which should be luminous all through, was smoke with a few bright patches in it.)
                             float body = (1.0 - exp(-flame * _VolParams.w * 2.0)) * smoothstep(0.05, 0.35, hotHere);
-                            float tongue = smoothstep(0.30, 0.40, body * 1.2 + (fireN - 0.5) * 1.2 * _VolFire.z + (lump - 0.45) * 0.4);
+                            float tongue = smoothstep(_VolFireShine.w - _VolFireLook.z, _VolFireShine.w + _VolFireLook.z, body * 1.2 + (fireN - 0.5) * 1.2 * _VolFire.z + (lump - 0.45) * _VolFireLook.w);
                             burning = flame * _VolParams.w * tongue * (0.7 + 0.9 * fireN);
                             // (A fuel fire's thick flame is folded at the size of its billows, as photographs of fuel fireballs show it: bright
                             // where a billow's top faces out, and in the creases between billows, where cold air is drawn in, cooler, dim and dark
@@ -856,12 +875,15 @@ Shader "VolumetricExplosions/Volume"
                             { [loop] for (int once = folded ? 0 : 1; once < 1; once++)
                             {
                                 float top = smoothstep(0.40, 0.52, lump);
-                                burning *= lerp(0.25, 1.0, top) * 0.45;
+                                burning *= lerp(_VolFireLight.y, 1.0, top) * _VolFireLight.x;
                                 sigma += flame * _VolParams.w * (1.0 - top) * tongue;
                                 fireHot *= lerp(0.6, 1.0, top);
                             } }
-                            // (soot only where it has cooled: a fuel fireball is luminous all through for its first second)
-                            sigma += flame * _VolParams.w * _VolFire.z * 0.45 * smoothstep(0.5, 0.25, fireN) * (1.0 - tongue) * smoothstep(0.75, 0.35, hotHere);
+                            // (soot only where it has cooled: a fuel fireball is luminous all through for its first second. And in all of what the
+                            // tongues tear away, whichever lump of the pattern it lies in, the darker lumps the darker: until 2026-10-25 only the
+                            // darker half was, and the rest showed nothing at all, holes between a fire's tongues and a band above them that one saw
+                            // through before its smoke began, "where the fire connects to the smoke, there's a gap", the owner)
+                            sigma += flame * _VolParams.w * _VolFire.z * 0.45 * lerp(0.55, 1.0, smoothstep(0.5, 0.25, fireN)) * (1.0 - tongue) * smoothstep(0.75, 0.35, hotHere);
                         }
                         else burning = flame * _VolParams.w * lerp(clamp(2.5 * lump - 0.45, 0.0, 1.8), 0.7, _VolPeak.y);
                         // An engine's flame (see jetPattern): where it is thin, at its edge and its far end, the pattern tears it into
@@ -931,7 +953,7 @@ Shader "VolumetricExplosions/Volume"
                             continue;
                         }
                         float4 air = SampleLod(_Volume, at, 0.0);
-                        float heat = jetN >= 0.0 ? air.a * 1.2 * clamp(1.0 + (jetN - 0.45) * lerp(_VolJetFlow.y, _VolJetFlow.z, jetFar), 0.15, 1.2) * jetCooled + 0.9 * diamonds : fireN >= 0.0 ? fireHot * 1.2 * (0.5 + 0.85 * fireN) : air.a * 1.2 * (0.72 + 0.56 * lerp(lump, 0.5, _VolPeak.y));
+                        float heat = jetN >= 0.0 ? air.a * 1.2 * clamp(1.0 + (jetN - 0.45) * lerp(_VolJetFlow.y, _VolJetFlow.z, jetFar), 0.15, 1.2) * jetCooled + 0.9 * diamonds : fireN >= 0.0 ? fireHot * 1.2 * (0.5 + 0.85 * fireN) * _VolFireShine.z : air.a * 1.2 * (0.72 + 0.56 * lerp(lump, 0.5, _VolPeak.y));
                         float3 hot = heat < 0.25 ? _VolHot1.rgb * (heat * 4.0) : heat < 0.5 ? lerp(_VolHot1.rgb, _VolHot2.rgb, heat * 4.0 - 1.0) : heat < 0.75 ? lerp(_VolHot2.rgb, _VolHot3.rgb, heat * 4.0 - 2.0) : lerp(_VolHot3.rgb, _VolHot4.rgb, min(heat * 4.0 - 3.0, 1.0));
                         // (A fire's light goes with its heat far more steeply than its colour does (a black body's light in what the eye sees
                         // grows many times over between a dull red and a yellow heat): its hottest parts, low in it and in the lumps of the
@@ -970,7 +992,10 @@ Shader "VolumetricExplosions/Volume"
                         }
                         float sky = exp(-air.b * 8.0) * (1.0 - 0.55 * cleft);
                         float3 toA = here - _VolLampA.xyz, toB = here - _VolLampB.xyz, toC = here - _VolLampC.xyz;
-                        float3 fromLamp = float3(_VolLamps.x * _VolLampA.w / (dot(toA, toA) + _VolLampA.w + 1e-4), _VolLamps.y * _VolLampB.w / (dot(toB, toB) + _VolLampB.w + 1e-4), _VolLamps.z * _VolLampC.w / (dot(toC, toC) + _VolLampC.w + 1e-4));
+                        float3 nearLamp = float3(_VolLampA.w / (dot(toA, toA) + _VolLampA.w + 1e-4), _VolLampB.w / (dot(toB, toB) + _VolLampB.w + 1e-4), _VolLampC.w / (dot(toC, toC) + _VolLampC.w + 1e-4));
+                        // (round a fire in the open, falling off as steeply as its look says: see _VolFireLight)
+                        if (folded && abs(_VolFireLight.z - 1.0) > 0.001) nearLamp = pow(nearLamp, ((float3)(_VolFireLight.z)));
+                        float3 fromLamp = _VolLamps.xyz * nearLamp;
                         float allLamps = fromLamp.x + fromLamp.y + fromLamp.z;
                         float firelight = min(allLamps, 1.0);
                         // (The fires' light reaches a place only through the smoke between: in a thick cloud with the fire inside, its far side
@@ -1002,7 +1027,7 @@ Shader "VolumetricExplosions/Volume"
                         // (A big fire's light on the smoke beside it is many times the sun's (a fireball's face at 1300 K gives off some fifty times
                         // the sun's light for every bit of sky it fills): twice as strong round a fire in the open since its light has been stopped
                         // by the smoke on its way and the daylight left on the smoke, so that what it reaches glows orange, as at dusk it did before.)
-                        float3 light = (_VolSun.rgb * (sun * shine * relief) + _VolAmb.rgb * (0.3 + 0.7 * sky)) * dazzle + _VolGlow.rgb * (firelight * (folded && _VolFire.w < 2.5 ? 8.0 : 4.0));
+                        float3 light = (_VolSun.rgb * (sun * shine * relief) + _VolAmb.rgb * (0.3 + 0.7 * sky)) * dazzle + _VolGlow.rgb * (firelight * (folded && _VolFire.w < 2.5 ? _VolFireLight.w : 4.0));
                         // (and the lamps of the scene: at night a launch's smoke in the floodlights is not left black where its own fire does not reach)
                         if (_VolSceneA.w > 0.0) light += clamp(sceneLamp(here, _VolSceneA, _VolSceneTintA, _VolSceneDirA) + sceneLamp(here, _VolSceneB, _VolSceneTintB, _VolSceneDirB)
                                                              + sceneLamp(here, _VolSceneC, _VolSceneTintC, _VolSceneDirC) + sceneLamp(here, _VolSceneD, _VolSceneTintD, _VolSceneDirD), 0.0, 8.0) * dazzle;
@@ -1016,7 +1041,7 @@ Shader "VolumetricExplosions/Volume"
                             float heatS = min(air.a * 1.2 * lerp(0.5, 1.0, smoothstep(0.40, 0.52, lump)), _VolFire.w > 2.5 ? 9.0 : 0.62);
                             float3 hotS = heatS < 0.25 ? _VolHot1.rgb * (heatS * 4.0) : heatS < 0.5 ? lerp(_VolHot1.rgb, _VolHot2.rgb, heatS * 4.0 - 1.0) : heatS < 0.75 ? lerp(_VolHot2.rgb, _VolHot3.rgb, heatS * 4.0 - 2.0) : lerp(_VolHot3.rgb, _VolHot4.rgb, min(heatS * 4.0 - 3.0, 1.0));
                             float h = min(heatS, 1.1);
-                            lit_ += hotS * ((0.55 + 2.2 * h * h * h) * smoothstep(0.28, 0.55, heatS) * 0.45);
+                            lit_ += hotS * ((0.55 + 2.2 * h * h * h) * smoothstep(_VolFireShine.x, _VolFireShine.x + 0.27, heatS) * _VolFireShine.y);
                         } }
                         if (_VolGrid.w > 0.5 && _VolGrid.w < 2.5) { lit_ = ((float3)(0.45)); burning = 0.0; }                      // (testing: no light and no flame)
                         if (_VolGrid.w > 23.5 && _VolGrid.w < 24.5) { lit_ = mapSeen; burning = 0.0; }      // (testing: 24 the sun's-eye picture as looked up: off it, where on it in stripes; on it, red as far behind the nearest solid thing, green as far in front, blue the distance in hundreds of metres)

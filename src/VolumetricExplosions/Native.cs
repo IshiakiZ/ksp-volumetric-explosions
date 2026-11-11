@@ -37,6 +37,7 @@ namespace VolumetricExplosions
             public float skyX, skyY, skyZ;
             public float thickest, thickestFlame, something, restFar, mostBefore, mostAbove;
             public float fastest;
+            public float shadeSun, shadeSky;
             public IntPtr sunThrough, skyThrough;
             public IntPtr carry;
             public IntPtr cellsA, cellsB, cellsC, cellsD;
@@ -54,6 +55,7 @@ namespace VolumetricExplosions
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void End(IntPtr work);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate int Maker(IntPtr work, ref Grid grid);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void Plain();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate void Wish(int n);
 
         [DllImport("libSystem.dylib", EntryPoint = "dlopen")] static extern IntPtr MacOpen(string path, int mode);
         [DllImport("libSystem.dylib", EntryPoint = "dlsym")] static extern IntPtr MacFind(IntPtr library, string name);
@@ -86,6 +88,7 @@ namespace VolumetricExplosions
         static End end;
         static Maker maker;
         static Plain drop;
+        static Wish threads;
 
         /// <summary>Whether grids can be made by the library. (Why not, if not, is in the log.)</summary>
         public static bool Ready
@@ -113,6 +116,14 @@ namespace VolumetricExplosions
 
         /// <summary>Make a grid. Nought if it was made.</summary>
         public static int Make(IntPtr work, ref Grid grid) => maker(work, ref grid);
+
+        // How many threads the library lays a grid's particles by: nought, as the processor allows (a quarter of its
+        // threads, four at most, and one more for what the smoke carries); one, all on the calling thread, as until
+        // 2026-11-09. For comparing (Settings.TestGridThreads); a library older than that has no such choice.
+        public static void Threads(int n)
+        {
+            if (threads != null) try { threads(n); } catch (Exception) { }
+        }
 
         /// <summary>
         /// Another of the library's functions, by its name, for another mod: Keystone's Readback takes the library's asynchronous
@@ -164,6 +175,7 @@ namespace VolumetricExplosions
                 }
                 begin = first; end = last; maker = make;
                 drop = Call<Plain>(library, system, "vfx_drop");         // (a library older than 2026-10-18 keeps none: nothing to let go)
+                threads = Call<Wish>(library, system, "vfx_threads");    // (nor has one older than 2026-11-09 more threads than the one)
                 Native.library = library; Native.system = system;
                 Addon.Log("grids are made by " + Path.GetFileName(path));
             }

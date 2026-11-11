@@ -78,6 +78,7 @@ namespace VolumetricExplosions
             // (begun somewhere in the loop: two fires begun together do not roar in step)
             s.time = Random.Range(0f, Mathf.Max(0f, clip.length - 0.1f));
             s.Play();
+            Hush.Add(s);
             return s;
         }
 

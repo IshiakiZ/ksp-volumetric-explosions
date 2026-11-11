@@ -48,8 +48,8 @@ uniform vec4 _ShockW2;
 uniform vec4 _ShockW3;
 uniform vec4 _ShockSun;      // xyz: towards the sun
 uniform vec4 _ShockSunLight; // rgb: the sun's light (amounts of light: what the screen shows is their square root), w: how much more a thin cloud shows towards the sun
-uniform vec4 _ShockSky;      // rgb: the sky's light (the same)
-uniform vec4 _ShockFire;     // rgb: the fire's light, as it lights the smoke a fireball's radius from it (the same)
+uniform vec4 _ShockSky;      // rgb: the sky's light (the same), w: for the first front, a nuclear explosion's: how far to its side its stem reaches, metres (0: it has none)
+uniform vec4 _ShockFire;     // rgb: the fire's light, as it lights the smoke a fireball's radius from it (the same), w: for the first front, a nuclear explosion's: how far over where it went off its head's middle now stands, metres (0: its fire is where it went off)
 uniform sampler2D _VolScene; // the picture so far
 uniform sampler2D _CameraDepthTexture;
 in vec2 vs_TEXCOORD0;
@@ -153,14 +153,24 @@ float lumps(vec3 x)
 // goes, from the inside out. Close in the front heats the air more than its wake ever cools it: nothing forms there. (The
 // thinning: 35/Z kilopascals at most, Z the distance over the size; Kinney and Graham.) Higher up the air may be nearer its
 // dew point, or further from it, and the dome is whiter there or less. What lies behind the fire is hidden by it.
-// Walked through in a few steps on each side of the shell; added to `got`, which is the cloud before it (colour already
-// multiplied by how much it hides).
-void vapour(vec4 c, vec4 v, vec4 g, vec3 rd, float scene, inout vec4 got)
+// Walked through in eight steps on each side of the shell, each a like part of the way from the shell's outside to its
+// inside (or to where the line of sight comes nearest the middle, if that is within the shell): every line of sight then
+// asks about the same distances from the middle, however long its way through the shell is, and a thin cloud is found by
+// all of them or by none. (Until 2026-11-09 six steps a side, each a like part of the line's length within the shell: where
+// the cloud was thinner than a step, lines that met the shell aslant stepped over it, and a nuclear explosion's cloud at
+// night stood as a disc before the fire, a dark gap round it and a hard-edged band round that.) Added to `got`, which is
+// the cloud before it (colour already multiplied by how much it hides).
+void vapour(vec4 c, vec4 v, vec4 g, vec3 rd, float scene, float capUp, float stem, inout vec4 got)
 {
     if (v.x <= 0.0 || c.w <= 0.0) return;
     float size = v.x;
-    float outer = c.w - 0.95 * size;
-    if (outer <= 0.0) return;
+    // (no cloud further out than where the thinning still cools the dampest air in reach to its dew point, nor nearer the
+    // middle than three of the blast's sizes: see `wet` below)
+    // (less the most a damper lump of air is nearer its dew point than the air about it: see `damper` below)
+    float least = max(v.y - abs(v.z) * 40.0 * size - 1.5, 0.0);
+    float outer = min(c.w - 0.95 * size, min(28.5 / max(least, 0.7), 25.0) * size);
+    float inner = max(c.w - 4.0 * size, 3.0 * size);
+    if (outer <= inner) return;
     vec3 toC = c.xyz - _ShockEye.xyz;
     float along = dot(toC, rd);
     float b2 = max(dot(toC, toC) - along * along, 0.0);
@@ -174,21 +184,48 @@ void vapour(vec4 c, vec4 v, vec4 g, vec3 rd, float scene, inout vec4 got)
     vec3 offC = toC - rd * along + g.xyz * (g.w > 0.0 ? 0.5 * v.w : 0.0);
     float upOff = dot(offC, g.xyz);
     float smoke = 1.0 - smoothstep(0.5, 1.15, length(vec2(length(offC - g.xyz * upOff) / (1.35 * v.w), upOff / (1.2 * v.w))));
+    // (A nuclear explosion's cloud does not stay where it went off: its head climbs on its stem, hundreds of metres within
+    // seconds, out of that ball; and the far side of the shell, seen from inside it once it had passed the camera, was drawn
+    // over the head and the stem, the owner's "it still has the fog texture over the nuke smoke", 2026-11-11. For the first
+    // front, where its head stands `capUp` metres over where it went off: the same ball about the head's middle, and its stem
+    // down to the ground, `stem` metres to its side.)
+    if (capUp > 0.0)
+    {
+        vec3 toCap = toC + g.xyz * capUp;
+        vec3 offCap = toCap - rd * dot(toCap, rd);
+        float upCap = dot(offCap, g.xyz);
+        smoke = max(smoke, 1.0 - smoothstep(0.5, 1.15, length(vec2(length(offCap - g.xyz * upCap) / (1.35 * v.w), upCap / (1.2 * v.w)))));
+        if (stem > 0.0)
+        {
+            // (where the line of sight passes nearest the stem's middle line, and how high up it that is)
+            float b = dot(rd, g.xyz), open = max(1.0 - b * b, 1e-4);
+            float high = (b * along - dot(g.xyz, toC)) / open;
+            vec3 across = cross(rd, g.xyz);
+            float off = abs(dot(toC, across)) / sqrt(open);
+            smoke = max(smoke, (1.0 - smoothstep(0.7, 1.3, off / stem)) * smoothstep(-0.15, 0.05, high / capUp) * (1.0 - smoothstep(0.95, 1.1, high / capUp)));
+        }
+    }
     // (the hollow inside the shell is passed over: the near side, and the far side)
-    float inner = c.w - 4.0 * size;
-    float hole = inner > 0.0 && b2 < inner * inner ? sqrt(inner * inner - b2) : -1.0;
+    float lo = max(inner, sqrt(b2));
+    float dr = (outer - lo) / 8.0;
     float toward = max(dot(rd, _ShockSun.xyz), 0.0);
     float shine = 1.0 + _ShockSunLight.w * toward * toward * toward * toward;
+    // (The cloud's end: once the front has gone so far that its thinning at its most no longer takes the air on the ground to
+    // its dew point, what is left is in the damper lumps alone, and it thins as a whole as it goes, over the next degree or so
+    // of the cooling lost. Until 2026-11-09 the last lumps stood as thick as the whole dome had been to the moment they went:
+    // white blots with hard edges hanging in a clear sky.)
+    float ends = smoothstep(-1.2, 0.6, 28.5 / max(c.w / size - 1.865, 1.0) - max(v.y, 0.0));
     for (int side = 0; side < 2; side++)
     {
-        float a = side == 0 ? t0 : max(t0, along + hole);
-        float b = side == 0 ? (hole > 0.0 ? min(t1, along - hole) : t1) : t1;
-        if (side == 1 && hole <= 0.0) break;
-        if (b <= a) continue;
-        float dt = (b - a) / 6.0;
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < 8; i++)
         {
-            vec3 p = rd * (a + (float(i) + 0.5) * dt) - toC;
+            // (from the eye onward: inward on the near side, outward on the far side)
+            float ra = lo + dr * (side == 0 ? float(7 - i) : float(i)), rb = ra + dr;
+            float sa = sqrt(max(ra * ra - b2, 0.0)), sb = sqrt(max(rb * rb - b2, 0.0));
+            float a = max(side == 0 ? along - sb : along + sa, t0), b = min(side == 0 ? along - sa : along + sb, t1);
+            float dt = b - a;
+            if (dt <= 0.0) continue;
+            vec3 p = rd * (0.5 * (a + b)) - toC;
             float r = length(p);
             float behind = (c.w - r) / size;
             float k = (behind - 0.95) / 3.05;
@@ -196,13 +233,21 @@ void vapour(vec4 c, vec4 v, vec4 g, vec3 rd, float scene, inout vec4 got)
             float z = max(r / size, 1.0);
             float shape = k < 0.3 ? sin(k * 5.236) : cos((k - 0.3) * 2.244);
             float cool = 28.5 / z * shape;
-            float wet = (cool - max(v.y - v.z * dot(p, g.xyz), 0.0)) * smoothstep(3.0, 4.5, z);
+            // (The air is not as damp everywhere: lumps of it, damper and drier, wider than they are deep as the air lies in
+            // layers, held where they are as the front sweeps through them, which it shows up as it goes. A damper lump is nearer
+            // its dew point, by a degree and a half at the most, and a drier one further from it: where the thinning only just
+            // reaches the dew point the cloud is in patches and sheets with clear air between, as the photographs of the nuclear
+            // tests in the Pacific show it, rings and broken shells more often than a whole dome; in air near its dew point it
+            // is whole. Until 2026-11-09 the lumps had only more drops or fewer, and were as deep as wide: a great blast's cloud,
+            // thick enough to hide everything whatever its drops, was a ball as smooth and hard at its edge as a glass bowl.)
+            vec3 air = (p + c.xyz * 0.37) / size;
+            air += g.xyz * (2.0 * dot(air, g.xyz));
+            float la = lumps(air * 0.45), lb = lumps(air * 1.3 + 7.0);
+            float damper = 3.0 * (0.6 * la + 0.4 * lb - 0.5);
+            float wet = (cool + damper - max(v.y - v.z * dot(p, g.xyz), 0.0)) * smoothstep(3.0, 4.5, z);
             if (wet <= 0.0) continue;
             vec3 n = p / max(r, 1e-3);
-            // (the air is not as damp everywhere: lumps of it a few tens of metres across, damper and drier, held where they are
-            // as the front sweeps through them, which it shows up as it goes)
-            vec3 air = (p + c.xyz * 0.37) / size;
-            float lumpy = 0.25 + 1.1 * lumps(air * 0.45) + 0.45 * lumps(air * 1.3 + 7.0);
+            float lumpy = 0.25 + 1.1 * la + 0.45 * lb;
             // How thick: not by how much water the cooling could make (it could make a thundercloud's worth), but by how many
             // drops it can start and how far they grow in the moment it lasts. Drops grow as the square root of the time, so
             // their cross-section with the time, which goes with the blast's size: a micron or so in the tenth of a second a
@@ -210,7 +255,7 @@ void vapour(vec4 c, vec4 v, vec4 g, vec3 rd, float scene, inout vec4 got)
             // a hundred of the light for each metre. And more drops start the further below its dew point the air is taken,
             // up to a limit. (A blast the size of the one in Beirut in 2020 makes an all but solid dome; a rocket's tanks, a
             // thin bubble, brighter at its rim where the line of sight goes through more of it.)
-            float hides = 1.0 - exp(-0.0005 * size * (1.0 - exp(-0.5 * wet)) * lumpy * dt);
+            float hides = 1.0 - exp(-0.0005 * size * ends * (1.0 - exp(-0.5 * wet)) * lumpy * dt);
             if (dot(p, rd) > 0.0) hides *= 1.0 - smoke;
             // Lit by the sun more on its sunward side (the cloud is thin: the far side still has some), and by the sky; and by
             // the fire inside it, far more where the fire is seen through it (small drops throw most of the light that meets
@@ -242,10 +287,10 @@ void main()
     moved += at * (0.5 * (0.3 + 0.35 * dot(at, at)) * _ShockPulse.x);
     float far = length(moved * vec2(1.0 / _ShockAhead.w, 1.0));      // in heights of the screen
     vec4 cloud = vec4(0.0);
-    vapour(_ShockC0, _ShockW0, _ShockG0, rd, scene, cloud);
-    vapour(_ShockC1, _ShockW1, _ShockG1, rd, scene, cloud);
-    vapour(_ShockC2, _ShockW2, _ShockG2, rd, scene, cloud);
-    vapour(_ShockC3, _ShockW3, _ShockG3, rd, scene, cloud);
+    vapour(_ShockC0, _ShockW0, _ShockG0, rd, scene, _ShockFire.w, _ShockSky.w, cloud);
+    vapour(_ShockC1, _ShockW1, _ShockG1, rd, scene, 0.0, 0.0, cloud);
+    vapour(_ShockC2, _ShockW2, _ShockG2, rd, scene, 0.0, 0.0, cloud);
+    vapour(_ShockC3, _ShockW3, _ShockG3, rd, scene, 0.0, 0.0, cloud);
     if (far < 0.0003 && cloud.a < 0.002) discard;
     // (red, green and blue are bent a very little differently, as by glass)
     float r = texture(_VolScene, uv + moved * (1.0 + _ShockPulse.y)).r;

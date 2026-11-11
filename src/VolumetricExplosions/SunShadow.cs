@@ -29,6 +29,14 @@ namespace VolumetricExplosions
         static readonly Vector4 none = Vector4.zero;
 #if DEV
         public static string Said = "";
+        /// <summary>(Development build: the sun's-eye picture drawn with the game's shadows on, as through 0.9.0.)</summary>
+        public static bool TestShadowsKept;
+        /// <summary>(Development build: what other mods put on the sun's-eye camera and on the sun as it draws left there, as
+        /// through 0.9.0.)</summary>
+        public static bool TestRidersKept;
+        /// <summary>(Development build: the picture drawn every frame, not every other.)</summary>
+        public static bool TestEveryFrame;
+        static float drawMs;
         Matrix4x4 lastBox = Matrix4x4.zero;
         Vector3 lastFrom, lastRight, lastUp, lastAlong;
         float lastScale;
@@ -51,6 +59,9 @@ namespace VolumetricExplosions
             // (Drawn every other frame: what stands about the smoke mostly stands still, and what moves (a rocket climbing out
             // of it) moves a metre or so in a frame. The picture and where it was taken from stay together, so between two
             // drawings the smoke reads the last one as it was. A new patch, or one the camera has come to, is drawn at once.)
+#if DEV
+            if (!TestEveryFrame)
+#endif
             if (chosen == drawnFor && Time.frameCount - drawnAt < 2) return;
             drawnFor = chosen;
             drawnAt = Time.frameCount;
@@ -76,9 +87,32 @@ namespace VolumetricExplosions
             // whenever this was drawn, every other frame. From lift-off the land beat light and dark, by 10 levels of 255 over up to
             // 40 % of the picture a frame (2026-10-21, tools/motion), and not at all with this drawing left out. The light is put
             // back afterwards as the far camera had been given it.)
+            // (And drawn with the game's shadows off: what stands in the sun is drawn by its distance alone, which no shadow
+            // touches, so the game need not work out the sun's shadows again for this little camera, nor run for it what other
+            // mods hang on that step.)
+            // (And nothing another mod puts on this camera, or on the sun, while it draws is kept. Blackrack's volumetric clouds
+            // (his EVE's screen-space shadows) put a script of theirs on every camera that draws an object of theirs on the
+            // ground's layer, this one too, and the script hangs the clouds' shadows on the sun before its camera draws and takes
+            // them off once it has drawn. For this camera, drawn by hand, they were never taken off: every picture from 0.8.0 on
+            // left another pair on the sun, run for every camera's shadows from then on, and in his copy of the game the ground
+            // went black near the camera within seconds of smoke and stayed so, smoke or none, through a quickload, until the
+            // game was started again (1,619 pairs on the sun after a few minutes of it; ksp-volumetric-explosions issue 3, his
+            // clouds' shadows "violently flicker", 2026-10-28; seen and mended 2026-11-02). So as soon as this has drawn,
+            // whatever was put on it is taken off (Unburden), and whatever was hung on the sun meanwhile (LightKept.Back).)
             LightKept light = LightKept.Now();
-            cam.RenderWithShader(Assets.SunDepth, "");
+            float shadowsWere = QualitySettings.shadowDistance;
+#if DEV
+            long began = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (!TestShadowsKept)
+#endif
+            QualitySettings.shadowDistance = 0f;
+            try { cam.RenderWithShader(Assets.SunDepth, ""); }
+            finally { QualitySettings.shadowDistance = shadowsWere; }
+#if DEV
+            drawMs = Mathf.Lerp(drawMs, (float)((System.Diagnostics.Stopwatch.GetTimestamp() - began) * 1000.0 / System.Diagnostics.Stopwatch.Frequency), 0.05f);
+#endif
             light.Back();
+            Unburden();
 
 #if DEV
             lastBox = box; lastFrom = from; lastRight = cam.transform.right; lastUp = cam.transform.up; lastAlong = -toSun; lastScale = 1f / (2f * wide);
@@ -90,7 +124,7 @@ namespace VolumetricExplosions
             m.SetVector(mapAlong, new Vector4(-toSun.x, -toSun.y, -toSun.z, 1f));
             m.SetTexture(mapNote, map);
 #if DEV
-            Said = "over a patch " + Mathf.Sqrt(best).ToString("F0") + " m from the camera, " + (2f * wide).ToString("F0") + " m wide, from " + back.ToString("F0") + " m sunward";
+            Said = "over a patch " + Mathf.Sqrt(best).ToString("F0") + " m from the camera, " + (2f * wide).ToString("F0") + " m wide, from " + back.ToString("F0") + " m sunward; drawn in " + drawMs.ToString("F2") + " ms, shadows " + (TestShadowsKept ? "on" : "off");
 #endif
         }
 
@@ -116,6 +150,7 @@ namespace VolumetricExplosions
             grey.SetPixels32(px);
             grey.Apply();
             string file = System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal), ".ksp-ai-bridge/pictures/sunmap.png");
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(file));
             System.IO.File.WriteAllBytes(file, grey.EncodeToPNG());
             Object.Destroy(grey);
             // (and along a line straight up through the middle of the patch: where on the picture each place is, as the smoke's shader
@@ -155,9 +190,36 @@ namespace VolumetricExplosions
             block.transform.localScale = Vector3.one * size;
             return "a block of " + size + " m, " + distance + " m sunward of the patch's middle";
         }
+
+        /// <summary>(What hangs on the sun's-eye camera: another mod's scripts put on it.)</summary>
+        public string Parts()
+        {
+            if (cam == null) return "no camera yet";
+            var said = new System.Text.StringBuilder();
+            foreach (Component c in cam.GetComponents<Component>()) said.Append(c.GetType().FullName).Append("; ");
+            return said.ToString();
+        }
 #endif
 
-        /// <summary>The scene's light as the cameras' hooks have set it for the camera about to draw: the light all round, and the sun's.</summary>
+        static readonly List<MonoBehaviour> riders = new List<MonoBehaviour>();
+
+        /// <summary>Whatever another mod has put on this camera as it drew (a script of its own, command buffers), taken off: nothing
+        /// of the mod's own is on it but the camera.</summary>
+        void Unburden()
+        {
+#if DEV
+            if (TestRidersKept) return;
+#endif
+            cam.GetComponents(riders);
+            foreach (MonoBehaviour b in riders) if (b != null) Object.Destroy(b);
+            riders.Clear();
+            if (cam.commandBufferCount > 0) cam.RemoveAllCommandBuffers();
+        }
+
+        static readonly LightEvent[] steps = (LightEvent[])System.Enum.GetValues(typeof(LightEvent));
+
+        /// <summary>The scene's light as the cameras' hooks have set it for the camera about to draw: the light all round, and the sun's;
+        /// and what hangs on the sun's steps.</summary>
         struct LightKept
         {
             AmbientMode mode;
@@ -166,17 +228,26 @@ namespace VolumetricExplosions
             float strength, sunStrength;
             Color sunColour;
             Light sun;
+            int hooked;
+            CommandBuffer[][] hooks;
 
             public static LightKept Now()
             {
                 Light sun = Sun.Instance != null ? Sun.Instance.sunLight : null;
-                return new LightKept
+                var kept = new LightKept
                 {
                     mode = RenderSettings.ambientMode, probe = RenderSettings.ambientProbe,
                     sky = RenderSettings.ambientSkyColor, equator = RenderSettings.ambientEquatorColor, ground = RenderSettings.ambientGroundColor,
                     strength = RenderSettings.ambientIntensity,
                     sun = sun, sunStrength = sun != null ? sun.intensity : 0f, sunColour = sun != null ? sun.color : Color.white,
                 };
+                if (sun != null)
+                {
+                    kept.hooked = sun.commandBufferCount;
+                    kept.hooks = new CommandBuffer[steps.Length][];
+                    for (int i = 0; i < steps.Length; i++) kept.hooks[i] = sun.GetCommandBuffers(steps[i]);
+                }
+                return kept;
             }
 
             /// <summary>Whatever has changed since, as it was. (The colours and the way the light is made first: a change of the way makes
@@ -194,6 +265,14 @@ namespace VolumetricExplosions
                     if (sun.intensity != sunStrength) sun.intensity = sunStrength;
                     if (sun.color != sunColour) sun.color = sunColour;
                 }
+#if DEV
+                if (TestRidersKept) return;
+#endif
+                // (a command buffer hung on one of the sun's steps while the sun's-eye camera drew was hung for that camera: off again)
+                if (sun != null && hooks != null && sun.commandBufferCount != hooked)
+                    for (int i = 0; i < steps.Length; i++)
+                        foreach (CommandBuffer c in sun.GetCommandBuffers(steps[i]))
+                            if (System.Array.IndexOf(hooks[i], c) < 0) sun.RemoveCommandBuffer(steps[i], c);
             }
         }
 

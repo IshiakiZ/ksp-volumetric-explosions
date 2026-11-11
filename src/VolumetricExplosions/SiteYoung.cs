@@ -125,12 +125,12 @@ namespace VolumetricExplosions
         /// engine's trail used to be, as wide as the jet at the flame's end and thrown on from there to swell, it lay ten
         /// metres and more to one side of the young smoke behind a rocket flying aslant, and was half as wide again.)
         /// </summary>
-        void YoungEnds(in Exhaust e, Vector3 along, Vector3 going, float wide, float far, out float widest, out float thrown)
+        void YoungEnds(in Exhaust e, float air, Vector3 along, Vector3 going, float wide, float far, out float widest, out float thrown)
         {
             float length = Mathf.Max(e.flame, 4f * e.nozzle);
-            float jet = Mathf.Max(6.25f * length, 60f), thin = Thin;
+            float jet = Mathf.Max(6.25f * length, 60f), thin = ThinOf(air);
             float lasts = length * Mathf.Lerp(1f, 0.45f, thin) / jet, slows = 0.375f / lasts;
-            float travels = 0.85f * jet / (slows * Mathf.Max(grip, 0.55f));
+            float travels = 0.85f * jet / (slows * Mathf.Clamp(Mathf.Sqrt(air), 0.55f, 2.2f));
             // (a little wider than the trail's puffs used to be laid, and wider again where the air is thin and there is less
             // to hold the jet in; nor ever less than a jet widens standing still, by six parts in a hundred of the way it goes)
             widest = Mathf.Max(1.4f * wide * (1f + 0.2f * thin), 0.75f * e.nozzle + 0.06f * travels);
@@ -149,7 +149,7 @@ namespace VolumetricExplosions
         }
 
         /// <summary>How wide (a radius, metres) an engine's gas spreads to, once it is at the air's own pressure: about as the square root of how much thinner the air is than the gas leaving the nozzle (taken as seven tenths of the ground's).</summary>
-        float Balanced(in Exhaust e) => e.nozzle * Mathf.Sqrt(0.7f / Mathf.Max(air, TrailAir));
+        static float Balanced(in Exhaust e, float air) => e.nozzle * Mathf.Sqrt(0.7f / Mathf.Max(air, TrailAir));
 
         /// <summary>How many times sooner young smoke spends its push, and does its widening, for the ship's going at speed: so that it has done both by where its trail takes over from it (see YoungSmoke).</summary>
         static float Sooner(float travels, float far, float shipSpeed) =>
@@ -196,9 +196,15 @@ namespace VolumetricExplosions
             if (puffs <= 0) return;
             float each = made / rate;
             float slows = 0.375f / lasts;
-            float cools = 1.68f / lasts * (1f - 0.75f * thin);
+            // It cools into view over the last part of the flame and some way past it, each puff at a place of its own: the
+            // gas there is still mixing with the air, and the soot in it shows as it cools, a little and then more. (Cooled
+            // three times as fast, from 1.68 a lasts, all of it was soot within a third of the flame's reach, where it was
+            // still as narrow as the nozzle: seven times as thick to look through as the trail behind it, it hid the rest of
+            // the flame, and began at a line across the jet, at the same place for every puff. Its owner, 2026-10-25: "the
+            // smoke has a hard line near the rocket fire".)
+            float cools = Settings.YoungCools / lasts * (1f - 0.75f * thin);
             float hangs = Hangs();
-            float stays = e.lasts * hangs / (1f + shipSpeed / 250f);
+            float stays = Lingers(e.lasts, hangs, shipSpeed);
             float r0 = 0.75f * e.nozzle;
             // How wide it gets, and over how far. Its push takes it so far through still air (the mover takes the push away at
             // this rate, see RunChunk), and over that way it widens, as a jet does, to a width it then keeps but for what
@@ -208,7 +214,7 @@ namespace VolumetricExplosions
             // by a fifth of a metre more: behind a fast rocket high up, where the trail is laid wide and the push lasts
             // long, each puff swelled to four times the trail's width within a rocket's length of the flame.)
             float travels = 0.85f * jet / (slows * Mathf.Max(grip, 0.55f));
-            YoungEnds(e, along, going, wide, handFar, out float widest, out _);
+            YoungEnds(e, air, along, going, wide, handFar, out float widest, out _);
             float swell = (widest - r0) / travels - 0.02f;
             // Whether its trail is laid straight into the air (see LaidStraight). Then what is made here is for show: none of
             // it goes on to the trail; it is all this patch's until it gives way to the trail (see Hand). And so that it is
@@ -257,9 +263,9 @@ namespace VolumetricExplosions
                 o.turb = (2f + 6f * out_ * out_) * (1f - 0.6f * thin);
                 o.rise = Random.Range(0.5f, 1.8f);
                 o.heat = Random.Range(0.95f, 1.05f);
-                o.cool = cools * faster * Random.Range(0.85f, 1.15f);
+                o.cool = cools * faster * Random.Range(Settings.YoungCoolLo, Settings.YoungCoolHi);
                 o.mass = each * Random.Range(0.7f, 1.3f);
-                o.life = stays * Random.Range(0.6f, 1.3f);
+                o.life = stays * (Settings.TrailLingers > 0f ? Random.Range(0.85f, 1.15f) : Random.Range(0.6f, 1.3f));
                 float tone = e.shade * Random.Range(0.82f, 1.22f);
                 o.ar = tone; o.ag = tone * (1f - 0.05f * e.warm); o.ab = tone * (1f - 0.14f * e.warm);
                 o.tint = (byte)Mathf.Clamp(e.tint, 0, FireKinds - 1);
@@ -384,7 +390,7 @@ namespace VolumetricExplosions
         public bool Keeps(CelestialBody where, Vector3d world)
         {
             if (Feeds(where, world)) return true;
-            if (!vented || where != body || space || Smokeless || leaving || riding || count > Settings.MaxParticles * 0.45f) return false;
+            if (!vented || where != body || space || Smokeless || leaving || riding || mergeInto != null || mergedFrom != null || count > Settings.MaxParticles * 0.45f) return false;
             bool low = hasGround && ventFrom.y - GroundAt(ventFrom.x, ventFrom.z) < 30f;
             return low && (frame.ToLocal(world) - ventFrom).sqrMagnitude < 75f * 75f;
         }
@@ -443,6 +449,8 @@ namespace VolumetricExplosions
                 o.ux = v.x; o.uy = v.y; o.uz = v.z;
                 o.kx = k.x; o.ky = k.y; o.kz = k.z;
                 o.seed = p[i].seed;
+                // (and comes apart in lengths as the trail laid here does, see Breaks: l.at is where it is on the body)
+                if (Settings.TrailLingers > 0f && (o.flags & Exhausted) != 0) o.life *= Breaks(l.at);
                 p[i] = o;
                 Born(i);
             }
@@ -516,8 +524,10 @@ namespace VolumetricExplosions
                     glowAt.y = ground + 0.7f * h;
                     int owner = 0x5eed + 31 * t + n;
                     float glows = Mathf.Max(3f, 1.2f * (w + h)), strength = 1.8f * pad.strongest * pad.fill;
-                    int at = n < pad.lamp.Length ? pad.lamp[n] : -1;
-                    if (at < 0 || at >= lampCount || !lamps[at].quiet || lamps[at].owner != owner)
+                    // (its own lamp, wherever in the list it now is; a new one only where it has none: see OwnLamp)
+                    int at = OwnLamp(n < pad.lamp.Length ? pad.lamp[n] : -1, owner);
+                    if (n < pad.lamp.Length) pad.lamp[n] = at;
+                    if (at < 0)
                     {
                         at = AddLamp(glowAt.x, glowAt.y, glowAt.z, glows, strength, 0.6f, (byte)Mathf.Clamp(pad.tint, 0, FireKinds - 1), true, 0f, 0f);
                         lamps[at].quiet = true;
@@ -552,7 +562,7 @@ namespace VolumetricExplosions
                         o.turb = 6f;
                         o.rise = Random.Range(1.2f, 3.2f);
                         o.mass = each * Random.Range(0.7f, 1.3f);
-                        o.life = pad.lasts * hangs * Random.Range(0.6f, 1.3f);
+                        o.life = Settings.TrailLingers > 0f ? Lingers(pad.lasts, hangs, 0f) * Random.Range(0.85f, 1.15f) : pad.lasts * hangs * Random.Range(0.6f, 1.3f);
                         o.fadeIn = 0.12f;
                         // (the engines' smoke, paler for what of the trench it carries out with it)
                         float tone = Mathf.Lerp(pad.shade, 0.78f, 0.3f) * Random.Range(0.85f, 1.15f);

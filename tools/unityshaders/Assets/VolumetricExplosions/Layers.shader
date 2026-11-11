@@ -66,7 +66,11 @@ Shader "VolumetricExplosions/Layers"
             float4 _VolSheet;     // the part of the screen any patch's smoke can be on, as the camera's projection gives it (-1 to 1): x0, y0, x1, y1 (x1 not beyond x0: nothing for this camera)
             float4 _VolCamera;     // x: 1 if the camera drawing this has a depth picture of the scene, w: what the depths kept with the smoke were multiplied by (for this camera)
             float4 _VolLayers;     // x: how many patches were drawn into the atlas for this camera, y: 1 if the ships' patches were drawn into the full-sized picture (2: into it at half size each way, as a slot is), z: slots to a row of the atlas, w: 1 if a slot is half the screen's size each way (0: the screen's size)
-            float4 _VolSlots;     // xy: the size of a slot, in pixels; z: (testing) 1 lays the patches over one another in the order they were drawn, as the game used to (no sorting by depth); 2 shows each patch in a colour of its own; 3 the same laid in the old order; 4 the nearest two patches' depths and spreads as colours; 5 sorted and laid over one another as until 2026-10-10
+            float4 _VolSlots;     // xy: the size of a slot, in pixels; z: (testing) 1 lays the patches over one another in the order they were drawn, as the game used to (no sorting by depth); 2 shows each patch in a colour of its own; 3 the same laid in the old order; 4 the nearest two patches' depths and spreads as colours; 5 sorted and laid over one another as until 2026-10-10; w: 1 for the picture of the smoke in front (see the start of main), at half the screen's size
+            float4 _VolHoleA;     // (since 2026-10-26) up to three burning patches whose flames were walked whole into the ships' picture (Layers.ForCamera): each one's
+            float4 _VolHoleB;     // rectangle of the screen, in pixels from its bottom left corner (x0, y0, x1, y1); within it the patch's slot is passed over, its
+            float4 _VolHoleC;     // walk whole standing for it there
+            float4 _VolHoleSlots;     // xyz: which slot of the atlas each of those is (less than nought: none), w: 1 if there are any
             float4 _WeatherClouds;     // x: 1 if a weather mod's clouds were laid on before the smoke in this camera's drawing (Natural Weather 0.4 and on)
             Texture2D _VolAtlas; SamplerState sampler_VolAtlas;     // the patches' smoke, each in its slot: its colour times how much it hides, and how much it hides
             Texture2D _VolAtlasDepth; SamplerState sampler_VolAtlasDepth;     // r: how far along the ray what it hides lies, on the whole, g: how widely that is spread along it, each times how much it hides (and times _VolCamera.w)
@@ -154,15 +158,95 @@ Shader "VolumetricExplosions/Layers"
                 return a > 1e-4 ? -log(1.0 - a) / a : 1.0;
             }
 
-            float4 frag(v2f IN) : SV_Target
+            struct both
+            {
+                float4 result : SV_Target0;
+                float4 result1 : SV_Target1;
+            };
+
+            both Both(float4 a, float4 b) { both o; o.result = a; o.result1 = b; return o; }
+
+            both frag(v2f IN)
             {
                 float4 result = float4(0.0, 0.0, 0.0, 0.0);
+                float4 result1 = float4(0.0, 0.0, 0.0, 0.0);
                 int2 pixel = ((int2)(FragCoord(IN.pos).xy));
                 int inAtlas = int(_VolLayers.x + 0.5), perRow = max(int(_VolLayers.z + 0.5), 1);
                 bool small = _VolLayers.w > 0.5;
                 int2 slot = ((int2)(_VolSlots.xy + 0.5)), last = slot - 1;
                 float scale = max(_VolCamera.w, 1e-6);
                 int test = int(_VolSlots.z + 0.5);
+
+                // ---- The picture of the smoke in front, at half the screen's size, for what is drawn as sprites after this (sprite.glsl):
+                // how much of the smoke lies in front of any depth along each pixel's ray. The nearest patch kept by itself, how much it
+                // hides, where along the ray its smoke lies on the whole and how widely (times _VolCamera.w, as the walks keep them); the
+                // rest together, as one smoke: how much they hide between them, and where their smoke lies and how widely, by the sums of
+                // each one's (a depth and its square, weighed by how much each hides). A sprite then takes off its light as much of each
+                // of the two as lies in front of it, by the same bell curve as between two patches (the end of main). Each half-sized
+                // pixel takes a slot's own pixel there (a slot the screen's size, or the ships' picture at it: the four under it, as
+                // much as they hide on the whole). Until 2026-10-28 everything drawn as sprites was put over the smoke or under it whole,
+                // by the queue it was drawn in: a fire's flash or a puff behind a cloud showed through it.
+                if (_VolSlots.w > 0.5)
+                {
+                    float a0 = 0.0, d0 = 0.0, w0 = 0.0, sumA = 0.0, sumD = 0.0, sumD2 = 0.0, through = 1.0;
+                    int found = 0;
+                    int2 full = 2 * pixel;
+                    { [loop] for (int i = 0; i < 16; i++)
+                    {
+                        bool ships = i == 15;
+                        if (!ships && i >= inAtlas) continue;
+                        if (ships && _VolLayers.y < 0.5) continue;
+                        // (a burning patch, within the rectangle its flames were walked whole in: as below)
+                        if (!ships && _VolHoleSlots.w > 0.5)
+                        {
+                            float2 p = ((float2)(full)) + 1.0;
+                            float k = float(i);
+                            float4 r = abs(k - _VolHoleSlots.x) < 0.5 ? _VolHoleA : abs(k - _VolHoleSlots.y) < 0.5 ? _VolHoleB : abs(k - _VolHoleSlots.z) < 0.5 ? _VolHoleC : ((float4)(0.0));
+                            if (p.x >= r.x && p.x < r.z && p.y >= r.y && p.y < r.w) continue;
+                        }
+                        float4 smoke;
+                        float2 deep;
+                        bool halved = ships ? _VolLayers.y > 1.5 : small;
+                        int2 origin = ships ? ((int2)(0)) : int2(i - (i / perRow) * perRow, i / perRow) * slot;
+                        int2 most = ships ? TextureSize(_VolFull, 0) - 1 : last;
+                        if (halved)
+                        {
+                            int2 at0 = origin + min(pixel, most);
+                            smoke = ships ? TexelFetch(_VolFull, at0, 0) : TexelFetch(_VolAtlas, at0, 0);
+                            deep = ships ? TexelFetch(_VolFullDepth, at0, 0).rg : TexelFetch(_VolAtlasDepth, at0, 0).rg;
+                        }
+                        else
+                        {
+                            smoke = ((float4)(0.0));
+                            deep = ((float2)(0.0));
+                            { [loop] for (int q = 0; q < 4; q++)
+                            {
+                                int2 at4 = origin + min(full + int2(q & 1, q >> 1), most);
+                                smoke += ships ? TexelFetch(_VolFull, at4, 0) : TexelFetch(_VolAtlas, at4, 0);
+                                deep += ships ? TexelFetch(_VolFullDepth, at4, 0).rg : TexelFetch(_VolAtlasDepth, at4, 0).rg;
+                            } }
+                            smoke *= 0.25;
+                            deep *= 0.25;
+                        }
+                        float a = clamp(smoke.a, 0.0, 1.0);
+                        if (a <= 0.002) continue;
+                        float d = deep.x / a, w = deep.y / a;      // (kept times _VolCamera.w, as the walks keep them)
+                        // (the nearest kept by itself; one nearer puts the one kept so far among the rest)
+                        if (found == 0 || d < d0)
+                        {
+                            if (found > 0) { sumA += a0; sumD += a0 * d0; sumD2 += a0 * (d0 * d0 + w0 * w0); through *= 1.0 - a0; }
+                            a0 = a; d0 = d; w0 = w;
+                        }
+                        else { sumA += a; sumD += a * d; sumD2 += a * (d * d + w * w); through *= 1.0 - a; }
+                        found++;
+                    } }
+                    if (found == 0) discard;
+                    float D = sumA > 1e-4 ? sumD / sumA : 0.0;
+                    float W = sumA > 1e-4 ? sqrt(max(sumD2 / sumA - D * D, 0.0)) : 0.0;
+                    result = float4(a0, d0, w0, 1.0 - through);
+                    result1 = float4(D, W, 0.0, 0.0);
+                    return Both(result, result1);
+                }
 
                 float4 colours[16];
                 float depths[16], spreads[16];
@@ -180,6 +264,17 @@ Shader "VolumetricExplosions/Layers"
                 { [loop] for (int i = 0; i < 15; i++)
                 {
                     if (i >= inAtlas) break;
+                    // (a burning patch, within the rectangle its flames were walked whole in: that walk is all of it there. Its walk at half size
+                    // goes a couple of its pixels into the rectangle, so that just outside it the four pixels enlarged are all there, and the
+                    // two meet with neither a gap nor anything counted twice: left out of the rectangle exactly, as at first, a thin line showed
+                    // round it where the enlarged smoke took in the empty pixels inside)
+                    if (_VolHoleSlots.w > 0.5)
+                    {
+                        float2 p = ((float2)(pixel)) + 0.5;
+                        float k = float(i);
+                        float4 r = abs(k - _VolHoleSlots.x) < 0.5 ? _VolHoleA : abs(k - _VolHoleSlots.y) < 0.5 ? _VolHoleB : abs(k - _VolHoleSlots.z) < 0.5 ? _VolHoleC : ((float4)(0.0));
+                        if (p.x >= r.x && p.x < r.z && p.y >= r.y && p.y < r.w) continue;
+                    }
                     int2 origin = int2(i - (i / perRow) * perRow, i / perRow) * slot;
                     float4 s00 = TexelFetch(_VolAtlas, origin + c00, 0), s10 = TexelFetch(_VolAtlas, origin + c10, 0), s01 = TexelFetch(_VolAtlas, origin + c01, 0), s11 = TexelFetch(_VolAtlas, origin + c11, 0);
                     // (most of the screen has none of this patch's smoke on it, and is passed over at once)
@@ -283,7 +378,7 @@ Shader "VolumetricExplosions/Layers"
                 {
                     result = n > 1 ? float4(clamp((depths[1] - depths[0]) * 0.1, 0.0, 1.0), clamp(spreads[0] * 0.2, 0.0, 1.0), clamp(spreads[1] * 0.2, 0.0, 1.0), 1.0)
                                        : float4(0.0, clamp(spreads[0] * 0.2, 0.0, 1.0), 0.0, 1.0);
-                    return result;
+                    return Both(result, result1);
                 }
 
                 if (test == 1 || test == 3)
@@ -292,7 +387,7 @@ Shader "VolumetricExplosions/Layers"
                     float4 laid = colours[n - 1];
                     { [loop] for (int i = n - 2; i >= 0; i--) laid = colours[i] + laid * (1.0 - colours[i].a); }
                     result = float4(max(laid.rgb, ((float3)(0.0))), clamp(laid.a, 0.0, 1.0));
-                    return result;
+                    return Both(result, result1);
                 }
                 if (test == 5)
                 {
@@ -318,7 +413,7 @@ Shader "VolumetricExplosions/Layers"
                         behindSpread = spreads[i];
                     } }
                     result = float4(max(result_.rgb, ((float3)(0.0))), clamp(result_.a, 0.0, 1.0));
-                    return result;
+                    return Both(result, result1);
                 }
 
                 // How much of each patch's smoke shows through the others. As a walk goes along the ray, what it has hidden so far is just
@@ -350,7 +445,7 @@ Shader "VolumetricExplosions/Layers"
                     light += colours[i].rgb * seen;
                 } }
                 result = float4(max(light, ((float3)(0.0))), clamp(1.0 - through, 0.0, 1.0));
-                return result;
+                return Both(result, result1);
             }
             ENDCG
         }

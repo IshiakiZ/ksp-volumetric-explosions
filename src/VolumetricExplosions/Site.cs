@@ -63,16 +63,16 @@ namespace VolumetricExplosions
         const double StillAir = 0.9;         // how much of the time the air is still, as it comes (see Wind)
         const float Downhill = 4f;           // metres a second: how fast heavy smoke lying on the ground would run down a slope that was all but sheer (see the mover)
 
-        struct Thermal { public float x, y, z, a, w, top, turn; }
-        struct Lamp { public float x, y, z, vx, vy, vz, r, peak, power, age, life, climb, flash, seed; public byte tint; public bool steady, quiet; public int owner; }      // (vx, vy, vz: the fire it is the light of was thrown on at this speed, which the air takes away)
-        struct Fire { public float x, y, z, r, left, total, rate, due, soot, shade, scale, puff, tall, lick, smoky; public byte tint; public int lamp; public bool patch; }      // (smoky: the share of its bits that turn to smoke; patch: one of the patches of spilt fuel burning round about the pool, see AddFire)
+        struct Thermal { public float x, y, z, a, w, top, turn; public bool led, stem; public float ah, av, eh, ev, lx, lz; }      // (led, stem, and what follows them: a nuclear explosion's, see SiteNuke.cs)
+        struct Lamp { public float x, y, z, vx, vy, vz, r, peak, power, age, life, climb, flash, seed; public byte tint; public bool steady, quiet; public int owner; public float flashFor, reach, pulse; }      // (vx, vy, vz: the fire it is the light of was thrown on at this speed, which the air takes away)
+        struct Fire { public float x, y, z, r, left, total, rate, due, soot, shade, scale, puff, tall, lick, smoky, ember; public byte tint; public int lamp; public bool patch; }      // (smoky: the share of its bits that turn to smoke; patch: one of the patches of spilt fuel burning round about the pool, see AddFire; ember: the next ember due, see Ember)
         struct Frag { public float x, y, z, vx, vy, vz, age, life, due, size, downAt; public byte tint; public bool white, down; }
         struct Ball { public float x, y, z, vx, vy, vz, r, speed; }
         struct Jet { public float x, y, z, dx, dy, dz, r, speed, length; }
         // (cloud: the blast's size, the cube root of its charge in kilograms of TNT, in metres, where its front leaves a cloud behind it in damp air, else 0;
         // dew: how far the air at its middle is above its dew point, kelvin; lapse: how much less that is a metre higher; fire: its fireball's radius;
         // gone: how far the front has spread when the last of its cloud is gone. See Shock.)
-        struct Wave { public float x, y, z, start, radius, reach, age, power, cloud, dew, lapse, fire, gone; public bool ground; public float dust, dustSize, dustFrom, dustReach, dustCarry; public Color dustColour; }
+        struct Wave { public float x, y, z, start, radius, reach, age, power, cloud, dew, lapse, fire, gone; public bool ground; public float dust, dustSize, dustFrom, dustReach, dustCarry; public Color dustColour; public float charge, over; }      // (charge, over: a nuclear explosion's front, see NukeWave)
         static readonly int weatherSun = Shader.PropertyToID("_WeatherShadowSun"), weatherFade = Shader.PropertyToID("_WeatherShadowFade");
 
         // ---- where
@@ -83,9 +83,12 @@ namespace VolumetricExplosions
         readonly Transform t;
 
         // ---- the particles
-        P[] p = new P[4096];
-        P[] seen = new P[4096];              // the particles as they were when the grid now being worked out was begun
-        ParticleSystem.Particle[] draw = new ParticleSystem.Particle[4096];
+        // (the lists from patches that have ended, where there are any, and theirs again when this one ends: see Spares.TakeList)
+        P[] p = Spares.TakeList<P>(4096);
+        P[] seen = Spares.TakeList<P>(4096);              // the particles as they were when the grid now being worked out was begun
+        ParticleSystem.Particle[] draw = Spares.TakeList<ParticleSystem.Particle>(4096);
+        static readonly P[] noParticles = new P[0];
+        static readonly ParticleSystem.Particle[] noneDrawn = new ParticleSystem.Particle[0];
         int count;
         readonly ParticleSystem cloud, glowBack, glowFront;
 
@@ -93,17 +96,27 @@ namespace VolumetricExplosions
         GameObject box;
         MeshRenderer boxRenderer;
         Material boxMaterial, cloudMaterial;
+#if DEV
+        internal Material CloudMaterial => cloudMaterial;   // (for the development build's switch between the sprites' shaders: Assets.SpriteTest)
+#endif
         Material shownMaterial;              // where the smoke is drawn at half size: what puts that on the screen (see Air.Halves)
         RenderTexture small;
         bool halved;
         Texture3D volume, amounts, around, flow, clear, turns;
+        // (the grid before's amounts, its box, and when each grid came: a fire that stands goes over from the one to the other, see FireWas)
+        Texture3D amountsWas;
+        Vector3 wasSize, wasMiddle, boxSize;
+        float showAt, showGap = 0.05f;
+        bool wasOk;
+        static readonly int amountNote = Shader.PropertyToID("_Amount"), amountWasNote = Shader.PropertyToID("_AmountWas"),
+            fireWasSizeNote = Shader.PropertyToID("_VolFireWasSize"), fireWasOffsetNote = Shader.PropertyToID("_VolFireWasOffset");
         readonly Texture3D[] rests = new Texture3D[5];          // eighteen numbers of sixteen bits, four to a texture
         byte flameKind;                      // which fire's colours the volume shows: those of the biggest fire lately
         float flameWeight;
         Vector3 dustHue = new Vector3(1f, 0.85f, 0.65f);
         Color groundDust;
         bool groundBare, groundWet;
-        ParticleSystem sparks, shards, ringFlat, ringAir;
+        ParticleSystem sparks, shards, ringFlat, ringAir, embers;
         readonly ParticleSystem.Particle[] glows = new ParticleSystem.Particle[160];
         readonly ParticleSystem.Particle[] flashes = new ParticleSystem.Particle[160], flashesSeen = new ParticleSystem.Particle[160];
         int flashCount;
@@ -118,8 +131,14 @@ namespace VolumetricExplosions
         int thermalCount, lampCount, fireCount, fragCount, ballCount, jetCount, waveCount;
         float sound = 340f;                  // the speed of sound here, metres a second
         readonly Light[] lights = new Light[2];
+        // (which lamp each of the two lights follows, by its seed, which no other lamp of the patch has (-1: none); and how far each
+        // is faded in, 0 to 1, and how strong it is when wholly in: see the end of SiteBlasts.Lamps)
+        readonly float[] lightFollows = { -1f, -1f }, lightLevel = new float[2], lightFull = new float[2], lightReach = new float[2];
         static float lampSeed;
         static int lightsOn;
+#if DEV
+        readonly float[] lightWas = new float[4];      // (see the lights' line in the log, SiteBlasts.cs)
+#endif
 
         // ---- the surroundings
         float air, grip, gravity;            // density against Kerbin at sea level; how firmly that air holds things; m/s²
@@ -132,7 +151,9 @@ namespace VolumetricExplosions
         /// </summary>
         float Wide => vacuum ? 1f : 1f / Mathf.Clamp(grip, 0.55f, 1f);
         /// <summary>How thin the air is, as an engine's flame feels it: 0 at the ground, a quarter at a tenth of the air, 1 with none (by how many times thinner, counted in tens).</summary>
-        float Thin => vacuum ? 1f : Mathf.Pow(Mathf.Clamp01(-Mathf.Log10(Mathf.Max(air, 1e-4f)) / 3.2f), 1.2f);
+        float Thin => ThinOf(air);
+        /// <summary>The same for air of this thickness (against Kerbin's at sea level).</summary>
+        static float ThinOf(float air) => air < 0.004f ? 1f : Mathf.Pow(Mathf.Clamp01(-Mathf.Log10(Mathf.Max(air, 1e-4f)) / 3.2f), 1.2f);
         bool vacuum, sunUp;
         float daylight = 1f;        // (Look) how much of a day it is here: 0 at night, 1 with the sun more than ten degrees up
         Vector3 sunL;                        // towards the sun, in the site's frame
@@ -140,6 +161,9 @@ namespace VolumetricExplosions
         float cloudFar;                      // and how far from where it began to be fed it goes on taking thermals (see Feeds)
         public bool Cloudy => cloudy;
         float sunR, sunG, sunB, ambR, ambG, ambB, fireR = 1f, fireG = 0.4f, fireB = 0.1f;
+        float sunClear;                                           // (how bright the sun would be without the weather's clouds: see TuneShadow)
+        float sunHidden;                                          // (how much of the sun's light the weather's clouds keep, 0 to 1: it comes from the sky instead; see Look, and the fires' light)
+        float hueAt = -1f;                   // (when the colour of the fires' light was last set, by this patch's clock: see the end of Lamps)
         float windX, windZ, wind10, calm;
         float gustScale = 1f;                // how gusty the wind is against what the air makes up itself (a weather mod's wind: see Sources.Wind)
         float windGoneX, windGoneZ;          // how far the air has been carried since this began: the eddies in it are carried with it
@@ -148,6 +172,9 @@ namespace VolumetricExplosions
 
         // ---- this frame
         float time, stepDt, lastBlast, lastRing = -10f, nextLook, scale = 4f;
+        // (how long after the last blast the grid still takes in what strays far from the rest of the cloud: an explosive's thrown
+        // earth stands that far for seconds, see Thrown and Fit)
+        float openFor = 0.6f;
         float fireballR, fireballAt = -100f;     // the biggest blast of the last few seconds: its radius and when (for the size of its flames' pattern, see TuneFire)
         float blazeWide, blazeSeen = -100f;      // the widest fire burning on the ship this patch goes along with, and when last (see Blaze)
         int tick, chunks;
@@ -158,8 +185,19 @@ namespace VolumetricExplosions
         static readonly float[] sine = Sines();
 
         public int Count => count;
-        public bool Finished => !(riding && frame.Riding && time - fedAt < 5f) && count == 0 && fireCount == 0 && fragCount == 0 && lampCount == 0 && waveCount == 0 && time - lastBlast > 4f && pieces.Count == 0 && toBreak.Count == 0 && waiting.Count == 0
-                                && (sparks == null || sparks.particleCount == 0) && (shards == null || shards.particleCount == 0);
+        /// <summary>
+        /// Whether this ship's patch takes up one of the places for ships' flames (Air.MostFlames): while its ship is there and it
+        /// has something in it or was fed a burning flame within half a second (a feed with its engine all but off draws nothing,
+        /// and does not keep it). (Until 2026-11-04 every ship's patch took one until it was put away, and an empty one is kept for five seconds after its last feed, see Finished: in a crash the four places were held
+        /// by the debris' spent re-entry glow, the fire of a pool of the wreck's fuel was refused its flame all that while, its
+        /// smoke going up from bare ground, and when the four were put away together the pool's flame came on all at once and the
+        /// fire's look changed in a frame. Settings.TestFlamePlaces 1: as until then.) And in its first second, whatever it holds:
+        /// a patch just made has nothing in it yet and may not have been fed, and without this every flame asking in the same
+        /// frame, and in the frames before the first puffs were laid, was given a patch of its own (24 at once in a crash).
+        /// </summary>
+        public bool HoldsFlamePlace => riding && (Settings.TestFlamePlaces == 1f || time < 1f || frame.Riding && (count > 0 || fireCount > 0 || lampCount > 0 || time - burnedAt < 0.5f));
+        public bool Finished => !(riding && frame.Riding && time - fedAt < 5f) && !(mergedFrom != null && !mergeTaken) && count == 0 && fireCount == 0 && fragCount == 0 && lampCount == 0 && waveCount == 0 && time - lastBlast > 4f && pieces.Count == 0 && toBreak.Count == 0 && waiting.Count == 0
+                                && (sparks == null || sparks.particleCount == 0) && (shards == null || shards.particleCount == 0) && (embers == null || embers.particleCount == 0) && !NukeKeeps;
 
         /// <summary>A patch of air where something has happened. (rides: a patch that goes along with a ship, for the flames of its engines: see Frame, and Under.)</summary>
         // ---- what a patch takes, made ahead (see Spares)
@@ -168,12 +206,22 @@ namespace VolumetricExplosions
         /// <summary>
         /// (The air, once a frame while there are patches.) Keep two patches' worth of grids ready, made on a worker thread a
         /// patch's worth at a time, and a patch's worth of volume textures, made here, one a frame, and sent to the card at once.
+        /// (coming: how many patches are giving their smoke to another, see Air.Merge, whose grids will be put by within a couple
+        /// of seconds; counted as there already. A merge takes two patches' worth at once, the one made of two and the new patch
+        /// it made room for, and until 2026-10-25 two more were made ahead straight after: the grids of the two then came back
+        /// over the most kept and were let go, some 15 MB for the collector at every merge, every three seconds of a climb.)
         /// </summary>
-        internal static void TopUp()
+        internal static void TopUp(int coming)
         {
             if (toppingUp == null || toppingUp.IsCompleted)
             {
-                if (Spares.Count<float>(G3) < 4 * 2) toppingUp = System.Threading.Tasks.Task.Run(() => PutBy());
+                if (Spares.Count<float>(G3) + 4 * coming < 4 * 2)
+                {
+#if DEV
+                    Addon.Log("a patch's worth of grids made ahead (frame " + Time.frameCount + ", " + coming + " to come back; " + Spares.Report().Split(';')[0] + ")");
+#endif
+                    toppingUp = System.Threading.Tasks.Task.Run(() => PutBy());
+                }
             }
             if (Assets.Volume == null) return;
             if (Spares.Count(G, TextureFormat.RGBA32) < 2) Spares.PutByNew(G, TextureFormat.RGBA32, FilterMode.Bilinear);
@@ -265,11 +313,14 @@ namespace VolumetricExplosions
                 // (each from a patch that has ended, where there is one: see Spares)
                 volume = Spares.Volume(G, TextureFormat.RGBA32, FilterMode.Bilinear);
                 amounts = Spares.Volume(G, TextureFormat.RGBA32, FilterMode.Bilinear);
+                amountsWas = Spares.Volume(G, TextureFormat.RGBA32, FilterMode.Bilinear);
                 around = Spares.Volume(A, TextureFormat.RGBA32, FilterMode.Bilinear);
                 flow = Spares.Volume(A, TextureFormat.RGBA32, FilterMode.Bilinear);
                 for (int n = 0; n < rests.Length; n++) rests[n] = Spares.Volume(A, Assets.Sixteen, FilterMode.Bilinear);
                 boxMaterial.SetTexture("_Volume", volume);
                 boxMaterial.SetTexture("_Amount", amounts);
+                boxMaterial.SetTexture("_AmountWas", amountsWas);
+                wasOk = false;
                 boxMaterial.SetTexture("_Around", around);
                 boxMaterial.SetTexture("_Detail", Assets.Detail);
                 boxMaterial.SetTexture("_Flow", flow);
@@ -305,8 +356,8 @@ namespace VolumetricExplosions
             carrySmooth = CarrySmooth;
             for (int c = 0; c < Carried; c++) { carryNext[c] = Spares.Take<float>(A3); carryNow[c] = Spares.Take<float>(A3); }
             for (int n = 0; n < cellsRest.Length; n++) cellsRest[n] = Spares.Take<ushort>(A3 * 4);
-            sunBody = () => { long t = System.Diagnostics.Stopwatch.GetTimestamp(); Follow(gridSun, sunNext, 0.45f, layers[0], layers[1]); Air.Stage[2] = System.Diagnostics.Stopwatch.GetTimestamp() - t; };        // (less than the smoke really blocks: light also finds its way round inside a cloud)
-            skyBody = () => { long t = System.Diagnostics.Stopwatch.GetTimestamp(); Follow(gridUp, skyNext, 0.55f, layers[2], layers[3]); Air.Stage[3] = System.Diagnostics.Stopwatch.GetTimestamp() - t; };
+            sunBody = () => { long t = System.Diagnostics.Stopwatch.GetTimestamp(); Follow(gridSun, sunNext, 0.45f, layers[0], layers[1], shadeFar); Air.Stage[2] = System.Diagnostics.Stopwatch.GetTimestamp() - t; };        // (less than the smoke really blocks: light also finds its way round inside a cloud)
+            skyBody = () => { long t = System.Diagnostics.Stopwatch.GetTimestamp(); Follow(gridUp, skyNext, 0.55f, layers[2], layers[3], shadeFar); Air.Stage[3] = System.Diagnostics.Stopwatch.GetTimestamp() - t; };
             jobBody = Moving;
 #if DEV
             Mark(5);
@@ -339,6 +390,16 @@ namespace VolumetricExplosions
         }
 
 #if DEV
+        /// <summary>(Development build: a part of a patch's step, logged where it took more than 2 ms; the time it ended.)</summary>
+        long Slow(string what, long from)
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            double ms = (now - from) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            if (ms > 2.0) Addon.Log("a patch's " + what + " took " + ms.ToString("F1") + " ms (frame " + Time.frameCount + ", " + Role() + ", " + count + " puffs)");
+            return now;
+        }
+        string Role() => riding ? "a ship's patch" : mergedFrom != null ? "taking two others' smoke" : mergeInto != null ? "giving its smoke" : vented ? "a trail's" : "other";
+
         static readonly long[] marks = new long[8];
         /// <summary>(Development build: where the time goes in making a patch, for the last forty made where Mark(0) was set just before.)</summary>
         public static readonly List<string> MadeTimes = new List<string>();
@@ -350,6 +411,12 @@ namespace VolumetricExplosions
 
         public void Dispose()
         {
+#if DEV
+            long put0 = System.Diagnostics.Stopwatch.GetTimestamp();
+#endif
+            // (a patch taking two others' smoke, gone before they gave way to it: they stay as they were)
+            if (mergedFrom != null) foreach (Site s in mergedFrom) if (s.mergeInto == this) s.MergeOver();
+            if (handedTo == this) { handedTo = null; handedCount = 0; }      // (and the room for the smoke they hand over is free for another)
             if (job != null) { try { job.Wait(); } catch (Exception) { } job = null; }
             if (raysOut) { raysOut = false; rayJob.Complete(); rays.Dispose(); hits.Dispose(); }
             EndSurvey();
@@ -357,6 +424,9 @@ namespace VolumetricExplosions
             for (int n = 0; n < lights.Length; n++)
                 if (lights[n] != null && lights[n].enabled) { lights[n].enabled = false; lightsOn = Mathf.Max(0, lightsOn - 1); }
             if (lighting != null) { try { lighting.Wait(); } catch (Exception) { } lighting = null; }
+#if DEV
+            long put1 = System.Diagnostics.Stopwatch.GetTimestamp();
+#endif
             NativeEnd();
             RemovePieces();
             // (its grids and textures kept for the patches to come: nothing is working on them now, see above; once only)
@@ -364,8 +434,9 @@ namespace VolumetricExplosions
             {
                 givenBack = true;
                 Spares.Give(volume); Spares.Give(amounts); Spares.Give(around); Spares.Give(flow); Spares.Give(clear); Spares.Give(turns);
+                Spares.Give(amountsWas);
                 for (int n = 0; n < rests.Length; n++) { Spares.Give(rests[n]); rests[n] = null; }
-                volume = amounts = around = flow = clear = turns = null;
+                volume = amounts = amountsWas = around = flow = clear = turns = null;
                 Spares.Give(sunThrough); Spares.Give(skyThrough); Spares.Give(sunNext); Spares.Give(skyNext);
                 Spares.Give(cellsA); Spares.Give(cellsB); Spares.Give(cellsC); Spares.Give(cellsD); Spares.Give(cellsE); Spares.Give(cellsClear); Spares.Give(carryKnown);
                 Spares.Give(strainNext); Spares.Give(strainNow);
@@ -381,6 +452,8 @@ namespace VolumetricExplosions
                 foreach (float[][][] part in apart) if (part != null) foreach (float[][] level in part) Spares.GiveAll(level);
                 Spares.GiveAll(stands); Spares.GiveAll(rows);
                 sunThrough = skyThrough = sunNext = skyNext = strainNext = strainNow = null;
+                Spares.GiveList(p); Spares.GiveList(seen); Spares.GiveList(draw);
+                p = seen = noParticles; draw = noneDrawn;
             }
             if (boxMaterial != null) UnityEngine.Object.Destroy(boxMaterial);
             if (motionMaterial != null) UnityEngine.Object.Destroy(motionMaterial);
@@ -390,6 +463,11 @@ namespace VolumetricExplosions
             if (cloudMaterial != null) UnityEngine.Object.Destroy(cloudMaterial);
             if (root != null) UnityEngine.Object.Destroy(root);
             count = 0;
+#if DEV
+            double toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency, all = (System.Diagnostics.Stopwatch.GetTimestamp() - put0) * toMs;
+            if (all > 2.0) Addon.Log("a patch put away in " + all.ToString("F1") + " ms (frame " + Time.frameCount + ", " + (riding ? "a ship's" : vented ? "a trail's" : "other")
+                                     + "; waiting for its work " + ((put1 - put0) * toMs).ToString("F1") + " ms)");
+#endif
         }
 
         /// <summary>Hand the grid that has just been finished to the shader, with the box it fills.</summary>
@@ -397,25 +475,75 @@ namespace VolumetricExplosions
         {
 #if DEV
             long q0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            // (Settings.TestTrace 1: each grid of the nearest patch with fire as it is shown, for setting against a film frame by
+            // frame: where its box begins, its cells, and over the cells with flame the flame, its heat and the smoke between it
+            // and the sun, as the card gets them)
+            if (Settings.TestTrace == 1f && NearestFlame)
+            {
+                long burn = 0; double hot = 0.0, shade = 0.0; int cells = 0, top = 0;
+                for (int n = 0; n < G3; n++)
+                {
+                    int b = cellsB[n].b << 8 | cellsB[n].a;
+                    if (b == 0) continue;
+                    burn += b; hot += b * (double)cellsA[n].a; shade += b * (double)(cellsA[n].r << 8 | cellsA[n].g); cells++;
+                    if (b > top) top = b;
+                }
+                Debug.Log("[VolumetricExplosions] trace: frame " + Time.frameCount + " at " + Time.realtimeSinceStartup.ToString("F4") + ", grid of " + lightTime.ToString("F3") + ": box from "
+                          + nx0.ToString("F2") + " " + ny0.ToString("F2") + " " + nz0.ToString("F2") + ", cells " + (1f / nix).ToString("F2") + " " + (1f / niy).ToString("F2") + " " + (1f / niz).ToString("F2")
+                          + ", " + lightCount + " puffs, flame " + burn + " in " + cells + " cells, most " + top + ", heat " + (burn > 0 ? hot / burn : 0.0).ToString("F1")
+                          + ", shaded " + (burn > 0 ? shade / burn : 0.0).ToString("F0"));
+            }
 #endif
+            // (the grid before's amounts kept for its fire, the new grid sent to the other texture: see FireWas)
+            Quaternion turnNow = turned ? Quaternion.LookRotation(turnZ, turnY) : Quaternion.identity;
+            if (Settings.TestFireBlend != 1f && amountsWas != null)
+            {
+                Texture3D keep = amounts; amounts = amountsWas; amountsWas = keep;
+                boxMaterial.SetTexture(amountNote, amounts);
+                boxMaterial.SetTexture(amountWasNote, amountsWas);
+                wasOk = boxRenderer.enabled && boxSize.x > 0f && box.transform.localRotation == turnNow;
+                wasSize = boxSize; wasMiddle = boxMiddle;
+                float nowU = Time.unscaledTime, gap = Mathf.Clamp(nowU - showAt, 0.016f, 0.5f);
+                showGap = wasOk ? Mathf.Lerp(showGap, gap, 0.5f) : gap;
+                showAt = nowU;
+            }
+            else wasOk = false;
             // (sent from the render thread by the library where it can, see Sending; else, and the first time for each texture,
             // through Unity, which also makes the texture known to the library for the next)
-            if (!SendByLibrary())
+            if (SendByLibrary())
             {
-                volume.SetPixels32(cellsA);
-                amounts.SetPixels32(cellsB);
-                around.SetPixels32(cellsC);
-                flow.SetPixels32(cellsD);
-                for (int n = 0; n < rests.Length; n++) rests[n].SetPixelData(cellsRest[n], 0);
+                slowTime = shownTime; slowSkipped = false;
+#if DEV
+                Tally(3, FastBytes + SlowBytes);
+#endif
+            }
+            else
+            {
+                // (Since 2026-11-04, for a battle: each straight from the array the grid was made in, as the card has it, with no
+                // working over pixel by pixel on the way (SetPixels32 took each Color32 as a colour to be put into the texture's
+                // kind; these are of that kind already); and the slow fields, where the smoke "was" and whose turn it is, a grid in
+                // two where that cannot be seen: see SlowFieldsGo.)
+                bool slow = SlowFieldsGo();
+                volume.SetPixelData(cellsA, 0);
+                amounts.SetPixelData(cellsB, 0);
+                around.SetPixelData(cellsC, 0);
+                flow.SetPixelData(cellsD, 0);
                 clear.SetPixelData(cellsClear, 0);
-                turns.SetPixels32(cellsE);
+                if (slow)
+                {
+                    for (int n = 0; n < rests.Length; n++) rests[n].SetPixelData(cellsRest[n], 0);
+                    turns.SetPixelData(cellsE, 0);
+                }
                 volume.Apply(false);
                 amounts.Apply(false);
                 around.Apply(false);
                 flow.Apply(false);
-                for (int n = 0; n < rests.Length; n++) rests[n].Apply(false);
                 clear.Apply(false);
-                turns.Apply(false);
+                if (slow)
+                {
+                    for (int n = 0; n < rests.Length; n++) rests[n].Apply(false);
+                    turns.Apply(false);
+                }
                 if (Sending.Ready)
                 {
                     Sending.Sent(volume); Sending.Sent(amounts); Sending.Sent(around); Sending.Sent(flow); Sending.Sent(clear); Sending.Sent(turns);
@@ -423,6 +551,7 @@ namespace VolumetricExplosions
                 }
 #if DEV
                 ShowTimes[2] += 1;
+                Tally(3, FastBytes + (slow ? SlowBytes : 0));
 #endif
             }
 #if DEV
@@ -431,8 +560,9 @@ namespace VolumetricExplosions
             var size = new Vector3(nx1 - nx0, ny1 - ny0, nz1 - nz0);
             var middle = new Vector3((nx0 + nx1) * 0.5f, (ny0 + ny1) * 0.5f, (nz0 + nz1) * 0.5f);
             boxMiddle = middle;
+            boxSize = size;
             slid = Vector3.zero;
-            box.transform.localRotation = turned ? Quaternion.LookRotation(turnZ, turnY) : Quaternion.identity;
+            box.transform.localRotation = turnNow;
             box.transform.localPosition = FromGrid(middle);
             box.transform.localScale = size;
             boxMaterial.SetVector("_VolSize", size);
@@ -457,7 +587,10 @@ namespace VolumetricExplosions
         /// <summary>The settings of the volume that change every frame.</summary>
         void TuneVolume()
         {
+            // (the slots kept up whether or not there is a grid to draw just now, so that a patch shown again has them where its fires are)
+            SmokeLamps(Settings.TestFreeze >= 3f ? 0f : Time.deltaTime);
             if (box == null || !boxRenderer.enabled) return;
+            FireWas();
             // (the shader without the testing switches' code whenever none is set: the walk 6-13 % cheaper, the same picture to the bit;
             // research/rendering/experiments/smoke-shader-variants.md. The values set on the material stay with it.)
             Shader want = Assets.VolumeRelease != null && Settings.TestView == 0f && Settings.TestRounds == 0f ? Assets.VolumeRelease : Assets.Volume;
@@ -478,12 +611,15 @@ namespace VolumetricExplosions
             Vector3 eye = ToGrid(camL) - slid;
             bool within = eye.x > gx0 && eye.y > gy0 && eye.z > gz0 && eye.x < gx0 + G / gix && eye.y < gy0 + G / giy && eye.z < gz0 + G / giz;
             cloudMaterial.renderQueue = within ? 2995 : 3001;
+            // (drawn before the smoke, from within, the smoke in front is laid over the puffs by the sheet itself: not taken off them
+            // as well, see sprite.glsl)
+            if (Assets.FrontReady) cloudMaterial.SetVector(Assets.SpriteKindNote, Assets.CloudKind(within));
             float billows = Mathf.Clamp01(grip * 1.6f);                           // it takes air to make smoke billow: none in a vacuum, less where the air is thin
             // (Water thrown up by a blast at the sea's surface is not smoke: spray and mist, bright and finely grained, not rolled into
             // big rounded billows. Cut as smoke is, a splash read as one soft lump stamped over and over, grey in its own shade: the
             // owner, 2026-10-20, "a very repetitive volumetric texture". So cut less deep, and shaded less by its own lumps.)
             if (seaBorn) billows *= Mathf.Clamp01(Settings.SeaBillows);
-            float repeat = detailRepeat;                                          // fixed for the site: detail that changed scale with the cloud would swim
+            float repeat = detailRepeat;                                          // fixed for the site: detail that changed scale with the cloud would swim (but a nuclear explosion's cap and stem, whose billows grow as they do: see BeginNuke)
             Vector3 gone = new Vector3((float)shownGoneTurned.x, (float)shownGoneTurned.y, (float)shownGoneTurned.z);
             boxMaterial.SetVector("_VolDetail", new Vector4(gone.x, gone.y, gone.z, 1f / repeat));
             // (never by more than a cell or so: the shader passes over empty air in strides of about that, on the strength of there being no smoke within one)
@@ -500,6 +636,8 @@ namespace VolumetricExplosions
             // ships' boxes cover much of the screen: see Layers.ShipsHalf.)
             // (Since 0.5.0 every patch's smoke is put on the screen together, in depth order, by Air's Layers: the box itself is not
             // drawn then, only walked into a picture of its own. See Layers.)
+            // (And since 2026-10-25 the flames of a patch with fire burning in the open in it are walked whole, by themselves, as a
+            // ship's flame is: see FlameRect and Whole.)
             bool layered = Air.Layered;
             halved = Settings.Half && (riding ? layered && Layers.ShipsHalf : layered || shownMaterial != null);
             Material shown = halved && !layered ? shownMaterial : boxMaterial;
@@ -511,11 +649,22 @@ namespace VolumetricExplosions
             // (at half size there are a quarter as many rays to walk, and each may be walked further in fine steps)
             boxMaterial.SetVector("_VolParams", new Vector4(Thickest, Mathf.Clamp(56f * Settings.Quality + 16f, 24f, 128f) * (halved ? 1.5f : 1f), Mathf.Clamp(Settings.Detail * 1.15f * billows, 0f, 0.85f), ThickestFlame));
             // (An engine's jet is a smoother thing than a fire in the open, and with no air to tear it, quite smooth.)
-            float smooth = riding ? Mathf.Lerp(0.6f, 1f, Thin) : 0f;
+            // (And a nuclear fireball, while it glows: a ball of fire without a gap in it, breaking up into billows as it cools.)
+            float smooth = riding ? Mathf.Lerp(0.6f, 1f, Thin) : nuke != null && nukeRole == NukeCap ? Mathf.Lerp(0.75f, 0.2f, Mathf.Clamp01(nuke.Age / nuke.tlum)) : 0f;
             boxMaterial.SetVector("_VolPeak", new Vector4(halved ? 1f : 0f, smooth, Settings.TestLattice, fullLength));
+            // (and the same walked whole, for the flames' own walk: see Whole)
+            wholeGrid = new Vector4(stride, 1.6f / Mathf.Sqrt(Settings.Quality), 1.6f / texel, Settings.TestView);
+            wholeParams = new Vector4(Thickest, Mathf.Clamp(56f * Settings.Quality + 16f, 24f, 128f), Mathf.Clamp(Settings.Detail * 1.15f * billows, 0f, 0.85f), ThickestFlame);
+            wholePeak = new Vector4(0f, smooth, Settings.TestLattice, fullLength);
+            // (and at half size, for a ship's patch walked for the ships' picture as it is drawn when no Step has set this: see WalkShips)
+            halfGrid = new Vector4(stride, 2f * 1.6f / Mathf.Sqrt(Settings.Quality), 2f * 1.6f / texel, Settings.TestView);
+            halfParams = new Vector4(Thickest, Mathf.Clamp(56f * Settings.Quality + 16f, 24f, 128f) * 1.5f, wholeParams.z, ThickestFlame);
+            halfPeak = new Vector4(1f, smooth, Settings.TestLattice, fullLength);
             // (smoke too thin to see is passed over: up to this much of what is behind it hidden, in all, along a ray. See the shader.)
-            // (and how long ago the grid in use was made: the billows have gone on taking their turns since)
-            boxMaterial.SetVector("_VolThin", new Vector4(Mathf.Clamp(Settings.Thin, 0f, 8f) / 255f, Settings.TestFreeze >= 2f ? 0f : Mathf.Clamp(time - shownTime, 0f, 0.3f), Settings.TestRounds, 0f));
+            // (and how long ago the grid in use was made: the billows have gone on taking their turns since. The grid whose turns and
+            // places the smoke "was" are on the card, that is: a grid in two may leave those as the one before had them, see
+            // SlowFieldsGo, and the shader turns them on from when they were so. Every grid that sends them, the grid in use.)
+            boxMaterial.SetVector("_VolThin", new Vector4(Mathf.Clamp(Settings.Thin, 0f, 8f) / 255f, Settings.TestFreeze >= 2f ? 0f : Mathf.Clamp(time - slowTime, 0f, 0.3f), Settings.TestRounds, 0f));
             boxMaterial.SetVector("_VolSun", new Vector4(sunR, sunG, sunB, 1.5f));
             boxMaterial.SetVector("_VolSunDir", (Vector3)(frame.east * sunL.x + frame.up * sunL.y + frame.north * sunL.z));
             Vector3 sunTurned = ToGrid(sunL);
@@ -523,26 +672,25 @@ namespace VolumetricExplosions
             // Out of doors a good deal of light comes from the whole sky, more than the game's own fill light allows for.
             // (A patch of cloud, high in the air, is lit in its shade by the sky and not by the ground's light, which is what the
             // scene's fill light near the ground mostly is: a heap of thermals had an orange-brown underside by it.)
-            if (cloudy) { float day = 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB; boxMaterial.SetVector("_VolAmb", new Vector4(0.34f * day, 0.42f * day, 0.56f * day, 0f)); }
+            // (A nuclear explosion's cap by night has the scene's fill light, as its stem below it has: with the sky's alone, which is
+            // none when the sun is down, the cap stood a flat black shape over a pale stem until 2026-11-09. By day as it was.)
+            if (cloudy || nukeRole == NukeCap)
+            {
+                float day = 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB, night = nukeRole == NukeCap ? Mathf.Clamp01(1f - 4f * day) : 0f;
+                boxMaterial.SetVector("_VolAmb", new Vector4(Mathf.Max(0.34f * day, night * ambR), Mathf.Max(0.42f * day, night * ambG), Mathf.Max(0.56f * day, night * ambB), 0f));
+            }
             else boxMaterial.SetVector("_VolAmb", new Vector4(Mathf.Max(ambR, 0.16f * sunR), Mathf.Max(ambG, 0.17f * sunG), Mathf.Max(ambB, 0.2f * sunB), 0f));
             boxMaterial.SetVector("_VolGlow", new Vector4(fireR, fireG, fireB, 0f));
-            // The three strongest fires, for the light they throw on the smoke.
-            int first = -1, second = -1, third = -1;
-            for (int n = 0; n < lampCount; n++)
-            {
-                float power = lamps[n].power;
-                if (first < 0 || power > lamps[first].power) { third = second; second = first; first = n; }
-                else if (second < 0 || power > lamps[second].power) { third = second; second = n; }
-                else if (third < 0 || power > lamps[third].power) third = n;
-            }
+            // The strongest fires, for the light they throw on the smoke: three slots, each kept to its fire (see SmokeLamps).
             // (The shader reckons places in the box as it stood when its grid was made; where the box has gone along since, the fires are that much further back in it.)
-            boxMaterial.SetVector("_VolLampA", LampFor(first));
-            boxMaterial.SetVector("_VolLampB", LampFor(second));
-            boxMaterial.SetVector("_VolLampC", LampFor(third));
+            boxMaterial.SetVector("_VolLampA", SlotLamp(0));
+            boxMaterial.SetVector("_VolLampB", SlotLamp(1));
+            boxMaterial.SetVector("_VolLampC", SlotLamp(2));
             // (and which of them are fires burning in one place, the light of a fire on the ground that is not sliding: the smoke at the foot
-            // of such a fire's column is carried no more than its flame is, see standsAt in volume.glsl)
-            float standing = (Stands(first) ? 1f : 0f) + (Stands(second) ? 2f : 0f) + (Stands(third) ? 4f : 0f);
-            boxMaterial.SetVector("_VolLamps", new Vector4(first < 0 ? 0f : 0.25f * lamps[first].power, second < 0 ? 0f : 0.25f * lamps[second].power, third < 0 ? 0f : 0.25f * lamps[third].power, standing));
+            // of such a fire's column is carried no more than its flame is, see standsAt in volume.glsl. Only a slot more than half faded
+            // in counts: the shader takes it as standing or not, wholly, and a slot fading over to another fire is neither for long.)
+            float standing = (slotStands[0] && slotLevel[0] > 0.5f ? 1f : 0f) + (slotStands[1] && slotLevel[1] > 0.5f ? 2f : 0f) + (slotStands[2] && slotLevel[2] > 0.5f ? 4f : 0f);
+            boxMaterial.SetVector("_VolLamps", new Vector4(0.25f * slotPower[0] * slotLevel[0], 0.25f * slotPower[1] * slotLevel[1], 0.25f * slotPower[2] * slotLevel[2], standing));
             boxMaterial.SetVector("_VolTint", dustHue);
             TuneCuts();
             TuneScene();
@@ -565,8 +713,23 @@ namespace VolumetricExplosions
             }
         }
 
+        /// <summary>
+        /// A fire that burns where it is (not carried on with its gas: see TuneFire) is shown going over from the grid before's flame
+        /// to this one's over the time between grids, as it would burn on, instead of in a step with each new grid (the owner,
+        /// 2026-11-04: "That brighter flame has a frame rate of 15 or something, and the smoke has a normal frame rate": a far
+        /// patch in a crash with several has its grids fifteen to twenty times a second, see GridRank). Its flame is so a grid
+        /// late, a twentieth of a second. (TestFireBlend 1: from each grid as it comes, as until then.)
+        /// </summary>
+        void FireWas()
+        {
+            float on = wasOk && Settings.TestFireBlend != 1f ? Mathf.Clamp01((Time.unscaledTime - showAt) / Mathf.Max(showGap, 0.016f)) : 1f;
+            boxMaterial.SetVector(fireWasSizeNote, new Vector4(Mathf.Max(wasSize.x, 1e-3f), Mathf.Max(wasSize.y, 1e-3f), Mathf.Max(wasSize.z, 1e-3f), on));
+            boxMaterial.SetVector(fireWasOffsetNote, wasMiddle);
+        }
+
         // ---- how a fire in the open is drawn (see firePattern in tools/shaderpack/volume.glsl)
-        static readonly int fireNote = Shader.PropertyToID("_VolFire"), fireGoneNote = Shader.PropertyToID("_VolFireGone");
+        static readonly int fireNote = Shader.PropertyToID("_VolFire"), fireGoneNote = Shader.PropertyToID("_VolFireGone"),
+            fireLookNote = Shader.PropertyToID("_VolFireLook"), fireLightNote = Shader.PropertyToID("_VolFireLight"), fireShineNote = Shader.PropertyToID("_VolFireShine");
 
         /// <summary>
         /// A fire's flames in the open (not an engine's: see TuneJet): their pattern rises through the burning gas at a couple of
@@ -584,7 +747,15 @@ namespace VolumetricExplosions
             float size = Mathf.Clamp(biggest, 0.3f, 2.5f);
             // (w: 2 draws a fire in the open folded, its light stopped by its smoke, its hot smoke shining, as since 2026-10-18; 1 as
             // until then, for TestFire 2; 0 as a glow, as until 2026-10-10, for TestFire 1; 3 folded but lit as on that morning, for TestDusk 1)
-            boxMaterial.SetVector(fireNote, new Vector4(time * 1.8f, 1f / size, vacuum ? 0.3f : 0.9f, Settings.TestFire == 1f ? 0f : Settings.TestFire == 2f ? 1f : Settings.TestDusk == 1f ? 3f : 2f));
+            // (A nuclear fireball is no fuel fire: air too hot to see into, glowing of itself all over, white, then yellow, then
+            // red as it cools, with no tongues and no soot in it. Drawn as a glow, lumped as its cloud is: see the smoothness in
+            // TuneVolume. Until 2026-11-09 as a fuel fire's flame, folded, its creases dark with soot: a small orange fire with
+            // dark red lumps in it, where the photographs show a ball brighter than the sun.)
+            boxMaterial.SetVector(fireNote, new Vector4(time * Settings.FireRises, 1f / (size * Settings.FireTongues), vacuum ? 0.3f : 0.9f, Settings.TestFire == 1f || nuke != null ? 0f : Settings.TestFire == 2f ? 1f : Settings.TestDusk == 1f ? 3f : 2f));
+            // (and its look, as the settings have it: see Settings.FireFine)
+            boxMaterial.SetVector(fireLookNote, new Vector4(Settings.FireFine, Settings.FireDrawnUp, Settings.FireEdge, Settings.FireBillows));
+            boxMaterial.SetVector(fireLightNote, new Vector4(Settings.FireBright, Settings.FireCreases, Settings.FireLightFalls, Settings.FireLight));
+            boxMaterial.SetVector(fireShineNote, new Vector4(Settings.FireShineFrom, Settings.FireShine, Settings.FireShown, Settings.FireCut));
             // A fire that burns where it is, fed from its fuel as fast as its gas rises off it, stands where it is from one grid to the
             // next; flame that goes somewhere (a fireball rising, burning wreckage flying, a burning ship going by) is carried on with
             // its gas between grids, as smoke is (see _VolFireGone in volume.glsl). (Carried on as smoke is, a pool's fire rose off
@@ -747,7 +918,7 @@ namespace VolumetricExplosions
         GameObject shade;
         Material shadeMaterial;
         static readonly int shadowX = Shader.PropertyToID("_ShadowGridX"), shadowY = Shader.PropertyToID("_ShadowGridY"), shadowZ = Shader.PropertyToID("_ShadowGridZ"),
-                            shadowSun = Shader.PropertyToID("_ShadowSun"), shadowSunWorld = Shader.PropertyToID("_ShadowSunWorld");
+                            shadowSun = Shader.PropertyToID("_ShadowSun"), shadowSunWorld = Shader.PropertyToID("_ShadowSunWorld"), shadowSky = Shader.PropertyToID("_ShadowSky"), shadowSkyKeep = Shader.PropertyToID("_ShadowSkyKeep");
         static readonly Vector3[] corners = new Vector3[16];
 
         /// <summary>
@@ -755,9 +926,33 @@ namespace VolumetricExplosions
         /// far down as the ground under it), and what the shadow's shader needs to follow each place there back towards the
         /// sun into the grid: the turn from the scene into the grid's box, and the sun's way in the box's own axes.
         /// </summary>
+#if DEV
+        public string shadowSaid = "not yet";
+#endif
         void TuneShadow()
         {
-            bool wanted = Settings.Shadows && Assets.Shadow != null && box != null && boxRenderer.enabled && gridReady && !space && sunUp && sunL.y > 0.06f && count > 0;
+            // How dark the sun's shadow may be, and how much of the ground's light is the sky's for the smoke lying on it to take.
+            // (Under the weather's overcast, only as much of the sun's shadow as there is sun: until 2026-11-04 it was drawn as dark
+            // as in sunshine along the hidden sun's way. TestGroundShade 1: that, and no sky taken.)
+            bool newWay = Settings.TestGroundShade != 1f;
+            float day = Mathf.Clamp01(sunL.y * 6f + 0.3f);
+            float sunNow = 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB;
+            float sunGets = newWay && sunClear > 1e-6f ? Mathf.Clamp01(sunNow / sunClear) : 1f;
+            float sunDark = sunUp && sunL.y > 0.06f ? 0.7f * day * sunGets : 0f;
+            float skyNow = 0.2126f * Mathf.Max(ambR, 0.16f * sunR) + 0.7152f * Mathf.Max(ambG, 0.17f * sunG) + 0.0722f * Mathf.Max(ambB, 0.2f * sunB);
+            float skyShare = skyNow / Mathf.Max(skyNow + sunNow * Mathf.Max(sunL.y, 0f), 1e-6f);
+            float skyDark = newWay && sunUp && hasGround ? 0.65f * skyShare : 0f;
+            if (sunDark < 0.004f) sunDark = 0f;
+#if DEV
+            // (TestGroundShade 2, for seeing where it falls: the sky's part alone, as dark as it goes)
+            if (Settings.TestGroundShade == 2f) { sunDark = 0f; skyDark = 0.95f; }
+            // (3: every place on the ground inside the grid's box darkened by half, whatever is over it: to see where the pass reaches)
+            if (Settings.TestGroundShade == 3f) { sunDark = 0f; skyDark = -0.5f; }
+#endif
+            bool wanted = Settings.Shadows && Assets.Shadow != null && box != null && boxRenderer.enabled && gridReady && !space && (sunDark > 0f || skyDark > 0.004f || skyDark < 0f) && count > 0;
+#if DEV
+            shadowSaid = "sun " + sunDark.ToString("F2") + " (" + sunGets.ToString("F2") + " of it through), sky " + skyDark.ToString("F2") + " (share " + skyShare.ToString("F2") + "), ground " + hasGround + ", box " + (box != null && boxRenderer.enabled) + ", grid " + gridReady + (wanted ? ", drawn" : ", not drawn");
+#endif
             if (!wanted)
             {
                 if (shade != null && shade.activeSelf) shade.SetActive(false);
@@ -803,8 +998,9 @@ namespace VolumetricExplosions
             for (int n = 0; n < 8; n++)
             {
                 Vector3 c = corners[n];
-                float along = Mathf.Min((c.y - floor) / sunL.y, 900f);
-                corners[n + 8] = c - sunL * along;
+                // (with no sun's shadow to throw, only straight down to the ground under it)
+                float along = sunDark > 0f ? Mathf.Min((c.y - floor) / sunL.y, 900f) : 0f;
+                corners[n + 8] = sunDark > 0f ? c - sunL * along : new Vector3(c.x, floor, c.z);
             }
             Vector3 lo = corners[0], hi = corners[0];
             for (int n = 1; n < 16; n++) { lo = Vector3.Min(lo, corners[n]); hi = Vector3.Max(hi, corners[n]); }
@@ -816,11 +1012,16 @@ namespace VolumetricExplosions
             Vector3 sunWorld = ((Vector3)(frame.east * sunL.x + frame.up * sunL.y + frame.north * sunL.z)).normalized;
             Vector3 sunBox = into.MultiplyVector(sunWorld);
             // (as dark as daylight goes: under thick smoke what is left is the sky's light)
-            float day = Mathf.Clamp01(sunL.y * 6f + 0.3f);
             shadeMaterial.SetVector(shadowX, into.GetRow(0));
             shadeMaterial.SetVector(shadowY, into.GetRow(1));
             shadeMaterial.SetVector(shadowZ, into.GetRow(2));
-            shadeMaterial.SetVector(shadowSun, new Vector4(sunBox.x, sunBox.y, sunBox.z, 0.7f * day));
+            shadeMaterial.SetVector(shadowSun, new Vector4(sunBox.x, sunBox.y, sunBox.z, sunDark));
+            // (the smoke within five metres over a place is what takes its sky: see the shader)
+            Vector3 upBox = into.MultiplyVector((Vector3)frame.up) * 5f;
+            shadeMaterial.SetVector(shadowSky, new Vector4(upBox.x, upBox.y, upBox.z, skyDark));
+            // (a rising column's grid counts the smoke over a place less the higher it is, by exp(-height / shadeFar): so the smoke
+            // five metres up is taken from what is over the place at as much as it is counted there)
+            shadeMaterial.SetVector(shadowSkyKeep, new Vector4(shadeFar > 0f ? Mathf.Exp(-5f / shadeFar) : 1f, 0f, 0f, 0f));
             // (and how wide the sun looks from here, for how soft the shadow is by how far it falls: see the shader)
             CelestialBody star = Planetarium.fetch != null ? Planetarium.fetch.Sun : null;
             float wideSun = star != null ? (float)(2.0 * star.Radius / System.Math.Max((star.position - frame.origin).magnitude, star.Radius * 2.0)) : 0.0093f;
@@ -892,13 +1093,198 @@ namespace VolumetricExplosions
         /// <summary>Whether a lamp is the light of a fire burning in one place: steady (a fire's, not a blast's flash), not sliding, not climbing.</summary>
         bool Stands(int n) => n >= 0 && lamps[n].steady && lamps[n].vx * lamps[n].vx + lamps[n].vy * lamps[n].vy + lamps[n].vz * lamps[n].vz < 0.25f && Mathf.Abs(lamps[n].climb) < 0.5f;
 
-        /// <summary>Where a fire is and the square of its size, as the shader is told it: in the grid's axes, and in the box as it stood when its grid was made.</summary>
-        Vector4 LampFor(int n)
+        /// <summary>Where the fire a slot of the smoke's light holds is and the square of its size, as the shader is told it: in the grid's axes, and in the box as it stood when its grid was made.</summary>
+        Vector4 SlotLamp(int s)
         {
-            if (n < 0) return Vector4.zero;
-            Vector3 at = ToGrid(new Vector3(lamps[n].x, lamps[n].y, lamps[n].z)) - slid;
-            return new Vector4(at.x, at.y, at.z, lamps[n].r * lamps[n].r);
+            if (!(slotLevel[s] > 0f)) return Vector4.zero;
+            Vector4 l = slotAt[s];
+            Vector3 at = ToGrid(new Vector3(l.x, l.y, l.z)) - slid;
+            return new Vector4(at.x, at.y, at.z, l.w * l.w);
         }
+
+        // ---- the fires' light on the smoke: three slots, each keeping to its fire (see SmokeLamps)
+        // (which lamp each slot follows, by its seed, which no other lamp of the patch has (-1: none); which lamp in the list that is
+        // this frame (-1: none, or gone); how far the slot is faded in, 0 to 1; and where its fire was last, x y z and its reach, how
+        // strong on the smoke and whether it stands, for fading out where it was once its fire has gone)
+        readonly float[] slotFollows = { -1f, -1f, -1f }, slotLevel = new float[3], slotPower = new float[3];
+        readonly int[] slotHeld = { -1, -1, -1 };
+        readonly Vector4[] slotAt = new Vector4[3];
+        readonly bool[] slotStands = new bool[3];
+        int slotChanges, slotFills;          // (how many times since the patch began a slot has gone over from one fire to another, and taken one when it had none: Air.FireLights)
+
+        /// <summary>How strong a lamp is without its flicker and its puffs: as Lamps has it before those (a fire's light dying down at the end, a flash's dying away).</summary>
+        float Unflickered(int n)
+        {
+            float left = lamps[n].life > 0f ? 1f - lamps[n].age / lamps[n].life : 1f;
+            if (lamps[n].pulse > 0f) return lamps[n].peak * NukePulse(lamps[n].age, lamps[n].pulse, left);
+            return lamps[n].steady ? lamps[n].peak * Mathf.Min(1f, left * 2.8f) : lamps[n].peak * left * left;
+        }
+
+        /// <summary>
+        /// How strong a lamp's light is on the smoke: as it is on the ground, but for a fire's slow puffs, which on the smoke are kept
+        /// to Settings.FireSmokePuff of their swing, from its top down. (Through 2026-11-02 the smoke had the whole of it, 0.6 to 1.1
+        /// of the fire's strength about once a second for a pool twelve metres across; and the fire's light on the smoke counts for
+        /// eight times the sun, so that the smoke round a big pool fire went from light orange to grey and back, again and again,
+        /// the owner's "turns light orange then back to grey". The ground and the wreck have the whole puff still: there the light is
+        /// the game's own, a fraction of the sun's, and the puff is what makes the fire's light seem to breathe.)
+        /// </summary>
+        float OnSmoke(int n)
+        {
+            // (the fires that puff, as Lamps has them: a fire's steady light, not an engine's or a burning thing's quiet one)
+            if (!(lamps[n].steady && !lamps[n].quiet && Settings.TestFireLight != 1f)) return lamps[n].power;
+            float keep = Mathf.Clamp01(Settings.FireSmokePuff);
+            return keep * lamps[n].power + (1f - keep) * 1.1f * Unflickered(n);
+        }
+
+        /// <summary>Whether a slot of the smoke's light follows the lamp with this seed.</summary>
+        bool Followed(float seed) => slotFollows[0] == seed || slotFollows[1] == seed || slotFollows[2] == seed;
+
+        /// <summary>
+        /// Which of a patch's fires light its smoke (the shader has three: _VolLampA to C), kept from one frame to the next as the
+        /// lights on the ground are (see the end of Lamps): each of the three slots keeps to its fire, by the lamp's seed, until that
+        /// fire is out or a fire that has no slot is more than Settings.FireSlotOutdone times as strong, reckoned without the flicker
+        /// (see Unflickered); only the slot whose fire is weakest goes over, and it fades out where it is over Settings.FireSlotFade
+        /// seconds first, then in again on the new fire. But a blast's flash, not a fire's steady light, takes it at once, whole: a flash
+        /// is over in less than the fading would take, as for the lights on the ground. And where its lamp has gone and a new one is
+        /// lit in the same place (an engine's or a burning thing's light is lit afresh whenever its place in the list was taken, see
+        /// VentLamp; a pool's carries on as the pool grows, see AddFire), the slot keeps to it unfaded: it is the same fire.
+        /// (Until 2026-11-03 the three were whichever three were strongest that frame, by their flickering strength. A big crash's
+        /// fire by day leaves four or five: the blast's flash, its pool, and up to three patches of spilt fuel round about, the three
+        /// near enough as strong as one another (seen in Air.FireLights: 1.90, 0.98, 1.09, 1.09), so that the third slot went from
+        /// one patch to another several times a second, and the smoke round the one left out went from orange to grey in a frame.)
+        /// </summary>
+        void SmokeLamps(float dt)
+        {
+            if (Settings.TestFireSlots == 1f)
+            {
+                // (as until 2026-11-03: the three strongest this frame, by their flickering strength, whole at once)
+                int first = -1, second = -1, third = -1;
+                for (int n = 0; n < lampCount; n++)
+                {
+                    float power = lamps[n].power;
+                    if (first < 0 || power > lamps[first].power) { third = second; second = first; first = n; }
+                    else if (second < 0 || power > lamps[second].power) { third = second; second = n; }
+                    else if (third < 0 || power > lamps[third].power) third = n;
+                }
+                for (int s = 0; s < 3; s++)
+                {
+                    int n = s == 0 ? first : s == 1 ? second : third;
+                    slotHeld[s] = n;
+                    slotFollows[s] = n >= 0 ? lamps[n].seed : -1f;
+                    slotLevel[s] = n >= 0 ? 1f : 0f;
+                    slotPower[s] = n >= 0 ? lamps[n].power : 0f;
+                    slotStands[s] = Stands(n);
+                    if (n >= 0) slotAt[s] = new Vector4(lamps[n].x, lamps[n].y, lamps[n].z, lamps[n].r);
+                }
+                return;
+            }
+            float fade = Mathf.Max(0.01f, Settings.FireSlotFade), outdone = Mathf.Max(1f, Settings.FireSlotOutdone);
+            // Where each slot's fire is in the list this frame (lamps are taken out of it as they go out, and the last put in their place).
+            for (int s = 0; s < 3; s++)
+            {
+                int held = -1;
+                if (slotFollows[s] >= 0f)
+                    for (int n = 0; n < lampCount; n++) if (lamps[n].seed == slotFollows[s]) { held = n; break; }
+                if (slotFollows[s] >= 0f && (held < 0 || lamps[held].steady))
+                {
+                    // (The same fire lit afresh: a fire's lamp that no slot has, within half its reach of where the slot's fire is, and
+                    // stronger than that is (or that gone), is taken over at once, unfaded. An engine's or a burning thing's light is lit
+                    // anew whenever its place in the list has been taken, the old one dying away beside it within a second; faded out
+                    // and in again, the light on its smoke dipped each time. Not a blast's flash, which has its own way in, below.)
+                    Vector4 was = slotAt[s];
+                    float kept = held >= 0 ? Unflickered(held) : 0f;
+                    for (int n = 0; n < lampCount; n++)
+                    {
+                        if (n == held || !lamps[n].steady || Followed(lamps[n].seed)) continue;
+                        float dx = lamps[n].x - was.x, dy = lamps[n].y - was.y, dz = lamps[n].z - was.z, near = 0.5f * Mathf.Max(lamps[n].r, was.w);
+                        if (dx * dx + dy * dy + dz * dz >= near * near) continue;
+                        float strength = Unflickered(n);
+                        // (and on a tie the younger: the lamp kept up is lit afresh each frame, the one left behind ages, and the two are
+                        // as strong as each other to the float, from the same throttle and the same sun, for their first 0.39 s; with
+                        // only "stronger", the slot kept to the one dying away while the fresh one took another: see OwnLamp)
+                        if (strength > kept || held >= 0 && strength >= kept && lamps[n].age < lamps[held].age) { held = n; kept = strength; }
+                    }
+                    if (held >= 0) slotFollows[s] = lamps[held].seed;
+                    // (and one whose light had all but gone with its fire is free at once: there is nothing to fade)
+                    else if (slotPower[s] * slotLevel[s] < 0.02f) { slotFollows[s] = -1f; slotLevel[s] = 0f; slotPower[s] = 0f; slotStands[s] = false; }
+                }
+                slotHeld[s] = held;
+            }
+            // The strongest fire that has no slot; and the slot it would take: one with none, or else the one whose fire is weakest
+            // (one whose fire has gone, and is fading out where it was, weaker than any).
+            // (Never a second light of the same engine or burning thing, the same owner, as a slot's: two slots on one fire light its
+            // smoke twice over. OwnLamp keeps such a fire to one lamp, so this is belt and braces. Only the same owner: fires that
+            // merely stand close together, the engines of a cluster or a wreck's burning bits a metre apart, are each a fire of their
+            // own and each may have a slot. Owner nought, a blast's or a pool's or spilt fuel's, is never held back here.)
+            int best = -1;
+            float bestStrength = 0f;
+            for (int n = 0; n < lampCount; n++)
+            {
+                if (Followed(lamps[n].seed)) continue;
+                if (lamps[n].steady && lamps[n].owner != 0)
+                {
+                    bool same = false;
+                    for (int s = 0; s < 3 && !same; s++)
+                        same = slotHeld[s] >= 0 && lamps[slotHeld[s]].owner == lamps[n].owner;
+                    if (same) continue;
+                }
+                float strength = Unflickered(n);
+                if (strength > bestStrength) { best = n; bestStrength = strength; }
+            }
+            int into = -1, leaving = -1;
+            float intoStrength = float.MaxValue;
+            for (int s = 0; s < 3; s++)
+            {
+                float strength = slotFollows[s] < 0f ? -1f : slotHeld[s] < 0 ? 0f : Unflickered(slotHeld[s]);
+                if (strength < intoStrength) { into = s; intoStrength = strength; }
+            }
+            if (best >= 0 && into >= 0)
+            {
+                bool empty = slotFollows[into] < 0f, flash = !lamps[best].steady;
+                if (empty || slotHeld[into] < 0 || bestStrength > outdone * intoStrength)
+                {
+                    if (empty || flash || slotLevel[into] <= 0f)
+                    {
+                        if (empty) slotFills++; else slotChanges++;
+                        slotFollows[into] = lamps[best].seed;
+                        slotHeld[into] = best;
+                        if (flash) slotLevel[into] = 1f;
+                    }
+                    else leaving = into;
+                }
+            }
+            // Each faded towards in or out, and where it holds a fire, that fire's place and strength now.
+            for (int s = 0; s < 3; s++)
+            {
+                int held = slotHeld[s];
+                slotLevel[s] = Mathf.MoveTowards(slotLevel[s], held >= 0 && s != leaving ? 1f : 0f, dt / fade);
+                if (held >= 0)
+                {
+                    slotAt[s] = new Vector4(lamps[held].x, lamps[held].y, lamps[held].z, lamps[held].r);
+                    slotPower[s] = OnSmoke(held);
+                    slotStands[s] = Stands(held);
+                }
+                else if (slotLevel[s] <= 0f) { slotFollows[s] = -1f; slotPower[s] = 0f; slotStands[s] = false; }
+            }
+        }
+
+#if DEV
+        /// <summary>(Which fire each slot of the smoke's light follows, how far faded in, and how often they have changed: see SmokeLamps.)</summary>
+        string SlotsSaid()
+        {
+            var say = new System.Text.StringBuilder("; on the smoke:");
+            for (int s = 0; s < 3; s++)
+            {
+                say.Append(" [slot ").Append(s).Append(": ");
+                if (slotFollows[s] < 0f) say.Append("none");
+                else say.Append(slotHeld[s] >= 0 ? "lamp #" + slotHeld[s] : "gone").Append(" seed ").Append(slotFollows[s].ToString("F2"));
+                say.Append(", weight ").Append(slotLevel[s].ToString("F2")).Append(", sends ").Append((0.25f * slotPower[s] * slotLevel[s]).ToString("F2"))
+                   .Append(slotStands[s] && slotLevel[s] > 0.5f ? ", standing" : "").Append("]");
+            }
+            say.Append(" ").Append(slotChanges).Append(" changes of fire, ").Append(slotFills).Append(" taken up, since the patch began");
+            return say.ToString();
+        }
+#endif
 
         /// <summary>Whether this site's smoke is to be drawn at half size just now, into its own small picture (see Air.Halves: the way it was done before Layers).</summary>
         public bool Halved => halved && !Air.Layered && box != null && boxRenderer.enabled;
@@ -906,6 +1292,31 @@ namespace VolumetricExplosions
         public bool Shown => box != null && boxRenderer.enabled;
         /// <summary>(How many patches with smoke are nearer the camera than this one, as the air last ranked them: see Relight.)</summary>
         public int GridRank;
+        /// <summary>
+        /// (Since 2026-11-09.) Whether fire burns in the open in this patch, in sight and over a thirtieth of the screen. The nearest
+        /// such patch to the camera (NearestFlame, as the air last ranked them) has a new grid as often as one can be made: see Relight.
+        /// </summary>
+        public bool FlameSeen => Burning && !cloudy && !OutOfSight && Covering >= 0.03f;
+        public bool NearestFlame;
+        // (And where the game draws more than a hundred frames a second, every second frame: evenly, fifty and more a second. Told
+        // from the frames' length over the last ten or so, and not changed back until they are a fifth longer or shorter again.)
+        static bool gridsEveryOther;
+        static float frameLength = 0.02f;
+        int gridFrame = -10;                       // (the frame this patch's last grid was begun in)
+        bool FlameHeld => NearestFlame && gridsEveryOther && Time.frameCount - gridFrame < 2;
+
+        /// <summary>(Once a frame, from the air: how long the frames are, for NearestFlame's grids.)</summary>
+        public static void FramePace()
+        {
+            frameLength = Mathf.Lerp(frameLength, Mathf.Clamp(Time.unscaledDeltaTime, 0.001f, 0.1f), 0.1f);
+            if (frameLength < 0.009f) gridsEveryOther = true; else if (frameLength > 0.011f) gridsEveryOther = false;
+        }
+#if DEV
+        /// <summary>(Development build: every patch given a new grid every frame, whatever its distance, rank or kind.)</summary>
+        public static bool TestGridEveryFrame;
+        /// <summary>(Development build: that only for the patch nearest the camera.)</summary>
+        public static bool TestGridNearOnly;
+#endif
         float awayNow;
         public float AwayNow => awayNow;
         public bool SunUp => sunUp;
@@ -1073,6 +1484,7 @@ namespace VolumetricExplosions
         public bool Takes(Plan plan)
         {
             if (plan.body != body || plan.space != space || leaving || riding) return false;
+            if (nuke != null) return false;      // (a nuclear explosion's patches are its own: see SiteNuke.cs)
             frame.Refresh();
             Vector3 at = frame.ToLocal(plan.world);
             float mx = (bx0 + bx1) * 0.5f, my = (by0 + by1) * 0.5f, mz = (bz0 + bz1) * 0.5f;
@@ -1111,6 +1523,28 @@ namespace VolumetricExplosions
 
         // ================================================================== the surroundings
 
+        /// <summary>
+        /// The air at a place in the scene, against Kerbin's at sea level, as Look has it for the patch's middle: for an engine's
+        /// smoke, which is laid where the nozzle is and not where the patch it is laid in began. (A trail's patch reaches two or
+        /// three kilometres up. Laid by the air at its foot, its smoke at its top was as thick, as wide and as long-lasting as
+        /// smoke laid there, and the next patch's, laid by the air at its own foot, was not: a step at every join, of up to a
+        /// third high up, where the trail was thinner and narrower above the join than below it and was gone sooner.)
+        /// </summary>
+        float AirAt(Vector3d world)
+        {
+            if (!body.atmosphere) return 0f;
+            // (the engines of one ship are a few metres apart: one answer does for all of them, this frame)
+            double high = body.GetAltitude(world);
+            if (Time.frameCount == airAtFrame && Math.Abs(high - airAtHigh) < 3.0) return airAtWas;
+            double pressure = FlightGlobals.getStaticPressure(world, body);
+            double density = pressure > 0 ? FlightGlobals.getAtmDensity(pressure, FlightGlobals.getExternalTemperature(world, body), body) : 0.0;
+            airAtFrame = Time.frameCount; airAtHigh = high;
+            return airAtWas = Mathf.Clamp((float)(density / 1.225), 0f, 8f);
+        }
+        int airAtFrame = -1;
+        double airAtHigh;
+        float airAtWas;
+
         /// <summary>The air, the gravity and the light here, looked up again every half second.</summary>
         void Look()
         {
@@ -1143,7 +1577,9 @@ namespace VolumetricExplosions
             // an overcast was lit by the full sun.)
             Vector4 shading = Shader.GetGlobalVector(weatherSun), fade = Shader.GetGlobalVector(weatherFade);
             float hidden = 0f, clearDay = 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB;
+            sunClear = clearDay;
             if (shading.w > 0.5f) { float through = Mathf.Clamp01(fade.x); hidden = 1f - through; through *= through; sunR *= through; sunG *= through; sunB *= through; }
+            sunHidden = hidden;
             Color sky = RenderSettings.ambientLight;
             ambR = sky.r * sky.r + 0.0004f;
             ambG = sky.g * sky.g + 0.0004f;
@@ -1199,7 +1635,8 @@ namespace VolumetricExplosions
             catch (Exception) { weathered = false; return; }
             try { WeatherAloft(ut, floor, breeze); }
             catch (Exception) { }
-            bool one = hasGround || riding;
+            // (and an engine's trail with ground under it, above the few hundred metres the ground holds the wind back over: see the mover)
+            bool one = riding || (hasGround && !vented);
 #if DEV
             one |= oneWind;
 #endif
@@ -1389,14 +1826,27 @@ namespace VolumetricExplosions
                 else i++;
             }
             Air.Lap(0, ref lap);
+#if DEV
+            long slow = System.Diagnostics.Stopwatch.GetTimestamp();
+            TurnAside(); slow = Slow("turning aside", slow);
+            if (!riding)
+            {
+                TakeAdopted(); slow = Slow("taking a ship's smoke", slow);
+                GiveMerged(); slow = Slow("handing its smoke over", slow);
+                TakeMerged(); slow = Slow("taking two others' smoke", slow);
+                ThinOut(); Slow("thinning", slow);
+            }
+#else
             TurnAside();
-            if (!riding) TakeAdopted();
+            if (!riding) { TakeAdopted(); GiveMerged(); TakeMerged(); ThinOut(); }
+#endif
             Air.Lap(1, ref lap);
             Air.Lap(2, ref lap);
             windGoneX += windX * wind10 * dt; windGoneZ += windZ * wind10 * dt;
             // Where the smoke is drawn as a volume none of it is drawn as sprites. (They were once left in with no colour:
             // nothing to see, but thousands of them, each metres across, still to be drawn over one another.)
-            cloud.SetParticles(draw, box != null && gridReady ? 0 : count);
+            // (nor while a patch taking two others' smoke has no grid of it yet: they are drawing it meanwhile, see Air.Merging)
+            cloud.SetParticles(draw, box != null && (gridReady || mergedFrom != null) ? 0 : count);
             Air.Lap(3, ref lap);
 
             time += dt;
@@ -1420,6 +1870,7 @@ namespace VolumetricExplosions
             Wash();
             Wakes(dt);
             Thermals(dt);
+            if (nuke != null) NukeStep(dt);
             Waves(dt);
             Knocks(dt);
             Lamps(dt);
@@ -1439,7 +1890,13 @@ namespace VolumetricExplosions
             Air.Lap(8, ref lap);
             LookAhead(dt);
             Air.Lap(9, ref lap);
+#if DEV
+            long slowGrid = System.Diagnostics.Stopwatch.GetTimestamp();
+#endif
             Relight();
+#if DEV
+            Slow("its grid, all told", slowGrid);
+#endif
             Air.Lap(10, ref lap);
             TuneVolume();
             Air.Lap(11, ref lap);
@@ -1459,6 +1916,10 @@ namespace VolumetricExplosions
             if (count > 0 && Settings.TestFreeze < 0.5f)
             {
                 stepGoing = airGoing;
+                // (the fires burning lower than a ship's patch's plane, as the grid has them, for the ground the mover holds the
+                // particles out of: see Hollow. The cell is the grid on show's.)
+                stepFeetCount = SunkFeet(stepFeet);
+                stepFeetCell = gix > 0f && giz > 0f ? Mathf.Max(1f / gix, 1f / giz) : 0f;
                 airGone += (Vector3d)airGoing * dt;
                 // (and the same in the grid's own axes, as they lie now: see airGoneTurned)
                 airGoneTurned += (Vector3d)(wantTurned ? new Vector3(Vector3.Dot(wantX, airGoing), Vector3.Dot(wantY, airGoing), Vector3.Dot(wantZ, airGoing)) : airGoing) * dt;
@@ -1631,9 +2092,126 @@ namespace VolumetricExplosions
         void Moving()
         {
             long began = System.Diagnostics.Stopwatch.GetTimestamp();
+            if ((tick & 3) == 0) Slumps();
             if (chunks == 1) RunChunk(0);
             else Parallel.For(0, chunks, chunkBody);
             moved = System.Diagnostics.Stopwatch.GetTimestamp() - began;
+        }
+
+        // ---- cold smoke lying on the ground spreads out from where it lies thickest (since 2026-11-04; TestSlump 1: not)
+        // Smoke that has cooled, a smoke screen's, dust: a little heavier than the air, and lying on the ground it slumps outward as
+        // spilt water would, slowly, a gravity current: at the front about as fast as the root of how much heavier it is (g', a few
+        // hundredths of g) times how deep it lies, a few tenths of a metre a second for a layer a metre or two deep. Before, it ran
+        // down a slope only (Downhill), and on the flat it stayed where it was put, a heap. Here: how deep the cold smoke lies, over
+        // the ground under the patch, from its particles (each counted for its ball's volume, spread over the cells of a map it
+        // covers), every fourth frame; in the mover, each cold particle lying low is carried down that depth's slope, as heavy air
+        // held back by the ground (gravity against friction: no faster where the slope is steep than the front would go), so it
+        // goes on smoothly and comes to rest as the layer evens out.
+        const int SlumpSide = 32;
+        const float SlumpHigh = 40f;                  // (metres over the ground: cold smoke higher than this is not lying on it)
+        const float SlumpLayer = 3f;                  // (metres: how deep a layer of heavy smoke settles to, mixing with the air above it)
+        readonly float[] slumpH = new float[SlumpSide * SlumpSide], slumpWork = new float[SlumpSide * SlumpSide];
+        float slumpX0, slumpZ0, slumpInv, slumpCell;
+        bool slumpOn;
+#if DEV
+        public string slumpSaid = "not yet";
+#endif
+
+        static bool SlumpKind(ref P q) => q.life > 0f && q.age >= 0f && q.heat < 0.05f && q.rise <= 0.1f && (q.flags & (Ballistic | DiesOnGround)) == 0 && q.r > 0.05f;
+
+        void Slumps()
+        {
+            slumpOn = false;
+            if (Settings.TestSlump == 1f || !hasGround || riding || count == 0) return;
+            Land under = land;
+            float[] lie = under != null ? under.h : null;
+            P[] a = p;
+            int n = count;
+            // (where the cold smoke over the ground is: the map is laid over that)
+            float x0 = float.MaxValue, z0 = float.MaxValue, x1 = float.MinValue, z1 = float.MinValue;
+            int found = 0;
+            for (int i = 0; i < n; i++)
+            {
+                ref P q = ref a[i];
+                if (!SlumpKind(ref q)) continue;
+                float ground = lie != null ? Height(lie, under.x0, under.z0, under.inv, q.x, q.z) : groundY - q.x * groundSX - q.z * groundSZ;
+                if (q.y - ground > SlumpHigh) continue;
+                if (q.x - q.r < x0) x0 = q.x - q.r;
+                if (q.x + q.r > x1) x1 = q.x + q.r;
+                if (q.z - q.r < z0) z0 = q.z - q.r;
+                if (q.z + q.r > z1) z1 = q.z + q.r;
+                found++;
+            }
+#if DEV
+            slumpSaid = found + " of " + n + " particles cold over the ground";
+#endif
+            if (found < 3) return;
+            float cell = Mathf.Max(Mathf.Max(x1 - x0, z1 - z0) / (SlumpSide - 4), 1f);
+            float mx = (x0 + x1) * 0.5f, mz = (z0 + z1) * 0.5f;
+            float ox = mx - cell * SlumpSide * 0.5f, oz = mz - cell * SlumpSide * 0.5f, inv = 1f / cell;
+            float[] h = slumpWork;
+            Array.Clear(h, 0, h.Length);
+            float perArea = inv * inv;
+            for (int i = 0; i < n; i++)
+            {
+                ref P q = ref a[i];
+                if (!SlumpKind(ref q)) continue;
+                float ground = lie != null ? Height(lie, under.x0, under.z0, under.inv, q.x, q.z) : groundY - q.x * groundSX - q.z * groundSZ;
+                if (q.y - ground > SlumpHigh) continue;
+                // (as much as there is of it, fading as it goes)
+                float fade = q.life - q.age < q.life * 0.22f ? (q.life - q.age) / (q.life * 0.22f) : 1f;
+                float depth = 4.18879f * q.r * q.r * q.r * fade * perArea;
+                float u = (q.x - ox) * inv - 0.5f, v = (q.z - oz) * inv - 0.5f;
+                int ci = (int)Mathf.Floor(u), cj = (int)Mathf.Floor(v);
+                float fu = u - ci, fv = v - cj;
+                for (int c = 0; c < 4; c++)
+                {
+                    int ii = ci + (c & 1), jj = cj + (c >> 1);
+                    if (ii < 0 || jj < 0 || ii >= SlumpSide || jj >= SlumpSide) continue;
+                    h[ii + jj * SlumpSide] += depth * ((c & 1) == 0 ? 1f - fu : fu) * ((c >> 1) == 0 ? 1f - fv : fv);
+                }
+            }
+            // (smoothed once, so that the slope the mover reads does not jump from one cell to the next)
+            float[] o = slumpH;
+            for (int j = 0; j < SlumpSide; j++)
+                for (int i = 0; i < SlumpSide; i++)
+                {
+                    float sum = 0f, weight = 0f;
+                    for (int dj = -1; dj <= 1; dj++)
+                        for (int di = -1; di <= 1; di++)
+                        {
+                            int ii = i + di, jj = j + dj;
+                            if (ii < 0 || jj < 0 || ii >= SlumpSide || jj >= SlumpSide) continue;
+                            float w = (di == 0 ? 2f : 1f) * (dj == 0 ? 2f : 1f);
+                            sum += h[ii + jj * SlumpSide] * w;
+                            weight += w;
+                        }
+                    // (a deep heap of overlapping puffs counts for no more than twelve metres of smoke lying)
+                    float d = sum / weight;
+                    o[i + j * SlumpSide] = d > 12f ? 12f : d;
+                }
+            slumpX0 = ox; slumpZ0 = oz; slumpInv = inv; slumpCell = cell;
+            slumpOn = true;
+#if DEV
+            float deepest = 0f;
+            for (int k = 0; k < o.Length; k++) if (o[k] > deepest) deepest = o[k];
+            slumpSaid = found + " of " + n + " particles cold over the ground, over " + (cell * SlumpSide).ToString("F0") + " m (cells " + cell.ToString("F1") + " m), at most " + deepest.ToString("F2") + " m deep";
+#endif
+        }
+
+        /// <summary>How deep the cold smoke lies at a place, from the map Slumps made (bilinear; nought off it).</summary>
+        static float SlumpAt(float[] h, float x0, float z0, float inv, float x, float z)
+        {
+            float u = (x - x0) * inv - 0.5f, v = (z - z0) * inv - 0.5f;
+            int ci = (int)Mathf.Floor(u), cj = (int)Mathf.Floor(v);
+            float fu = u - ci, fv = v - cj, sum = 0f;
+            for (int c = 0; c < 4; c++)
+            {
+                int ii = ci + (c & 1), jj = cj + (c >> 1);
+                if (ii < 0 || jj < 0 || ii >= SlumpSide || jj >= SlumpSide) continue;
+                sum += h[ii + jj * SlumpSide] * ((c & 1) == 0 ? 1f - fu : fu) * ((c >> 1) == 0 ? 1f - fv : fv);
+            }
+            return sum;
         }
 
         void RunChunk(int chunk)
@@ -1642,6 +2220,7 @@ namespace VolumetricExplosions
             // Everything the loop needs, taken out of the object once.
             // (A patch that goes along with a ship: nothing in it lasts long enough to fall, and the air it is in goes by at the ship's speed.)
             float dt = stepDt, g = riding ? 0f : gravity, hold = grip, still = calm, rush = hurry;
+            float rMost = nuke != null ? 3000f : 80f;                          // (a nuclear explosion's cloud is kilometres across: see SiteNuke.cs)
             float byX = ridesGoing.x, byY = ridesGoing.y, byZ = ridesGoing.z;
             float joltX = jolt.x, joltY = jolt.y, joltZ = jolt.z;
             bool jolted = joltX != 0f || joltY != 0f || joltZ != 0f;
@@ -1661,6 +2240,13 @@ namespace VolumetricExplosions
             Land under = land;
             float[] lie = under != null ? under.h : null;
             float lieX0 = under != null ? under.x0 : 0f, lieZ0 = under != null ? under.z0 : 0f, lieInv = under != null ? under.inv : 0f;
+            // (how deep the cold smoke lies, for its slumping: see Slumps)
+            float[] slump = slumpOn ? slumpH : null;
+            float slX0 = slumpX0, slZ0 = slumpZ0, slInv = slumpInv, slStep = slumpCell;
+            // (and where a ship's patch has fires burning lower than its plane, the hollows the grid has under them: see Hollow)
+            Vector4[] feet = stepFeet;
+            int nFeet = lie == null ? stepFeetCount : 0;
+            float feetCell = stepFeetCell;
             int now = tick, nThermals = thermalCount, nBalls = ballCount, nJets = jetCount;
             bool volumed = box != null && gridReady;                           // the volume draws what is inside its box; sprites only what is outside
             float vx0 = gx0, vy0 = gy0, vz0 = gz0, vix = gix, viy = giy, viz = giz;
@@ -1720,13 +2306,24 @@ namespace VolumetricExplosions
                         else if (floored) { height = q.y - (gY - q.x * gSX - q.z * gSZ); slopeE = -gSX; slopeN = -gSZ; }
                         float w = w10 * AloftFrom(al, height), dX = wX, dZ = wZ;
                         // (high up, with no ground under the patch: the weather's wind at this particle's own height, see ByHeight)
-                        if (hw != null && !floored && lie == null)
+                        // (And in an engine's trail with ground under it, from 300 m over the ground, all of it by 500: the wind
+                        // there as the ground holds it back went no higher than 400 m. The first patch of a rocket's trail
+                        // reaches two or three kilometres up, and all of its smoke above 400 m went with the wind at 400 m,
+                        // the patch above it with the weather's at each height, which was not that: within a minute the
+                        // trail was kinked where the two met, and the kink grew for as long as the trail hung.)
+                        if (hw != null && (!floored && lie == null || height > 300f))
                         {
                             float[] hE = hw.e, hN = hw.n;
                             float at = (q.y + HeightSpan) * (1f / HeightStep);
                             int k = at <= 0f ? 0 : at >= hE.Length - 1 ? hE.Length - 2 : (int)at;
                             float f = at - k; f = f < 0f ? 0f : f > 1f ? 1f : f;
                             float we = hE[k] + (hE[k + 1] - hE[k]) * f, wn = hN[k] + (hN[k + 1] - hN[k]) * f;
+                            if (floored || lie != null)
+                            {
+                                float b = (height - 300f) * 0.005f;
+                                b = b > 1f ? 1f : b * b * (3f - 2f * b);
+                                we = dX * w + (we - dX * w) * b; wn = dZ * w + (wn - dZ * w) * b;
+                            }
                             w = Mathf.Sqrt(we * we + wn * wn);
                             if (w > 1e-3f) { dX = we / w; dZ = wn / w; }
                         }
@@ -1740,6 +2337,7 @@ namespace VolumetricExplosions
 
                         for (int n = 0; n < nThermals; n++)
                         {
+                            if (th[n].led || th[n].stem) { Nuked(ref q, in th[n], ref ux, ref uy, ref uz, ref stir); continue; }
                             // A bubble of hot gas going up: inside it the gas climbs through the middle and comes
                             // back down round the outside (Hill's vortex), which is what rolls a fireball into a mushroom.
                             float dx = q.x - th[n].x, dy = q.y - th[n].y, dz = q.z - th[n].z;
@@ -1808,6 +2406,35 @@ namespace VolumetricExplosions
                             // the ground itself). And within three, what is left of its motion towards the ground dies away to
                             // nothing at the ground: smoke brought down by an eddy, or by the air coming back down round a
                             // rising bubble, is not pressed into the ground but goes on along it with whatever way it has sideways.
+                            // And on the flat as on a slope, cold smoke lying low spreads out from where it lies deepest (see Slumps):
+                            // carried down the slope of its own depth, gravity against the ground's holding it back, and no faster
+                            // than a gravity current's front, about the root of g' times the depth.
+                            if (slump != null && height < SlumpHigh && q.heat < 0.05f && q.rise <= 0.1f)
+                            {
+                                float heavy = q.rise < -0.02f ? 0.08f : 0.03f;              // (g', m/s2: a smoke screen's settling smoke, or cooled smoke)
+                                float deep = SlumpAt(slump, slX0, slZ0, slInv, q.x, q.z);
+                                // (in the heap: no higher over the ground than the smoke lies deep there, give or take its own size)
+                                float inHeap = 1f - (height - 1.5f * deep - q.r) / (q.r + 2f);
+                                if (deep > 0.02f && inHeap > 0f)
+                                {
+                                    if (inHeap > 1f) inHeap = 1f;
+                                    float ge = (SlumpAt(slump, slX0, slZ0, slInv, q.x + slStep, q.z) - SlumpAt(slump, slX0, slZ0, slInv, q.x - slStep, q.z)) * 0.5f / slStep;
+                                    float gn = (SlumpAt(slump, slX0, slZ0, slInv, q.x, q.z + slStep) - SlumpAt(slump, slX0, slZ0, slInv, q.x, q.z - slStep)) * 0.5f / slStep;
+                                    float front = Root(heavy * deep);
+                                    float pe = -20f * heavy * ge, pn = -20f * heavy * gn, most = front * inHeap;
+                                    float fast = Root(pe * pe + pn * pn);
+                                    if (fast > most) { pe *= most / fast; pn *= most / fast; }
+                                    ux += pe; uz += pn;
+                                    // A heap of what was heavy from the first (a smoke screen's, spray: born settling) goes down as it spreads,
+                                    // to a layer a few metres deep, at half the front's speed at most: the heap collapses into a blanket.
+                                    // (Smoke that has only cooled, whose climbing has died away, is as heavy as the air by then, and drifts.)
+                                    if (q.rise < 0f && height > SlumpLayer)
+                                    {
+                                        float over = (height - SlumpLayer) / (deep + 1f);
+                                        uy -= 0.5f * front * inHeap * (over > 1f ? 1f : over);
+                                    }
+                                }
+                            }
                             float along = ux * slopeE + uz * slopeN;
                             if (height < 12f) uy += along * (height <= 0f ? 1f : 1f - height * 0.083333f);
                             float into = uy - along;
@@ -1952,7 +2579,11 @@ namespace VolumetricExplosions
 
                 if (floored)
                 {
-                    float floor = (lie != null ? Height(lie, lieX0, lieZ0, lieInv, q.x, q.z) : gY - q.x * gSX - q.z * gSZ) + q.r * 0.4f;
+                    float floor = lie != null ? Height(lie, lieX0, lieZ0, lieInv, q.x, q.z) : gY - q.x * gSX - q.z * gSZ;
+                    // (as low as a fire burning in a hollow, where the grid has it so: or the flame born at its foot was lifted back up
+                    // to the plane within a tenth of a second, and floated over where it burns, whatever the grid stood its puffs on)
+                    for (int ft = 0; ft < nFeet; ft++) floor = Hollow(floor, q.x - feet[ft].x, q.z - feet[ft].z, feet[ft], feetCell);
+                    floor += q.r * 0.4f;
                     if (q.y < floor && grates > 0 && OverGrate(q.x, q.z))
                     {
                         // Over a launch pad's grate, what goes down goes on down, into the trench under it, out of sight: a
@@ -2018,7 +2649,7 @@ namespace VolumetricExplosions
                 // a rocket's flame grew fatter as the rocket leaned over.)
                 else if ((q.flags & Exhausted) != 0) push = Root(q.kx * q.kx + q.ky * q.ky + q.kz * q.kz);
                 q.r += (0.02f + q.swell) * push * dt;
-                if (q.r > 80f) q.r = 80f;
+                if (q.r > rMost) q.r = rMost;
                 // (Gas that cools fast, an engine's in a vacuum, cools by what a frame's time is worth whatever the frame rate: reckoned
                 // the short way, it was hotter, and its plume twice as long, at thirty frames a second as at sixty.)
                 // (An engine's burning gas in air cools by how far it has come, not by how long it has been out: it is the air it
@@ -2224,6 +2855,125 @@ namespace VolumetricExplosions
 
         /// <summary>Whether this patch goes along with a ship, and with what.</summary>
         public bool Riding => riding;
+
+        /// <summary>
+        /// (Since 2026-10-25.) Whether fire burns in the open in this patch now: a fireball of the last few seconds, a fire on the
+        /// ground, burning wreckage, a burning ship's fire (see TuneFire).
+        /// </summary>
+        public bool Burning => !riding && (fireCount > 0 || fragCount > 0 || time - fireballAt < 4f || time - blazeSeen < 1f);
+        /// <summary>(The last frame this patch's flames were walked whole: see Layers.ForCamera.)</summary>
+        public int FlamesWholeAt = -10;
+
+        /// <summary>
+        /// (Since 2026-10-25.) Where on the camera's picture this patch's flames are now, a rectangle (0 to 1 each way, from its
+        /// bottom left corner) round the fires on the ground up to their flames' height and a fireball of the last few seconds, with
+        /// a margin; false where none burns, or any corner is behind the camera. There the flames are walked whole, by themselves,
+        /// and the walk at half size and the picture leave the rectangle to that walk (see Layers.ForCamera, _VolHole in volume.glsl
+        /// and _VolHoleA in layers.glsl). A flame's tongues are a few pixels wide, and enlarged from half size they were a blur of
+        /// colour, as a ship's flame was before it was drawn whole: the explosions' fire was "a warm orange glow"
+        /// to the owner (2026-10-10), "a glowing volumetric orb" (2026-10-17), and "still the fire doesn't really look like fire"
+        /// (2026-10-25), each time after its pattern had been made more like flame. Only the flames' rectangle: walked whole, the
+        /// patch's whole box (its smoke too) covered the screen from a fire 60 to 220 m off, and would have cost four times as much.
+        /// </summary>
+        public bool FlameRect(Matrix4x4 view, out Vector4 rect)
+        {
+            rect = Vector4.zero;
+#if DEV
+            FlameWhy = "not burning";
+#endif
+            if (!Burning || t == null) return false;
+            Vector3 lo = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue), hi = -lo;
+            for (int n = 0; n < fireCount; n++)
+            {
+                Fire f = fires[n];
+                float wide = 1.3f * f.r;
+                lo = Vector3.Min(lo, new Vector3(f.x - wide, f.y - 0.3f * f.r, f.z - wide));
+                hi = Vector3.Max(hi, new Vector3(f.x + wide, f.y + f.tall + f.r, f.z + wide));
+            }
+            // (Not the burning wreckage thrown out of a blast: it flies a hundred metres and more each way in a second or two, and the
+            // rectangle round it all took in the whole sky, the camera too. Small streaks, they are walked at half size with the smoke.)
+            float since = time - fireballAt;
+            if (since < 4f)
+            {
+                // (it swells to half again its radius and rises at about 1.4 root R a second: see Rise)
+                float r = 1.6f * fireballR, up = 1.4f * Mathf.Sqrt(Mathf.Max(fireballR, 0.1f)) * since;
+                lo = Vector3.Min(lo, new Vector3(fireballC.x - r, fireballC.y - 0.5f * fireballR, fireballC.z - r));
+                hi = Vector3.Max(hi, new Vector3(fireballC.x + r, fireballC.y + up + r, fireballC.z + r));
+            }
+#if DEV
+            FlameWhy = "no fire on the ground or young fireball (fires " + fireCount + ", burning wreckage " + fragCount + ", fireball " + (time - fireballAt).ToString("F1") + " s ago)";
+#endif
+            if (lo.x > hi.x) return false;
+#if DEV
+            FlameWhy = "from " + lo.ToString("F1") + " to " + hi.ToString("F1") + " (the root at " + t.position.ToString("F0") + ")";
+#endif
+            Vector2 a = new Vector2(float.MaxValue, float.MaxValue), b = -a;
+            for (int k = 0; k < 8; k++)
+            {
+                Vector3 corner = new Vector3((k & 1) == 0 ? lo.x : hi.x, (k & 2) == 0 ? lo.y : hi.y, (k & 4) == 0 ? lo.z : hi.z);
+                Vector3 w = t.TransformPoint(corner);
+                Vector4 c = view * new Vector4(w.x, w.y, w.z, 1f);
+                if (c.w <= 0.01f)
+                {
+#if DEV
+                    FlameWhy += ": a corner behind the camera, " + w.ToString("F0");
+#endif
+                    return false;
+                }
+                Vector2 at = new Vector2(c.x / c.w * 0.5f + 0.5f, c.y / c.w * 0.5f + 0.5f);
+                a = Vector2.Min(a, at); b = Vector2.Max(b, at);
+            }
+            // (a margin of a twentieth of its size and two pixels' worth, so that the edge lies in smoke, not in a tongue)
+            Vector2 margin = (b - a) * 0.05f + new Vector2(0.003f, 0.005f);
+            a -= margin; b += margin;
+            a = Vector2.Max(a, Vector2.zero); b = Vector2.Min(b, Vector2.one);
+            if (b.x <= a.x || b.y <= a.y)
+            {
+#if DEV
+                FlameWhy += ": off the picture";
+#endif
+                return false;
+            }
+            rect = new Vector4(a.x, a.y, b.x, b.y);
+#if DEV
+            FlameWhy += ": " + rect.ToString("F2");
+#endif
+            return true;
+        }
+#if DEV
+        internal static string FlameWhy = "";
+#endif
+
+        /// <summary>(Since 2026-10-25.) The patch's walk at the screen's own size, for its flames' own walk (see FlameRect): what the
+        /// walk at half size is given otherwise.</summary>
+        public void Whole(MaterialPropertyBlock b)
+        {
+            b.SetVector(gridNote, wholeGrid);
+            b.SetVector(paramsNote, wholeParams);
+            b.SetVector(peakNote, wholePeak);
+        }
+        Vector4 wholeGrid, wholeParams, wholePeak, halfGrid, halfParams, halfPeak;
+
+        /// <summary>
+        /// (Since 2026-11-04; Layers, as a ship's patch is drawn into the ships' picture.) Its walk set for that picture at the size it is
+        /// drawn at this frame, half or whole. Most frames this changes nothing: TuneVolume sets the same three every frame, in Step,
+        /// from Layers.ShipsHalf as the frame before left it, which is what Layers draws the ships' picture at this frame (shipsHalfNow).
+        /// It is for the frames with no Step: the game paused, or a frame of no length (Air.LateUpdate goes no further then), while the
+        /// camera can still be turned and the ships' picture go to half size or back. Walked at half size into a whole picture, the
+        /// scene's depth was read from the wrong pixels and the smoke cut by it, as if seen through the ground, for as long as the pause
+        /// lasted; walked whole into a half picture, dearer and without the near and far by turns the enlarging leans on. (So it is no
+        /// cure for a flash while the game runs: a flip there was always walked at the right size.) None before its first grid is
+        /// shown. (The sizes as TuneVolume sets them for a ship's patch; halved, which only the walk without Layers reads, is left as it was.)
+        /// </summary>
+        public void WalkShips(bool halfSize)
+        {
+            if (wholeGrid.x < 1f) return;
+            boxMaterial.SetVector(gridNote, halfSize ? halfGrid : wholeGrid);
+            boxMaterial.SetVector(paramsNote, halfSize ? halfParams : wholeParams);
+            boxMaterial.SetVector(peakNote, halfSize ? halfPeak : wholePeak);
+        }
+        static readonly int gridNote = Shader.PropertyToID("_VolGrid"), paramsNote = Shader.PropertyToID("_VolParams"), peakNote = Shader.PropertyToID("_VolPeak");
+        Vector3 fireballC;                       // (where the biggest blast of the last few seconds was, for its flames' rectangle: see FlameRect)
         /// <summary>Whether there is no air here to hold smoke. (A ship's patch then draws none of its engines' young smoke, and their trail is laid straight from the nozzle: young smoke in a vacuum's patch, as it was tried, went by the ship faster than the patch's grid is made, and showed as a string of beads.)</summary>
         public bool Airless => vacuum;
         /// <summary>Whether a ship's patch has held a flame yet (or only its young smoke).</summary>
@@ -2342,6 +3092,9 @@ namespace VolumetricExplosions
         const float FarthestBack = 110f;                          // metres: nor does a round last longer than takes the smoke this far from the rest (the place it "was" must stay within what the grid can tell: see RestFar)
         const float Slowest = 0.8f * Lenient / 19f;               // rounds a second: the least the air is taken to want (little enough for smoke to go over to the slowest round of all)
         Vector3 stepGoing;                                        // (which way the pattern is carried in the frame being worked out: see airGoing)
+        readonly Vector4[] stepFeet = new Vector4[8];             // (and the fires burning lower than a ship's patch's plane, for the mover's ground: see SunkFeet and Hollow)
+        int stepFeetCount;
+        float stepFeetCell;
         int turnsCounted, turnsWrapped = -1;                      // how many of the quickest rounds there have been at this site, and the slowest round that began afresh in this frame (-1: none did)
         const float RestFar = 128f;                               // metres: the farthest smoke can be told to be from where it "was"
         const float Ahead = 0.15f;                                // seconds: the longest a grid is in use before the next is ready
@@ -2374,12 +3127,225 @@ namespace VolumetricExplosions
         float nextSlows, shownSlows;                               // how fast the air is taking that speed away, per second (in the three frames a grid is in use, a fast cloud in thick air loses a fifth of it)
         readonly Action<int> depositBody, composeBody, gatherBody, aroundLayer, aroundSmooth;
         readonly Action sunBody, skyBody, aroundBody;
+        /// <summary>
+        /// (Set as each grid is laid out.) In an engine's smoke, how far towards the sun and the sky the smoke in the way of a cell
+        /// is counted, metres: two of its puffs' widths (nought, as for everything else: all of it in the grid). A rocket's trail
+        /// is laid in patches two or three kilometres long, and each patch's grid knows of no smoke but its own: with the sun high,
+        /// shining down the trail, the top of every patch was lit as if there were none above it, and its foot darkened under
+        /// all the trail in the patch above it. The trail was a row of lengths, pale where each began and grey by its end, and
+        /// the young smoke behind the flame, in a patch of its own that is short, was white against the grey of the trail just
+        /// behind it (its owner, 2026-10-25: "the smoke closer to the rocket is super smooth and then a little out it changes
+        /// entirely"). Light finds its way into a trail from its sides; what lies far along it barely shades it.
+        /// </summary>
+        float shadeFar;
         float dX, dY, dZ, dVolume;                               // cell sizes for the pass in hand
         bool lightFloored;                                        // the ground as the grid in hand takes it: whether there is any (and, until it has been sounded, the tilted plane it is: see Floors and Deposit)
+        int lightWays;                                            // and how the grid in hand meets it, as handed to the library: see GroundWays
         float lightGroundY, lightGroundSX, lightGroundSZ;
         float[][] stands = new float[0][];                        // (room for each thread to work out where each column of a puff lying on the ground stands)
         int[][] rows = new int[0][];
         float grainSize, spacing, leastReach;                     // how fine the grid is and how far apart the particles stand, both taken smoothly (see Lighting), and the smallest ball anything is spread over
+
+        // ---- (since 2026-11-04) grids for a battle: out of sight, out of work; so many a frame at most; the slow fields sent less often
+        // (research/armory/DESIGN.md, "Volumetric Explosions: performance". In a fight of several craft there are a dozen patches
+        // and more at once, most of them behind the camera or a few pixels across far off, and each was given grids as often as if
+        // it filled the screen; on Direct3D each grid is some 3.7 MB handed to the card on the game's own thread.)
+        float lightDueSeen;                       // when the next grid would be due were the patch in sight (lightDue: when it is due as it is)
+        int deferred;                             // how many frames running a grid due was put off for the most a frame (see MayGrid)
+        bool granted;                             // (one of those given a grid this frame, as the frame's first ask found them: see Budget)
+        int relitFrame = -1;                      // (the frame Relight last ran in: one stepped before the frame's first ask is passed over by Budget)
+        float need;                               // (how much it needs one, for the order they are given in: see Budget)
+        /// <summary>(Set by the air just before anything is drawn, see Air.BeforeDrawing and Sight: whether this patch is out of the sight of
+        /// both the flight's cameras, or under a few pixels across; how much of the screen its box covers, 0 to 1; and in which frame.)</summary>
+        internal bool Unseen;
+        internal float Covering;
+        internal int SeenFrame = -10;
+        const float UnseenYoung = 0.25f, UnseenLongest = 1f;      // seconds between grids out of sight: a blast in its first moments, and at most
+        const float TinyPixels = 3f;              // a box fewer pixels across than this, each way, counts as out of sight
+        const int StarveAfter = 3;                // a patch put off so many frames running goes before any other
+        /// <summary>(The air's list of patches, as it was the last time anything was drawn: for the frame's first ask of MayGrid.)</summary>
+        internal static List<Site> Live;
+        static int budgetFrame = -1, budgetLeft;
+        static readonly List<Site> wanting = new List<Site>();
+        static readonly Comparison<Site> byNeed = (a, b) => a.deferred >= StarveAfter || b.deferred >= StarveAfter ? b.deferred.CompareTo(a.deferred)
+                                                          : a.need != b.need ? b.need.CompareTo(a.need) : a.GridRank.CompareTo(b.GridRank);
+
+        /// <summary>Whether what Sight said of this patch holds now: told in the last frame or two, and not while a film is made frame by frame (its grids are as the game's best).</summary>
+        bool OutOfSight => Unseen && SeenFrame >= Time.frameCount - 2 && Time.captureFramerate == 0;
+
+        /// <summary>
+        /// (The air, once a frame, after every patch is put where it is and before anything is drawn.) Whether this patch's box is in
+        /// either camera's sight, and how much of the screen it covers. Its box is taken a third bigger and some metres more (the smoke
+        /// spreads past the box of its last grid, and the next is a frame or two in coming), and the cameras' sides some six degrees
+        /// wider for every metre away (one coming into sight as the camera turns has its grid as it does). A patch with no grid on show
+        /// is in sight: it is drawn as sprites until its first grid comes.
+        /// </summary>
+        internal void Sight(Plane[][] sides, int cameras, Vector3 eye, Camera seer)
+        {
+            SeenFrame = Time.frameCount;
+            if (box == null || !boxRenderer.enabled || cameras == 0) { Unseen = false; Covering = 1f; return; }
+            Matrix4x4 m = box.transform.localToWorldMatrix;
+            bool seen = InSight(sides, cameras, m, eye);
+            // (and how much of the screen it covers, as Layers.Covers finds the sheet's rectangle, by the same rule: all of it with the
+            // camera in the box, and since 2026-11-04 only the part in front of the camera where a corner is behind it, not all of it.
+            // Nothing of it in front, none of the screen, but not too small to be seen: it may be in a moment, as the camera turns.)
+            float covers = 1f, across = float.MaxValue;
+            if (seen && seer != null)
+            {
+                Vector4 r = new Vector4(2f, 2f, -2f, -2f);
+                Layers.Reach reach = Layers.Covers(ref r, seer.projectionMatrix * seer.worldToCameraMatrix, m, seer);
+                if (reach == Layers.Reach.None) covers = 0f;
+                else if (reach == Layers.Reach.Part)
+                {
+                    across = Mathf.Max((r.z - r.x) * 0.5f * seer.pixelWidth, (r.w - r.y) * 0.5f * seer.pixelHeight);
+                    // (each way's overlap no less than nothing: a box past both a side and the top, two overlaps below nothing, covered all)
+                    covers = Mathf.Clamp01(Mathf.Max(0f, Mathf.Min(r.z, 1f) - Mathf.Max(r.x, -1f)) * Mathf.Max(0f, Mathf.Min(r.w, 1f) - Mathf.Max(r.y, -1f)) * 0.25f);
+                    if (r.z < r.x || r.w < r.y) covers = 0f;
+                }
+            }
+            // (Its shadow on the ground is drawn in a box of its own, stretched far from the sun: in sight while the smoke is not, or
+            // is a few pixels across, as with a column behind the camera and the sun behind it too, it must move as smoothly as the smoke would. Its grids come at
+            // the pace of a patch in sight, then; how much of the screen it covers is still the smoke's.)
+            bool shadowSeen = (!seen || across < TinyPixels) && shade != null && shade.activeSelf && InSight(sides, cameras, shade.transform.localToWorldMatrix, eye);
+            if (shadowSeen) { Unseen = false; Covering = 0f; return; }
+            Unseen = !seen || across < TinyPixels;
+            Covering = Unseen ? 0f : covers;
+        }
+
+        /// <summary>(For Sight.) Whether a box, a cube of one a side under this matrix, is in either camera's sight: taken a third bigger
+        /// and some metres more, and the cameras' sides wider the farther away.</summary>
+        static bool InSight(Plane[][] sides, int cameras, Matrix4x4 m, Vector3 eye)
+        {
+            Vector3 c = m.GetColumn(3), ax = m.GetColumn(0), ay = m.GetColumn(1), az = m.GetColumn(2);
+            float slack = 5f + 0.1f * (c - eye).magnitude;
+            for (int k = 0; k < cameras; k++)
+            {
+                bool inside = true;
+                for (int n = 0; n < 4 && inside; n++)
+                {
+                    Vector3 w = sides[k][n].normal;
+                    float reach = 0.5f * 1.33f * (Mathf.Abs(Vector3.Dot(w, ax)) + Mathf.Abs(Vector3.Dot(w, ay)) + Mathf.Abs(Vector3.Dot(w, az)));
+                    if (sides[k][n].GetDistanceToPoint(c) < -(reach + slack)) inside = false;
+                }
+                if (inside) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Whether this patch, its grid due, may begin one this frame: no more are begun in a frame, over all the patches, than the
+        /// setting "gridsaframe" (nought: as many as are due). Which they are is settled at the frame's first ask, from what each
+        /// patch was then (see Budget); one that turns out due though it was not then has what room is left over.
+        /// </summary>
+        bool MayGrid()
+        {
+            int most = Settings.GridsAFrame;
+            if (most <= 0 || Time.captureFramerate != 0 || Live == null) return true;
+            if (budgetFrame != Time.frameCount) Budget(most);
+            if (granted) { granted = false; return true; }
+            if (budgetLeft > 0) { budgetLeft--; return true; }
+            return false;
+        }
+
+        /// <summary>
+        /// (The frame's first ask.) The patches whose grid is due, the most they may be given: those put off a few frames running
+        /// first (never put off for ever), then those with no grid yet, then those covering the most of the screen, then the nearest.
+        /// </summary>
+        static void Budget(int most)
+        {
+            budgetFrame = Time.frameCount;
+            wanting.Clear();
+            for (int k = 0; k < Live.Count; k++)
+            {
+                Site s = Live[k];
+                s.granted = false;
+                // (one already stepped this frame has had its turn: its grid finished since on its worker, it would be given a room
+                // it never asks for, and another put off for nothing)
+                if (s.relitFrame == Time.frameCount || !s.WantsGrid()) continue;
+                s.need = !s.Shown ? 2f : s.SeenFrame >= Time.frameCount - 2 ? s.Covering : 0f;
+                wanting.Add(s);
+            }
+            if (wanting.Count > most) wanting.Sort(byNeed);
+            int given = Math.Min(most, wanting.Count);
+            for (int k = 0; k < given; k++) wanting[k].granted = true;
+            budgetLeft = most - given;
+            wanting.Clear();
+        }
+
+        /// <summary>Whether Relight would begin a grid for this patch now, as it stands (before its step): what of Relight's own tests can be told beforehand.</summary>
+        bool WantsGrid()
+        {
+            if (count == 0 || (lighting != null && !lighting.IsCompleted)) return false;
+            if (mergeInto != null && mergeInto.shows > 0f) return false;
+            if (Time.unscaledTime < (OutOfSight ? lightDue : lightDueSeen)) return false;
+            if (FlameHeld) return false;
+            return !(vented && !turnDecided && time - ventedAt < 0.15f);
+        }
+
+        // (how many bytes a grid hands the card: the volume, its amounts, the smoke about, its flow and the clear air; and the slow
+        // fields, where the smoke "was" by each reckoning and whose turn it is)
+        const long FastBytes = 2L * G3 * 4 + 2L * A3 * 4 + A3, SlowBytes = 5L * A3 * 8 + A3 * 4;
+        float slowTime = -100f;                   // when the particles the slow fields on the card were made from were as they have them
+        bool slowSkipped, slowTurned;
+        Vector3 slowZ, slowY, slowMiddle, slowSize;
+
+        /// <summary>
+        /// Whether this grid's slow fields (where the smoke "was", by each of its reckonings, and whose turn it is: some 1.4 MB of the
+        /// 3.7) go to the card with the rest of it, where Unity sends them (Direct3D). Every other grid, they are left as the grid before
+        /// had them, and the shader turns the billows on from when that was (see _VolThin in TuneVolume): where the smoke goes on much
+        /// as it was, the billows are read where it "was" a grid ago, a few centimetres out. So only where that cannot be seen: not a
+        /// ship's patch (its grid turns with the ship, and its gas streams through), nor a cloud's (its grids are seconds apart), nor a
+        /// blast in its first seconds; the grid before sent them and within a tenth of a second; the box has not turned, nor grown or
+        /// gone by more than a little; the smoke as a whole is not going fast; and the patch is out of sight, or covers under a tenth of
+        /// the screen. Never where the library sends grids (OpenGL): the textures must each be sent through Unity once to be known to it.
+        /// Settings.TestSlowFields 1: every grid, as until 2026-11-04.
+        /// </summary>
+        bool SlowFieldsGo()
+        {
+            var size = new Vector3(nx1 - nx0, ny1 - ny0, nz1 - nz0);
+            var middle = new Vector3((nx0 + nx1) * 0.5f, (ny0 + ny1) * 0.5f, (nz0 + nz1) * 0.5f);
+            bool skip = !Sending.Ready && Settings.TestSlowFields == 0f && !slowSkipped && !riding && !cloudy && time - lastBlast > 2.5f
+                     && shownTime - slowTime < 0.1f && turned == slowTurned && (!turned || (turnZ == slowZ && turnY == slowY))
+                     && SeenFrame >= Time.frameCount - 2 && (Unseen || Covering < 0.1f)
+                     && airGoing.sqrMagnitude < 9f && shownDrift.sqrMagnitude < 1f
+                     && Mathf.Abs(size.x - slowSize.x) < 0.03f * slowSize.x && Mathf.Abs(size.y - slowSize.y) < 0.03f * slowSize.y && Mathf.Abs(size.z - slowSize.z) < 0.03f * slowSize.z
+                     && Mathf.Abs(middle.x - slowMiddle.x) < slowSize.x / A && Mathf.Abs(middle.y - slowMiddle.y) < slowSize.y / A && Mathf.Abs(middle.z - slowMiddle.z) < slowSize.z / A;
+            slowSkipped = skip;
+            if (skip) return false;
+            slowTime = shownTime; slowTurned = turned; slowZ = turnZ; slowY = turnY; slowMiddle = middle; slowSize = size;
+            return true;
+        }
+
+#if DEV
+        // (Development build: grids begun, grids put off for the most a frame, grids put off out of sight, bytes handed to the card;
+        // in all since the last read-out, and the most in one frame. See Budgets, and Air.Stats.)
+        static readonly long[] tally = new long[4], tallyMost = new long[4], tallyNow = new long[4];
+        static int tallyFrame = -1, tallyFrom = -1;
+        static void Tally(int k, long n)
+        {
+            if (tallyFrame != Time.frameCount)
+            {
+                for (int j = 0; j < 4; j++) { if (tallyNow[j] > tallyMost[j]) tallyMost[j] = tallyNow[j]; tallyNow[j] = 0; }
+                tallyFrame = Time.frameCount;
+                if (tallyFrom < 0) tallyFrom = Time.frameCount;
+            }
+            tally[k] += n; tallyNow[k] += n;
+        }
+        /// <summary>(Development build: what the grids have cost a frame since this was last asked, and how many patches are out of sight now.)</summary>
+        public static string Budgets()
+        {
+            Tally(0, 0);
+            float frames = Mathf.Max(1, Time.frameCount - tallyFrom);
+            int unseen = 0, all = 0;
+            if (Live != null) foreach (Site s in Live) if (s.count > 0) { all++; if (s.OutOfSight) unseen++; }
+            string t = "grids a frame (the most " + Settings.GridsAFrame + "): begun " + (tally[0] / frames).ToString("F2") + " (at most " + tallyMost[0] + "), put off for the most " + (tally[1] / frames).ToString("F2")
+                       + " (at most " + tallyMost[1] + "), put off out of sight " + (tally[2] / frames).ToString("F2") + "; " + (tally[3] / frames / 1048576.0).ToString("F2") + " MB a frame to the card (at most "
+                       + (tallyMost[3] / 1048576.0).ToString("F2") + "); " + unseen + " of " + all + " patches out of sight now, over " + frames + " frames";
+            for (int j = 0; j < 4; j++) { tally[j] = 0; tallyMost[j] = 0; }
+            tallyFrom = Time.frameCount;
+            return t;
+        }
+#endif
 
         /// <summary>
         /// The grid is worked out on other threads while the game carries on, and swapped in when it is
@@ -2387,6 +3353,7 @@ namespace VolumetricExplosions
         /// </summary>
         void Relight()
         {
+            relitFrame = Time.frameCount;
             if (lighting != null)
             {
                 // (when a film is being made, frame by frame, each frame waits for its grid: the film then shows what the game would at its best)
@@ -2406,7 +3373,13 @@ namespace VolumetricExplosions
                     shownTime = lightTime; shownFastest = nextFastest; shownDrift = nextDrift; shownSlows = nextSlows;
                     shownGone = lightGone; shownGoneTurned = lightGoneTurned; airGoing = nextGoing;
                     turned = lightTurned; turnX = lightX; turnY = lightY; turnZ = lightZ;
+#if DEV
+                    long slowShow = System.Diagnostics.Stopwatch.GetTimestamp();
                     if (box != null) ShowVolume();
+                    Slow("showing its grid", slowShow);
+#else
+                    if (box != null) ShowVolume();
+#endif
                 }
                 gridReady = nextReady;
             }
@@ -2416,36 +3389,102 @@ namespace VolumetricExplosions
                 if (box != null) boxRenderer.enabled = false;
                 return;
             }
+            // (No new grid for a patch giving way to the one made of it and another, once that one is coming on: it is gone within
+            // a second or so (see Air.Merging), the grid it has doing until then. Put away with a grid still being made, it waited
+            // for the grid: 10 ms of a frame, once in a climb.)
+            if (mergeInto != null && mergeInto.shows > 0f) return;
             // Seen from a distance, twenty-five grids a second are plenty for smoke, and leave the processor to the game.
             // Close to, where it moves fast across the screen, and in the first moments of a blast, it gets one as often as they can be made.
-            if (Time.captureFramerate == 0 && Time.unscaledTime < lightDue) return;
+            // (And out of sight, seldom: but as often as ever again from the frame it is in sight. See Sight.)
+            bool unseen = OutOfSight;
+            if (Time.captureFramerate == 0 && Time.unscaledTime < (unseen ? lightDue : lightDueSeen))
+            {
+#if DEV
+                if (Time.unscaledTime >= lightDueSeen) Tally(2, 1);
+#endif
+                return;
+            }
             float dx = Mathf.Max(0f, Mathf.Max(bx0 - camL.x, camL.x - bx1)), dy = Mathf.Max(0f, Mathf.Max(by0 - camL.y, camL.y - by1)), dz = Mathf.Max(0f, Mathf.Max(bz0 - camL.z, camL.z - bz1));
             float away = Mathf.Sqrt(dx * dx + dy * dy + dz * dz);
             float wait = time - lastBlast < 2.5f && !vented ? 0f : Mathf.Clamp((away - 12f) * 0.0008f, 0f, 0.04f);
             // (The smoke an engine has left behind changes slowly once the engine has gone on: a few grids a second do for
-            // it, the shader carrying it on between them, and several such trails can then hang at once.)
-            if (vented && time - fedAt > 1.5f && time - lastBlast > 2.5f) wait = Mathf.Clamp(0.05f + (time - fedAt) * 0.02f + away * 0.0003f, 0.06f, 0.25f);
+            // it, the shader carrying it on between them, and several such trails can then hang at once. A trail that hangs for
+            // minutes (see Lingers), once it is half a minute old and far off, as few as a cloud's: it is as slow as one by then,
+            // cold and drifting, and from the ground to space it hangs in a dozen patches at once (see Air.Merge). Kerbal X
+            // straight up, two minutes, timed against the trail of a few seconds there was before: with four grids a second for
+            // all of it, the long trail was 2.5 to 4 ms a frame more on the Windows PC; with this, about 1.)
+            float fewest = Settings.TrailLingers > 0f ? Mathf.Clamp(0.25f + away * 0.0004f, 0.25f, 0.8f) : 0.25f;
+            if (vented && time - fedAt > 1.5f && time - lastBlast > 2.5f) wait = Mathf.Clamp(0.05f + (time - fedAt) * 0.02f + away * 0.0003f, 0.06f, fewest);
+            // The nearest patch in sight with fire in the open has a grid as often as one can be made, every frame where the
+            // making takes less than a frame (every second one over a hundred frames a second: see FramePace). Smoke is carried on from one grid to the next by the shader, frame by frame; a fire's flame,
+            // its new gas and its light on the smoke about it are as the grid has them, and change only with each grid. With a
+            // grid at most every 33 ms (below), a game drawing more than thirty frames a second had one every second frame, and
+            // the fire and all it lit changed much in one frame and little in the next, by turns, beside smoke moving every frame
+            // (the owner, 2026-11-04: "That brighter flame has a frame rate of 15 or something, and the smoke has a normal frame
+            // rate"; filmed on a fire of four tonnes at dusk in rain, 2026-11-09: so far by turns, 9.4 and 11.2 where about 1 is
+            // none, and 0.0 to 0.5 with this in the same film). A grid has to be made within a frame for it: the library makes
+            // a big fire's in 10 to 12 ms on its threads, where on one thread it came to take 19 to 30 ms as the fire burnt on
+            // and the flame stepped again (see vfxgrid.c). What it costs is the showing of the grids, nearly three times as many
+            // (0.92 a frame for 0.34 at seventy frames a second): 1.6 ms a frame on the Windows PC while such a fire is near and
+            // in sight. Not the other patches, which keep what follows. (TestGridFloor 1: this patch as the others, as until
+            // then.)
+            bool flame = NearestFlame && !unseen && Settings.TestGridFloor != 1f;
+            if (flame) wait = 0f;
             // ("As often as they can be made" was some thirty a second when each took the best part of a frame or two to make.
             // The library makes one in a fraction of that, and one for every frame would only be more to hand to the graphics card.)
-            if (Settings.Native && nativeWork != IntPtr.Zero && wait < 0.033f) wait = 0.033f;
+            else if (Settings.Native && nativeWork != IntPtr.Zero && wait < 0.033f) wait = 0.033f;
             // (A cloud changes more slowly than any smoke, a few metres a second: three grids a second, fewer from far off, the shader
             // carrying it on between them. Handing a grid to the graphics card is the dearest thing a patch does on the game's own
             // thread: with three heaps of cloud each given twenty-five grids a second, that was 4 ms of every frame.)
             if (cloudy) wait = Mathf.Clamp(0.3f + away * 0.0002f, 0.3f, 0.8f) * (Settings.TestCloudGrids > 0f ? Settings.TestCloudGrids : 1f);
+            // (A nuclear explosion's cloud, once its fireball is out, changes slowly for its size: a grid every sixteenth to
+            // fifth of a second, by how far off it is.)
+            if (nuke != null && time - nukeBegan > Mathf.Max(4f, nuke.tlum)) wait = Mathf.Max(wait, Mathf.Clamp(0.06f + away * 0.00002f, 0.06f, 0.2f));
             // (And with many patches at once, the nearest the camera first: each further one waits the longer between grids, the
             // shader carrying its smoke on meanwhile. Four boosters dropped while still burning are four ships, each with its own
             // patch remaking its grid thirty times a second: the frame went from 25 ms to 48. Not a blast's first moments.)
             awayNow = away;
-            if (GridRank > 0 && !(time - lastBlast < 2.5f && !vented)) wait = Mathf.Max(wait, 0.033f) * (1f + 0.6f * GridRank);
-            lightDue = Time.unscaledTime + wait + Settings.TestGrids;
+            if (GridRank > 0 && !flame && !(time - lastBlast < 2.5f && !vented)) wait = Mathf.Max(wait, 0.033f) * (1f + 0.6f * GridRank);
+            bool everyFrame = false;
+#if DEV
+            if (TestGridEveryFrame && (!TestGridNearOnly || GridRank == 0)) { wait = 0f; everyFrame = true; }
+#endif
+            // (Since 2026-11-04, for a battle: a patch out of every camera's sight, or under a few pixels across, has a grid every half
+            // second to a second, the shader carrying its smoke on meanwhile; a blast in its first moments every quarter. In sight
+            // again, it is due as it would have been: see the top.)
+            float seenWait = wait;
+            if (unseen && !everyFrame) wait = Mathf.Max(wait, time - lastBlast < 2.5f && !vented ? UnseenYoung : Mathf.Clamp(0.5f + away * 0.00025f, 0.5f, UnseenLongest));
+            float due = Time.unscaledTime + wait + Settings.TestGrids, dueSeen = Time.unscaledTime + seenWait + Settings.TestGrids;
             // The grid is made from a copy of the particles as they are at this moment. (Made from the list itself, which
             // goes on being moved about and tidied while the grid is worked out, it now and then missed a particle or
             // counted one twice: unnoticed in the body of a cloud, but at its edge a wisp flickered out for a frame.)
             // (An engine's smoke: which way its grid is to lie is known at the engine's second frame here: see Vents.)
-            if (vented && !turnDecided) { if (time - ventedAt < 0.15f) return; turnDecided = true; }
+            if (vented && !turnDecided && time - ventedAt < 0.15f) { lightDue = due; lightDueSeen = dueSeen; return; }
+            if (!everyFrame && FlameHeld) return;
+            // (and no more grids begun in a frame, over all the patches, than the setting "gridsaframe": the rest next frame, still
+            // due, see MayGrid)
+            if (!everyFrame && !MayGrid())
+            {
+                deferred++;
+#if DEV
+                Tally(1, 1);
+#endif
+                return;
+            }
+            deferred = 0;
+#if DEV
+            Tally(0, 1);
+#endif
+            lightDue = due; lightDueSeen = dueSeen;
+            gridFrame = Time.frameCount;
+            if (vented) turnDecided = true;
             litOnce = true;
             lightTurned = wantTurned; lightX = wantX; lightY = wantY; lightZ = wantZ;
-            if (seen.Length < count) seen = new P[p.Length];
+#if DEV
+            if (seen.Length < count) Addon.Log("a grid's copy made afresh: " + p.Length + " puffs' room (frame " + Time.frameCount + ", " + Role() + ")");
+#endif
+            // (the last grid's work is done with the copy: see above)
+            if (seen.Length < count) { Spares.GiveList(seen); seen = Spares.TakeList<P>(p.Length); }
             Array.Copy(p, seen, count);
             if (vented)
             {
@@ -2463,6 +3502,8 @@ namespace VolumetricExplosions
             lightGone = airGone;
             lightGoneTurned = airGoneTurned;
             lightLand = land;
+            // (and the fires burning on the ground whose flames are here, for the ground under them: see Hollows)
+            lightFeetCount = SunkFeet(lightFeet);
             lightRepeat = detailRepeat;
             Air.Few.MaxDegreeOfParallelism = Settings.Threads > 0 ? Settings.Threads : -1;      // (the setting "threads" holds for the making of a grid as for everything else)
             lighting = Task.Run(lightBody);
@@ -2609,7 +3650,10 @@ namespace VolumetricExplosions
             // the cloud does. (It used to be the faces of the grid's box, which sit on whole cells: a wisp at
             // the edge then lost a part of itself each time the box moved a cell.)
             float typical = (float)(sr / live);
-            float fresh = lightTime - lastBlast, far = fresh < 0.6f ? 6.4f : fresh > 1.2f ? 3.2f : 6.4f - 3.2f * (fresh - 0.6f) / 0.6f;
+            // (for 0.6 s after a blast, or longer for one that threw earth up out of the ground, see Thrown: as only for 0.6 s, a bomb's
+            // jets of earth were cut off at about 18 m, where the bulk of its bits, all low, put the cloud's edge, and its earth
+            // stood as a dark ball on a stalk)
+            float fresh = lightTime - lastBlast, far = fresh < openFor ? 6.4f : fresh > openFor + 0.6f ? 3.2f : 6.4f - 3.2f * (fresh - openFor) / 0.6f;
             Keep(sx, sxx, live, typical, far, ref x0, ref x1);
             Keep(sy, syy, live, typical, far, ref y0, ref y1);
             Keep(sz, szz, live, typical, far, ref z0, ref z1);
@@ -2631,6 +3675,7 @@ namespace VolumetricExplosions
                 // (upward only where it lies on the ground: there is no smoke under that)
                 if (y1 - y0 < least) { if (hasGround && !tilt) y1 = y0 + least; else { float m = (y0 + y1) * 0.5f; y0 = m - 0.5f * least; y1 = m + 0.5f * least; } }
             }
+            shadeFar = vented ? Math.Min(300f, Math.Max(15f, 4f * typical)) : 0f;
             float cx = (x1 - x0) / (G - 6f), cy = (y1 - y0) / (G - 6f), cz = (z1 - z0) / (G - 6f);       // the cells that leave room for the band on both sides
             keepX0 = x0 - 2.5f * cx; keepX1 = x1 + 2.5f * cx; keepY0 = y0 - 2.5f * cy; keepY1 = y1 + 2.5f * cy; keepZ0 = z0 - 2.5f * cz; keepZ1 = z1 + 2.5f * cz;
             fadeX = 1f / (2.5f * cx); fadeY = 1f / (2.5f * cy); fadeZ = 1f / (2.5f * cz);
@@ -2681,6 +3726,7 @@ namespace VolumetricExplosions
 #endif
             lightCount = n;
             lightFloored = hasGround && !tilt; lightGroundY = groundY; lightGroundSX = groundSX; lightGroundSZ = groundSZ;
+            lightWays = lightFloored ? GroundWays() : 0;
             if (lightFloored) Floors();
             // From here on it is all sums, and the library does them where there is one (see Native). What follows
             // after is the same in C#, for everywhere else.
@@ -3002,7 +4048,9 @@ namespace VolumetricExplosions
         /// For the development build: one grid made both ways from the same particles (the C# on one thread, so
         /// that it adds things up in the same order), and how far apart the two come out. They are the same sums,
         /// but the game's runtime carries some of them at higher precision on the way: so, not the same to the
-        /// last bit, but nowhere apart by more than the last place of what is handed to the shader.
+        /// last bit, but nowhere apart by more than the last place of what is handed to the shader. Then, where the
+        /// library made its grid on several threads (2026-11-09), the same grid from it once more on one thread,
+        /// and how many numbers of the two differ: none, if the threads change nothing.
         /// </summary>
         public string NativeCheck()
         {
@@ -3016,6 +4064,9 @@ namespace VolumetricExplosions
             try
             {
                 onlyBy = 1;
+                // (A turned grid turns its copy of the smoke in place, as it makes the grid: so the copy as it was is
+                // put back before the library's turn, or the library is handed the smoke turned twice.)
+                P[] asSeen = (P[])seen.Clone();
                 var clock = System.Diagnostics.Stopwatch.StartNew();
                 Lighting();
                 double managedMs = clock.Elapsed.TotalMilliseconds;
@@ -3030,6 +4081,7 @@ namespace VolumetricExplosions
                 float[] pulls = (float[])strainNext.Clone();
                 float fastest = nextFastest;
                 onlyBy = 0;
+                Array.Copy(asSeen, seen, asSeen.Length);
                 clock.Restart();
                 Lighting();
                 double nativeMs = clock.Elapsed.TotalMilliseconds;
@@ -3089,6 +4141,42 @@ namespace VolumetricExplosions
                 far = 0; most = 0;
                 for (int n = 0; n < A3; n++) { far = Math.Max(far, Math.Abs(pulls[n] - strainNext[n])); most = Math.Max(most, Math.Abs(pulls[n])); }
                 text.Append(", pulled out of shape " + far.ToString("G3") + " a second (up to " + most.ToString("G3") + ")");
+                // (And the library against itself, where it has made that grid on several threads: the same grid once
+                // more on one thread. The threads only share out the same sums, each cell's in the same order, so the
+                // two must be the same to the last bit.)
+                if (Settings.TestGridThreads != 1f)
+                {
+                    Color32[][] colours = { (Color32[])cellsA.Clone(), (Color32[])cellsB.Clone(), (Color32[])cellsC.Clone(), (Color32[])cellsD.Clone(), (Color32[])cellsE.Clone() };
+                    byte[] clears2 = (byte[])cellsClear.Clone();
+                    var rest2 = new ushort[cellsRest.Length][];
+                    for (int n = 0; n < rest2.Length; n++) rest2[n] = (ushort[])cellsRest[n].Clone();
+                    var numbers = new List<float[]> { (float[])sunNext.Clone(), (float[])skyNext.Clone(), (float[])strainNext.Clone() };
+                    for (int n = 0; n < Carried; n++) numbers.Add((float[])carryNext[n].Clone());
+                    float fastest2 = nextFastest, asked = Settings.TestGridThreads;
+                    Settings.TestGridThreads = 1f;
+                    Array.Copy(asSeen, seen, asSeen.Length);
+                    Lighting();
+                    Settings.TestGridThreads = asked;
+                    if (!Settings.Native) return text + "; the library would not make the grid again on one thread";
+                    Color32[][] colours1 = { cellsA, cellsB, cellsC, cellsD, cellsE };
+                    var numbers1 = new List<float[]> { sunNext, skyNext, strainNext };
+                    for (int n = 0; n < Carried; n++) numbers1.Add(carryNext[n]);
+                    long unlike = fastest2 != nextFastest ? 1 : 0;
+                    for (int k = 0; k < colours.Length; k++)
+                        for (int n = 0; n < colours[k].Length; n++)
+                            if (colours[k][n].r != colours1[k][n].r || colours[k][n].g != colours1[k][n].g || colours[k][n].b != colours1[k][n].b || colours[k][n].a != colours1[k][n].a) unlike++;
+                    for (int n = 0; n < clears2.Length; n++) if (clears2[n] != cellsClear[n]) unlike++;
+                    for (int k = 0; k < rest2.Length; k++)
+                        for (int n = 0; n < rest2[k].Length; n++) if (rest2[k][n] != cellsRest[k][n]) unlike++;
+                    for (int k = 0; k < numbers.Count; k++)
+                    {
+                        byte[] bits = new byte[numbers[k].Length * 4], bits1 = new byte[bits.Length];
+                        Buffer.BlockCopy(numbers[k], 0, bits, 0, bits.Length);
+                        Buffer.BlockCopy(numbers1[k], 0, bits1, 0, bits.Length);
+                        for (int n = 0; n < bits.Length; n += 4) if (bits[n] != bits1[n] || bits[n + 1] != bits1[n + 1] || bits[n + 2] != bits1[n + 2] || bits[n + 3] != bits1[n + 3]) unlike++;
+                    }
+                    text.Append("; the library on its threads against on one thread: " + unlike + " numbers differ");
+                }
                 return text.ToString();
             }
             finally
@@ -3128,6 +4216,8 @@ namespace VolumetricExplosions
             heldAt.Clear();
         }
 
+        static float threadsSet;                                  // what the library was last told of Settings.TestGridThreads (it starts at nought, as that does)
+
         /// <summary>The second half of the making of a grid, by the library. False if it would not (which it says why, once): the C# then makes this grid and every one after.</summary>
         bool NativeGrid(int n, long began)
         {
@@ -3137,9 +4227,10 @@ namespace VolumetricExplosions
                 count = n, drawn = box != null ? 1 : 0, sunUp = sunUp ? 1 : 0, halves = Assets.SixteenAsHalves ? 1 : 0,
                 x0 = nx0, y0 = ny0, z0 = nz0, dX = dX, dY = dY, dZ = dZ,
                 keepX0 = keepX0, keepX1 = keepX1, keepY0 = keepY0, keepY1 = keepY1, keepZ0 = keepZ0, keepZ1 = keepZ1, fadeX = fadeX, fadeY = fadeY, fadeZ = fadeZ,
-                leastReach = leastReach, floored = lightFloored ? 1 : 0, floors = heldAt[floors], thick = Settings.Thick, hold = grip < 0.55f ? 0.55f : grip, goesX = nextDrift.x, goesY = nextDrift.y, goesZ = nextDrift.z, ahead = Ahead,
+                leastReach = leastReach, floored = lightWays, floors = heldAt[floors], thick = Settings.Thick, hold = grip < 0.55f ? 0.55f : grip, goesX = nextDrift.x, goesY = nextDrift.y, goesZ = nextDrift.z, ahead = Ahead,
                 sunX = gridSun.x, sunY = gridSun.y, sunZ = gridSun.z, repeat = lightRepeat, skyX = gridUp.x, skyY = gridUp.y, skyZ = gridUp.z,
                 thickest = Thickest, thickestFlame = ThickestFlame, something = Something, restFar = RestFar, mostBefore = MostBefore, mostAbove = MostAbove,
+                shadeSun = shadeFar, shadeSky = shadeFar,
                 sunThrough = heldAt[sunNext], skyThrough = heldAt[skyNext], carry = heldAt[carryAt],
                 cellsA = heldAt[cellsA], cellsB = heldAt[cellsB], cellsC = heldAt[cellsC], cellsD = heldAt[cellsD], cellsRest = heldAt[restAt], cellsClear = heldAt[cellsClear], cellsE = heldAt[cellsE], strain = heldAt[strainNext], bells = heldAt[BellList],
             };
@@ -3149,6 +4240,7 @@ namespace VolumetricExplosions
             try
             {
                 g.particles = particles.AddrOfPinnedObject();
+                if (Settings.TestGridThreads != threadsSet) Native.Threads((int)(threadsSet = Settings.TestGridThreads));
                 refused = Native.Make(nativeWork, ref g);
             }
             finally { particles.Free(); }
@@ -3164,7 +4256,7 @@ namespace VolumetricExplosions
             lightTook = System.Diagnostics.Stopwatch.GetTimestamp() - began;
             // (for the development build: what each part of that took)
             double ticks = System.Diagnostics.Stopwatch.Frequency * 1e-9;
-            long together = g.ns2 + g.ns3 + g.ns4 + g.ns5, rest = (long)((g.ns1 + together + g.ns7) * ticks);
+            long together = g.ns2 + g.ns3 + g.ns4 + g.ns5, rest = (long)((g.ns1 + together + g.ns7 - g.ns6) * ticks);
             Air.Stage[0] = lightTook - rest; Air.Stage[1] = (long)(g.ns1 * ticks); Air.Stage[2] = (long)(g.ns2 * ticks); Air.Stage[3] = (long)(g.ns3 * ticks); Air.Stage[4] = (long)(g.ns4 * ticks);
             Air.Stage[5] = (long)(g.ns5 * ticks); Air.Stage[6] = (long)(together * ticks); Air.Stage[7] = (long)(g.ns7 * ticks);
             return true;
@@ -3211,6 +4303,30 @@ namespace VolumetricExplosions
         // each of the coarser ones), so that what comes out is as wide as the particle and no wider, whatever the cells.
         static readonly float[] Narrowing = { 1.5f, 1.5f * 5f, 1.5f * 21f, 1.5f * 85f };
 
+        // How the grid in hand meets the ground, as one number, which is how the library is told it (Native.Grid.floored: a
+        // library from before 2026-11-04 takes anything but nought as "there is ground", and does as it always did). The
+        // lowest two bits are how a puff lying on the ground is laid on it (see Deposit): 1 as until 2026-11-04, a dome
+        // touching the ground at a point; 2 half sunk into it; 3 flat-bottomed. Then 4: the ground is not counted as an edge
+        // of the smoke round about (see AroundLayer); 8: the shader does not carry the foot of the smoke up off the ground
+        // between one grid and the next (see Carry). Nought: no ground at all.
+        const int ContactWay = 3, ContactAsBefore = 1, ContactSunk = 2, ContactFlat = 3, BaseBillows = 4, FootCarry = 8;
+        // A puff laid half sunk stands with its middle this far up, as a share of its height (at 0.45, the smoke at the ground
+        // is 0.64 of what it is at the puff's middle). One laid flat-bottomed has its lower half drawn out so many times over
+        // (0.25: four times as far down, into the ground, which leaves 0.88 of the middle's smoke at the ground). Both only once it
+        // lies half sunk or lower: one that only just touches the ground is laid as it was, and goes over to them the lower it
+        // lies, as it goes over to following the shape of the ground under it (see follows, in Deposit), so that a puff rising
+        // off the ground or coming down onto it does not jump.
+        const float Sunk = 0.45f, Squash = 0.25f;
+
+        /// <summary>How the grid about to be made meets the ground, by the settings (on the game's thread, so that the grid is made one way throughout, both here and by the library).</summary>
+        static int GroundWays()
+        {
+            int ways = Settings.TestContact == 1f ? ContactAsBefore : Settings.TestContact == 2f ? ContactFlat : ContactSunk;
+            if (Settings.TestBaseBillows != 1f) ways |= BaseBillows;
+            if (Settings.TestFootCarry != 1f) ways |= FootCarry;
+            return ways;
+        }
+
         /// <summary>
         /// Put a share of the particles into the grid, each spread over a ball of its own size. A ball many
         /// cells wide is put on a coarser grid instead, where it is only a few cells wide: far less work, and
@@ -3225,6 +4341,7 @@ namespace VolumetricExplosions
             float x0 = nx0, y0 = ny0, z0 = nz0, hx = dX, hy = dY, hz = dZ, least = leastReach;
             float widest = Math.Max(hx, Math.Max(hy, hz)), ihx = 1f / hx, ihz = 1f / hz;
             bool drawn = box != null, floored = lightFloored;
+            int contactWay = lightWays & ContactWay;
             float[] lieOf = floors, stand = stands[part];
             int[] rowsOf = rows[part];
             float[][][] mine = apart[part];
@@ -3300,9 +4417,30 @@ namespace VolumetricExplosions
                 // what burns, its densest part at the ground. Lifted clear instead, as until 2026-10-10, a puff stood at least a cell
                 // of the grid off the ground: in a grid made for a tall column of smoke, whose cells are a metre or two high, the
                 // fire on the ground and the smoke and dust coming off it floated above it. TestFoot 1, with the library off: so.)
+                //
+                // But so laid, smoke lying on the ground was a dome that touched it at a point, its smoke thinning to nothing at the
+                // ground: from a little way off the foot of a cloud seemed to hover a tenth to a third of a puff's height over the
+                // ground, with a soft ramp under it (TestContact 1: so). Since 2026-11-04 a puff lying on the ground is laid with
+                // smoke at the ground itself. Half sunk into it, as a rule: its middle a little under halfway up its height, and
+                // what would be under the ground left out and counted back into the rest, so that none of its smoke is lost (the
+                // part under the ground used to be simply lost, nearly half of it, which is what made smoke look sunk in then).
+                // Or (TestContact 2) flat-bottomed: standing where it stood, but its lower half drawn out into the ground, which
+                // leaves it nearly as thick at the ground as in its middle. Either way the cells the shader reads between at the
+                // ground are filled, one cell under it as well as over it: left empty, the reading between cells faded the last
+                // half cell above the ground. A flame keeps its own foot as it was.
+                bool contact = false;
                 if (resting && Settings.TestFoot >= 1f) { if (py - ry < ground) py = ground + ry; }
                 else if (resting && flame > 1e-4f) py = ground + 0.35f * ry;
+                else if (resting && contactWay >= ContactSunk)
+                {
+                    contact = true;
+                    if (contactWay == ContactSunk) py = ground + tall * (1f - follows * (1f - Sunk));
+                    else if (py - ry < ground) py = ground + (tall > 0.5f * ry ? tall : 0.5f * ry);
+                }
                 else if (resting && py - ry < ground) py = ground + (tall > 0.5f * ry ? tall : 0.5f * ry);
+                // (how much its lower half is drawn out, so how far down it reaches; and how far under the ground of each column
+                // the lowest cell it is put in may be: as good as without end, where nothing is left out)
+                float squash = contact && contactWay == ContactFlat ? 1f - follows * (1f - Squash) : 1f, down = ry / squash, cut = contact ? ly : 1e30f;
                 int side = G >> level;
                 float ix = 1f / lx, iy = 1f / ly, iz = 1f / lz;
                 int i0 = (int)((px - rx - x0) * ix), i1 = (int)((px + rx - x0) * ix), j0 = (int)((py - ry - y0) * iy), j1 = (int)((py + ry - y0) * iy), k0 = (int)((pz - rz - z0) * iz), k1 = (int)((pz + rz - z0) * iz);
@@ -3319,16 +4457,20 @@ namespace VolumetricExplosions
                     for (int k = k0; k <= k1; k++)
                     {
                         int lieRow = lieAt + k * side, standRow = k * side;
-                        float lowest = 0f, highest = 0f;
+                        float lowest = 0f, highest = 0f, lowFloor = float.MaxValue;
                         for (int c = i0; c <= i1; c++)
                         {
-                            float shift = lieOf[lieRow + c] - ground;
+                            float lie = lieOf[lieRow + c], shift = lie - ground;
+                            if (lie < lowFloor) lowFloor = lie;
                             if (shift > wide) shift = wide; else if (shift < -wide) shift = -wide;
                             shift *= follows;
                             if (shift < lowest) lowest = shift; else if (shift > highest) highest = shift;
                             stand[standRow + c] = py + shift;
                         }
-                        int ja = (int)((py + lowest - ry - y0) * iy), jb = (int)((py + highest + ry - y0) * iy);
+                        // (and none of it more than a cell under the ground of the lowest of these columns)
+                        float reachTo = py + lowest - down, cutAt = lowFloor - cut;
+                        if (reachTo < cutAt) reachTo = cutAt;
+                        int ja = (int)((reachTo - y0) * iy), jb = (int)((py + highest + ry - y0) * iy);
                         if (ja < 0) ja = 0; if (jb > side - 1) jb = side - 1;
                         rowsOf[2 * k] = ja; rowsOf[2 * k + 1] = jb;
                     }
@@ -3337,7 +4479,22 @@ namespace VolumetricExplosions
                 if (rx >= 3.2f * lx && ry >= 3.2f * ly && rz >= 3.2f * lz)
                 {
                     // Over this many cells the weights add up to what the smooth shape holds: no need to count them.
-                    total = 0.95744f * rx * ry * rz * ix * iy * iz;
+                    if (!contact) total = 0.95744f * rx * ry * rz * ix * iy * iz;
+                    else
+                    {
+                        // Laid with smoke at the ground, what it holds above the lowest of the cells it is put in: its upper half
+                        // whole, and its lower half (drawn out to reach 'down') as far down as those cells go, which is on the whole
+                        // a cell under the ground (the lowest cell's middle is anywhere from nought to a cell under it, its foot
+                        // half a cell lower). Its weights over a slice across it at a height t of its reach come to pi/3 (1 - t^2)^3
+                        // of its width across: over its upper half 0.47872 (half of 0.95744), over its lower half down to 'low'
+                        // under its middle pi/3 (low - low^3/down^2 + 0.6 low^5/down^4 - low^7/(7 down^6)). Set against the weights
+                        // counted cell by cell, either way of laying it, it is within a hundredth on the whole (a cell less, taking
+                        // the lowest cell's middle for its foot, it was 2 to 6 hundredths too little).
+                        float low = py - ground + ly;
+                        if (low > down) low = down;
+                        float u2 = low * low / (down * down);
+                        total = rx * rz * ix * iy * iz * (0.47872f * ry + 1.0471976f * low * (1f - u2 * (1f - u2 * (0.6f - u2 * 0.14285714f))));
+                    }
                 }
                 else if (!resting)
                 {
@@ -3366,13 +4523,16 @@ namespace VolumetricExplosions
                     {
                         float dz = z0 + (k + 0.5f) * lz - pz, wz = 1f - dz * dz * qz;
                         if (wz <= 0f) continue;
-                        int standRow = k * side, jb = rowsOf[2 * k + 1];
+                        int standRow = k * side, lieRow = FloorsAt[level] + k * side, jb = rowsOf[2 * k + 1];
                         for (int j = rowsOf[2 * k]; j <= jb; j++)
                         {
                             float y = y0 + (j + 0.5f) * ly;
                             for (int c = i0; c <= i1; c++)
                             {
-                                float dy = y - stand[standRow + c], dx = x0 + (c + 0.5f) * lx - px, w = wz - dy * dy * qy - dx * dx * qx;
+                                if (y < lieOf[lieRow + c] - cut) continue;
+                                float dy = y - stand[standRow + c];
+                                if (dy < 0f) dy *= squash;
+                                float dx = x0 + (c + 0.5f) * lx - px, w = wz - dy * dy * qy - dx * dx * qx;
                                 if (w > 0f) total += w * w;
                             }
                         }
@@ -3416,14 +4576,17 @@ namespace VolumetricExplosions
                 {
                     float dz = z0 + (k + 0.5f) * lz - pz, wz = 1f - dz * dz * qz;
                     if (wz <= 0f) continue;
-                    int standRow = k * side, jb = rowsOf[2 * k + 1];
+                    int standRow = k * side, lieRow = FloorsAt[level] + k * side, jb = rowsOf[2 * k + 1];
                     for (int j = rowsOf[2 * k]; j <= jb; j++)
                     {
                         float y = y0 + (j + 0.5f) * ly;
                         int row = (j + k * side) * side;
                         for (int c = i0; c <= i1; c++)
                         {
-                            float dy = y - stand[standRow + c], dx = x0 + (c + 0.5f) * lx - px, w = wz - dy * dy * qy - dx * dx * qx;
+                            if (y < lieOf[lieRow + c] - cut) continue;
+                            float dy = y - stand[standRow + c];
+                            if (dy < 0f) dy *= squash;
+                            float dx = x0 + (c + 0.5f) * lx - px, w = wz - dy * dy * qy - dx * dx * qx;
                             if (w <= 0f) continue;
                             w *= w;
                             int cellAt = row + c;
@@ -3658,6 +4821,33 @@ namespace VolumetricExplosions
                             for (int f = 1; f < Carried; f++) c[f][cell] = sums[f] * share;
                             known[cell] = mark;
                         }
+            }
+            // At the foot of the smoke, it is carried up no faster than leaves it on the ground (since 2026-11-04; TestFootCarry 1:
+            // as until then). The shader carries the smoke on between one grid and the next by reading the grid as far back
+            // along the way it is going as it has gone since: where it is rising, at its foot that is under the ground, where
+            // there is nothing, so its foot was lifted off the ground a little more each frame and dropped back at each new grid.
+            // Within a cell and a half of the ground the way up is taken off it in step with how near the ground it is. The way
+            // up that counts is over the ground, not in the box: the speeds here are less what the box goes along with (goesY),
+            // and the ground is still while the box goes, so it is the two together that are cut down, and then the box's own
+            // taken off again (the same as before while the box stays put, as it does unless the cloud goes over 8 m/s). A cell
+            // with no smoke near enough to fill it is left at nought, going with the box, as it always was.
+            if ((lightWays & FootCarry) != 0)
+            {
+                float[] lieOf = floors;
+                float band = 1.5f * hy, perBand = 1f / band;
+                for (int k = 0; k < A; k++)
+                    for (int i = 0; i < A; i++)
+                    {
+                        float floorY = lieOf[FloorsAt[1] + i + k * A];
+                        for (int j = 0; j < A; j++)
+                        {
+                            float over = y0 + (j + 0.5f) * hy - floorY;
+                            if (over >= band) break;
+                            int cell = i + (j + k * A) * A;
+                            float up = vy[cell] + goesY;
+                            if (up > 0f && known[cell] != 0) vy[cell] = up * (over > 0f ? over * perBand : 0f) - goesY;
+                        }
+                    }
             }
             float fastest = 2f;
             for (int cell = 0; cell < A3; cell++)
@@ -3970,27 +5160,72 @@ namespace VolumetricExplosions
             return k;
         }
 
-        /// <summary>One layer of the coarser grid: each of its cells from the eight cells of the fine grid inside it.</summary>
+        /// <summary>
+        /// One layer of the coarser grid: each of its cells from the eight cells of the fine grid inside it.
+        ///
+        /// Where there is ground, it is not taken as an edge of the smoke (since 2026-11-04; TestBaseBillows 1: as until then).
+        /// The billows are cut into the smoke by setting what is at a place against how much there is round about, and the
+        /// cells under the ground, empty, counted in that as any others: so at the foot of a cloud the smoke round about read
+        /// as little as half what it was, and the billows ate into the foot as into an edge, the lumps of it coming apart
+        /// along the bottom. So a cell the ground cuts through is taken from its cells over the ground only, as though all
+        /// eight were like them; and the cells of each column under the ground are filled as a mirror of those over it, the
+        /// ground the mirror, before all of it is smoothed. (No ray goes under the ground to see what is there.)
+        /// </summary>
         void AroundLayer(int k)
         {
             float[] smokeIn = thick, paleIn = pale, dustIn = dusty, flameIn = flaming, most = anything, smokes = roundSmoke, pales = roundPale, dusts = roundDust;
             const float flameCounts = Thickest / ThickestFlame;
+            bool grounded = (lightWays & BaseBillows) != 0;
+            float[] lieOf = floors;
+            float y0 = ny0, hy = dY;
             for (int j = 0; j < A; j++)
             {
                 int row = (j + k * A) * A, under = (2 * j + 2 * k * G) * G;
+                float yLow = y0 + (2 * j + 0.5f) * hy, yHigh = y0 + (2 * j + 1.5f) * hy;       // (the middles of the lower and the upper fine cells)
                 for (int i = 0; i < A; i++)
                 {
-                    int at = under + 2 * i;
+                    int at = under + 2 * i, lieAt = 2 * i + 2 * k * G;
                     float top = 0f, smoke = 0f, light = 0f, dust = 0f;
+                    int over = 0;
                     for (int c = 0; c < 8; c++)
                     {
                         int cell = at + (c & 1) + ((c >> 1) & 1) * G + (c >> 2) * G2;
                         float v = smokeIn[cell] + flameCounts * flameIn[cell];
                         if (v > top) top = v;
+                        if (grounded && ((c & 2) != 0 ? yHigh : yLow) < lieOf[lieAt + (c & 1) + (c >> 2) * G]) continue;
                         smoke += smokeIn[cell]; light += paleIn[cell]; dust += dustIn[cell];
+                        over++;
                     }
+                    if (grounded && over > 0 && over < 8) { float more = 8f / over; smoke *= more; light *= more; dust *= more; }
                     most[row + i] = top;
                     smokes[row + i] = smoke; pales[row + i] = light; dusts[row + i] = dust;
+                }
+            }
+            if (!grounded) return;
+            float iy = 1f / (2f * hy);
+            for (int i = 0; i < A; i++)
+            {
+                // (where the ground under this column is, in cells of this grid counted from the middle of the lowest; the cells under it are those below that)
+                float floorAt = (lieOf[FloorsAt[1] + i + k * A] - y0) * iy - 0.5f;
+                if (!(floorAt > 0f) || floorAt >= A - 1) continue;          // (none under it, or nothing over it to take from)
+                int last = (int)floorAt;
+                if (last == floorAt) last--;
+                // (from the top down, so that each cell is taken from cells over the ground. The highest one under it is never
+                // taken from itself: its mirror can fall between it and the cell above, and what it holds is only what its fine
+                // cells over the ground gave it, which is nothing when the ground is over both of their middles; read there it
+                // came out as little as half the cell above, the foot thinned again by the very thing meant to fill it. So
+                // nothing is taken from lower than the cell over it.)
+                for (int j = last; j >= 0; j--)
+                {
+                    float from = 2f * floorAt - j;
+                    if (from < last + 1) from = last + 1;
+                    int f0 = (int)from;
+                    float t = from - f0;
+                    if (f0 >= A - 1) { f0 = A - 1; t = 0f; }
+                    int at = (j + k * A) * A + i, s0 = (f0 + k * A) * A + i, s1 = f0 < A - 1 ? s0 + A : s0;
+                    smokes[at] = smokes[s0] + (smokes[s1] - smokes[s0]) * t;
+                    pales[at] = pales[s0] + (pales[s1] - pales[s0]) * t;
+                    dusts[at] = dusts[s0] + (dusts[s1] - dusts[s0]) * t;
                 }
             }
         }
@@ -4117,7 +5352,7 @@ namespace VolumetricExplosions
         /// how much light gets through it, because this is as smooth as the smoke and can be read between
         /// the cells without error; the light itself falls off far too sharply at the lit face of thick smoke.
         /// </summary>
-        void Follow(Vector3 toLight, float[] through, float soften, float[] before, float[] after)
+        void Follow(Vector3 toLight, float[] through, float soften, float[] before, float[] after, float far)
         {
             float cellX = dX, cellY = dY, cellZ = dZ;
             float[] smokeIn = thick;
@@ -4131,6 +5366,9 @@ namespace VolumetricExplosions
             int toward = la > 0f ? 1 : -1;
             float du = lu / steep * ca / cu, dv = lv / steep * ca / cv;       // where, one layer nearer the light, the ray to this cell came through
             float path = ca / steep * soften;
+            // (and of what lay before, so much is kept from one layer to the next as leaves only what is within "far" metres
+            // of the cell towards the light: see shadeFar)
+            float keep = far > 0f ? (float)Math.Exp((double)(-ca / steep / far)) : 1f;
             // That place is the same number of cells away for every cell, so the four cells it lies between, and the share of each, are worked out once.
             int ou = (int)Math.Floor(du), ov = (int)Math.Floor(dv);
             float wu = du - ou, wv = dv - ov;
@@ -4149,7 +5387,7 @@ namespace VolumetricExplosions
                         if (inside && i >= iLow && i <= iHigh)
                         {
                             int b = row + i + shift;
-                            arriving = before[b] * w00 + before[b + 1] * w10 + before[b + G] * w01 + before[b + G + 1] * w11;
+                            arriving = (before[b] * w00 + before[b + 1] * w10 + before[b + G] * w01 + before[b + G + 1] * w11) * keep;
                         }
                         int at = cells + i * su;
                         float x = smokeIn[at] * path;

@@ -17,6 +17,7 @@ namespace VolumetricExplosions
         public float dry, size;                 // tonnes without contents; rough radius in metres
         public double fuel, oxidizer, solid, mono, gas, ore, vapour;   // kilograms
         public double charge;                   // units of electric charge
+        public double explosive;                // (since 0.10.0) kilograms of TNT a warhead or a shell set off (BD Armory's: see Warheads)
         public bool hydrogen, running, crewed, splashed;
         public float thrust;
         public Cause cause;
@@ -125,6 +126,18 @@ namespace VolumetricExplosions
             catch (Exception ex) { Addon.Log("could not note a part's end: " + ex.Message); }
         }
 
+        /// <summary>(Since 0.10.0.) What another mod set off here this frame, taken down as if a part had died there (see Warheads).</summary>
+        internal static void Set(Death d) => Add(d);
+
+        /// <summary>(Since 0.10.0.) Whether a part that died this frame, not yet taken by an explosion, was within so many metres of here.</summary>
+        internal static bool Near(Vector3d world, double within)
+        {
+            int now = Time.frameCount;
+            foreach (Death d in deaths)
+                if (!d.taken && now - d.frame <= 1 && d.explosive <= 0 && (d.world - world).sqrMagnitude < within * within) return true;
+            return false;
+        }
+
         static void Add(Death d)
         {
             int now = Time.frameCount;
@@ -188,7 +201,7 @@ namespace VolumetricExplosions
         /// <summary>
         /// For trying looks out without flying a crash: a made-up part that "dies" this frame, described as
         /// words such as "fuel=1800 oxidizer=2200 cause=crash speed=60 east=40". Speeds are metres a second
-        /// along east, north and up.
+        /// along east, north and up; tnt is kilograms of high explosive set off with it (a warhead's, as BD Armory's).
         /// </summary>
         public static void Fake(string words, Vector3d world)
         {
@@ -214,6 +227,7 @@ namespace VolumetricExplosions
                     case "ore": d.ore = value; break;
                     case "vapour": d.vapour = value; break;
                     case "charge": d.charge = value; break;
+                    case "tnt": d.explosive = value; break;
                     case "hydrogen": d.hydrogen = value != 0; break;
                     case "dry": d.dry = (float)value; break;
                     case "size": d.size = (float)value; break;

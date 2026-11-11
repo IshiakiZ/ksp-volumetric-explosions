@@ -379,6 +379,89 @@ namespace VolumetricExplosions
         static readonly int[] FloorsAt = { 0, G2, G2 + G2 / 4, G2 + G2 / 4 + G2 / 16 };       // where each coarser grid's begin in the list
         readonly float[] floors = new float[G2 + G2 / 4 + G2 / 16 + G2 / 64];
         Land lightLand;
+        // (the fires burning on the ground whose flames a ship's patch holds, as the grid in hand takes them: where each burns, and
+        // how wide it is; see Hollows. Copied for each grid on the game's thread, as the ground is: see Relight)
+        readonly Vector4[] lightFeet = new Vector4[8];
+        int lightFeetCount;
+
+        /// <summary>
+        /// A ship's patch has the ground as one plane, found under the ship (see Under): it is not sounded all about as a patch that
+        /// stays where it is (see Survey), for it goes along with the ship. But the flames of a fire burning on the ground, as
+        /// Fragmentation's burning stains are (Exhaust.kind Burning, told as on its own marks), stand on the ground where they burn,
+        /// which is lower than the plane in a hollow or a crater, or down a slope from the middle of the wreck; and a flame whose foot
+        /// is under the ground is stood on it (see Deposit), so that the fire floated by as much over where it burns, while its
+        /// smoke, in a patch that stays where it is, came off the ground as sounded: the owner's "the fire looks slightly above where
+        /// its smoke comes from". So where such a fire burns lower than the plane, the ground under the grid is taken to be as low
+        /// as the fire, over its width and a cell more, rising again to the plane over twice that. Only ever lower: where it burns
+        /// higher than the plane, its flames are not laid lower than before. (Until 2026-11-03 not at all; TestFlameFloor 1: so.)
+        /// (Not the sounding of the ground for such a patch: a sounding is laid out in the patch's own axes, which go along with the
+        /// ship, and so would be wrong as soon as the ship moved. Nor in Deposit itself, which has its twin in the library: the
+        /// ground under the grid is what both of them are given.)
+        /// </summary>
+        void Hollows(float[] f)
+        {
+            float cell = Mathf.Max(dX, dZ);
+            for (int n = 0; n < lightFeetCount; n++)
+            {
+                Vector4 foot = lightFeet[n];
+                float plane = lightGroundY - foot.x * lightGroundSX - foot.z * lightGroundSZ;
+                if (!(plane - foot.y > 0.05f)) continue;
+                float outer = HollowReach(foot.w, cell);
+                int i0 = Mathf.Max(0, (int)((foot.x - outer - nx0) / dX)), i1 = Mathf.Min(G - 1, (int)((foot.x + outer - nx0) / dX));
+                int k0 = Mathf.Max(0, (int)((foot.z - outer - nz0) / dZ)), k1 = Mathf.Min(G - 1, (int)((foot.z + outer - nz0) / dZ));
+                for (int k = k0; k <= k1; k++)
+                {
+                    float dz = nz0 + (k + 0.5f) * dZ - foot.z;
+                    for (int i = i0; i <= i1; i++)
+                    {
+                        int at = i + k * G;
+                        f[at] = Hollow(f[at], nx0 + (i + 0.5f) * dX - foot.x, dz, foot, cell);
+                    }
+                }
+            }
+        }
+
+        /// <summary>How far from a fire's foot the hollow under it reaches (see Hollow): over its width and a cell more, and twice that again.</summary>
+        static float HollowReach(float wide, float cell) => 1.2f * wide + cell + 2f * (wide > cell ? wide : cell);
+
+        /// <summary>
+        /// The ground a little way (dx, dz) from the foot of a fire burning lower than a ship's patch's plane (x y z where it burns,
+        /// w how wide it is), given the ground there as it would be without it: as low as the fire over its width and a cell more,
+        /// rising again to what it was over twice that. Only ever lower. (One shape for the ground the grid stands its puffs on, see
+        /// Hollows, and for the ground the particles themselves are held out of, see RunChunk: until 2026-11-04 only the grid had
+        /// the hollow, and the mover lifted every flame bit born in it back up to the plane within a tenth of a second or so, at
+        /// 0.3 m a step, so that the flame still floated over the hollow it burnt in. Kept to one place so that the two cannot drift
+        /// apart. A cell of the grid as either has it; the mover's is the grid on show, a rung or so from the one being made.)
+        /// </summary>
+        static float Hollow(float floor, float dx, float dz, Vector4 foot, float cell)
+        {
+            float inner = 1.2f * foot.w + cell, outer = HollowReach(foot.w, cell), d2 = dx * dx + dz * dz;
+            if (d2 >= outer * outer) return floor;
+            float d = Mathf.Sqrt(d2), t = d <= inner ? 0f : (d - inner) / (outer - inner);
+            t = t * t * (3f - 2f * t);
+            float lie = foot.y + (floor - foot.y) * t;
+            return lie < floor ? lie : floor;
+        }
+
+        /// <summary>
+        /// (On the game's thread.) The fires burning on the ground whose flames are in this ship's patch and whose feet are lower
+        /// than the plane it takes the ground to be, as many as 'into' holds: where each burns and how wide it is, for Hollow.
+        /// None at all for a patch that stays where it is, whose ground is sounded, nor with TestFlameFloor 1. (A fire's foot no
+        /// lower than the plane leaves nothing to do, and is left out here, so that almost every patch has none to look at.)
+        /// </summary>
+        int SunkFeet(Vector4[] into)
+        {
+            int got = 0;
+            if (!riding || !hasGround || Settings.TestFlameFloor == 1f) return 0;
+            for (int n = 0; n < ventCount && got < into.Length; n++)
+            {
+                if (!(vents[n].foot > 0f)) continue;
+                Vector3 at = vents[n].last;
+                if (!(groundY - at.x * groundSX - at.z * groundSZ - at.y > 0.05f)) continue;
+                into[got++] = new Vector4(at.x, at.y, at.z, vents[n].foot);
+            }
+            return got;
+        }
 
         /// <summary>The height of the ground under the middle of each column of the grid in hand, and of each column of the coarser grids the widest puffs are put on.</summary>
         void Floors()
@@ -402,6 +485,7 @@ namespace VolumetricExplosions
                     float z = nz0 + (k + 0.5f) * dZ;
                     for (int i = 0; i < G; i++) f[i + k * G] = lightGroundY - (nx0 + (i + 0.5f) * dX) * lightGroundSX - z * lightGroundSZ;
                 }
+                if (Settings.TestFlameFloor != 1f) Hollows(f);
             }
             for (int level = 1; level < Levels; level++)
             {

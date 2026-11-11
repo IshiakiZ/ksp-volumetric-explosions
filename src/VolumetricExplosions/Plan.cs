@@ -40,6 +40,9 @@ namespace VolumetricExplosions
         public float sparks, chunks, dirt; // how many of each to throw
         public bool whiteTrails;           // burning propellant leaves white trails, not dark ones
         public float burn;                 // seconds a fire stays burning on the ground afterwards
+        public float explosive;            // (since 0.10.0) kilograms of TNT a warhead or a shell set off in it (BD Armory's: see Warheads)
+        public float detonated;            // how much of the fireball is that explosive's, 0 to 1: a flash over in a moment, dark smoke at once, no fire left
+        public bool small;                 // a small shell's and nothing else: laid with few particles, no shock front, no rising heat (see Warheads)
         public string label;
         public List<Death> wreck;          // the destroyed parts that may leave pieces
         public Vector3 at, going;          // the place and the wreck's motion, in the frame of the Site the explosion went to
@@ -117,13 +120,13 @@ namespace VolumetricExplosions
         {
             Vector3d world = p.world;
             // ---- what blew up
-            double fuel = 0, oxidizer = 0, solid = 0, mono = 0, gas = 0, ore = 0, charge = 0, vapour = 0, dry = 0, thrust = 0;
+            double fuel = 0, oxidizer = 0, solid = 0, mono = 0, gas = 0, ore = 0, charge = 0, vapour = 0, dry = 0, thrust = 0, explosive = 0;
             bool hydrogen = false, any = parts.Count > 0;
             Vector3d momentum = Vector3d.zero;
             int overheated = 0;
             foreach (Death d in parts)
             {
-                fuel += d.fuel; oxidizer += d.oxidizer; solid += d.solid; mono += d.mono; gas += d.gas; ore += d.ore; charge += d.charge; vapour += d.vapour;
+                fuel += d.fuel; oxidizer += d.oxidizer; solid += d.solid; mono += d.mono; gas += d.gas; ore += d.ore; charge += d.charge; vapour += d.vapour; explosive += d.explosive;
                 dry += d.dry; thrust += d.thrust; hydrogen |= d.hydrogen;
                 momentum += d.velocity * d.dry;
                 if (d.cause == Cause.Overheat) overheated++;
@@ -199,19 +202,42 @@ namespace VolumetricExplosions
             }
             if (p.vacuum) soot = 0f;                                       // nothing for smoke to form in or hang in
 
+            // Real fireballs are wider still (about 5.8 m times the cube root of the kilograms); this is that shape of law, a little smaller.
+            float fuelRadius = fire > 0.5 ? Mathf.Min(45f, Settings.Size * 1.75f * Mathf.Pow((float)fire, 0.29f)) : 0f;
+            // ---- a warhead's or a shell's high explosive (since 0.10.0: BD Armory's, see Warheads)
+            // (It does not burn in the air round it as fuel does: it goes off all at once, its oxygen in it, in a flash over in a few
+            // hundredths of a second for a shell and some tenths for a big bomb; and it leaves a ball of hot gas thick with soot (TNT
+            // has too little oxygen in it to burn all its carbon), dark smoke as soon as it has spread and cooled. Its ball is taken
+            // here as 3.6 m across times the cube root of the kilograms: a 40 mm shell's 2.3 m, a 500 lb bomb's 16, a tonne's 36; and
+            // what it throws, its dust and the ground, a little less than twice as far. Under the water it is all a column of spray,
+            // see Splash.)
+            float heRadius = explosive > 0.0005 && !p.underwater ? Mathf.Min(45f, Settings.Size * 1.8f * Mathf.Pow((float)explosive, 1f / 3f)) : 0f;
+            p.radius = Mathf.Min(45f, Mathf.Pow(fuelRadius * fuelRadius * fuelRadius + heRadius * heRadius * heRadius, 1f / 3f));
+            p.explosive = (float)explosive;
+            p.detonated = p.radius > 0f ? heRadius * heRadius * heRadius / (p.radius * p.radius * p.radius) : 0f;
+            if (p.detonated > 0f)
+            {
+                // Its smoke dark grey to black, and its flash white-hot where it is most of the fire.
+                soot = Mathf.Lerp(soot, p.vacuum ? 0f : 0.85f, p.detonated);
+                shade = Mathf.Lerp(shade, 0.09f, p.detonated);
+                if (p.detonated > 0.5f) p.tint = 1;
+            }
+            p.small = explosive > 0.0 && explosive < Warheads.SmallBelow && fire < 1.0 && vapour < 1.0;
+
             p.fire = (float)fire;
             p.soot = Mathf.Clamp01(soot);
             p.smokeShade = shade;
             p.vapour = (float)vapour;
-            // Real fireballs are wider still (about 5.8 m times the cube root of the kilograms); this is that shape of law, a little smaller.
-            p.radius = fire > 0.5 ? Mathf.Min(45f, Settings.Size * 1.75f * Mathf.Pow((float)fire, 0.29f)) : 0f;
             float heft = Mathf.Pow((float)System.Math.Max(0.02, dry), 0.33f);
             p.reach = Mathf.Max(p.radius, Settings.Size * (1.0f + 1.1f * heft + Mathf.Min(p.impact, 150f) * 0.03f));
+            if (explosive > 0.0) p.reach = Mathf.Max(p.reach, Settings.Size * 3.2f * Mathf.Pow((float)explosive, 1f / 3f));
             p.ground = p.surfaceBelow && below < p.reach * 0.9f + 1.5f;
 
-            p.sparks = (14f + 22f * heft * (1f + Mathf.Min(p.impact, 120f) / 40f) + Mathf.Sqrt((float)solid) * 3f + Mathf.Sqrt((float)charge) * 2f) * (p.cause == Cause.Overheat ? 2.5f : 1f);
-            p.chunks = p.radius > 1.5f ? Mathf.Min(18f, 2f + p.radius * 0.7f) + Mathf.Min(14f, Mathf.Sqrt((float)solid) * 0.35f) : 0f;
-            p.dirt = p.ground && !p.water ? (p.paved ? 0.35f : 1f) * (1f + (float)ore / 300f) : 0f;
+            p.sparks = (14f + 22f * heft * (1f + Mathf.Min(p.impact, 120f) / 40f) + Mathf.Sqrt((float)solid) * 3f + Mathf.Sqrt((float)charge) * 2f) * (p.cause == Cause.Overheat ? 2.5f : 1f)
+                       + (explosive > 0.0 ? 6f + 18f * Mathf.Pow((float)explosive, 1f / 3f) : 0f);
+            // (burning pieces from what burns: an explosive's fragments are too small and too quick to trail smoke)
+            p.chunks = fuelRadius > 1.5f ? Mathf.Min(18f, 2f + fuelRadius * 0.7f) + Mathf.Min(14f, Mathf.Sqrt((float)solid) * 0.35f) : 0f;
+            p.dirt = p.ground && !p.water ? (p.paved ? 0.35f : 1f) * (1f + (float)ore / 300f) * (1f + 0.5f * p.detonated) : 0f;
             bool spills = fromPair + burnsInAir > 20.0 && (p.oxygen || fromPair > 20.0);
             // How long what is spilt goes on burning on the ground. A pool of kerosene burns away at about a twentieth of a
             // kilogram a second from each square metre of it (some four millimetres of its depth a minute: Babrauskas 1983 has
@@ -226,7 +252,8 @@ namespace VolumetricExplosions
             p.burn = p.ground && !p.water && !p.vacuum && spills ? burns * Mathf.Max(0.3f, Settings.Smoke) : 0f;
 
             p.label = (any ? parts.Count + " part(s)" : "unknown source") + ", " + p.cause + (p.impact > 0 ? " at " + p.impact.ToString("F0") + " m/s" : "") +
-                ", fire " + p.fire.ToString("F0") + " kg (radius " + p.radius.ToString("F1") + " m, soot " + p.soot.ToString("F2") + ", tint " + p.tint + "), vapour " + p.vapour.ToString("F0") +
+                ", fire " + p.fire.ToString("F0") + " kg" + (p.explosive > 0f ? ", explosive " + p.explosive.ToString(p.explosive < 1f ? "F3" : "F1") + " kg of TNT (" + (p.detonated * 100f).ToString("F0") + "% of the fireball" + (p.small ? ", a small shell's" : "") + ")" : "") +
+                " (radius " + p.radius.ToString("F1") + " m, soot " + p.soot.ToString("F2") + ", tint " + p.tint + "), vapour " + p.vapour.ToString("F0") +
                 " kg, air " + p.air.ToString("F3") + (p.oxygen ? " with oxygen" : "") + (p.space ? ", space" : "") + (p.ground ? (p.water ? ", on water" : p.paved ? ", on paving" : ", on the ground") : p.height < 1e6f ? ", " + p.height.ToString("F0") + " m up" : ", nothing below") +
                 (p.underwater ? ", under water" : "") + ", " + body.bodyName;
             if (Settings.Log) Addon.Log("blast: " + p.label);

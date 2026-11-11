@@ -32,10 +32,53 @@ namespace VolumetricExplosions
         /// ships' boxes cover much of the screen, the camera close by or in the plume, a tongue is tens of pixels wide, and walking
         /// every pixel of the screen costs four times as much: at 1440 lines a booster's smoke took a fast card from 180 frames a
         /// second to 80, and from inside it to 15 (ksp-rocket-smoke's first issue, 2026-10-18). From a quarter of the screen
-        /// covered; whole again under a sixth, so that it does not flicker between the two near the line.
+        /// covered; whole again under a sixth, and (since 2026-11-04) only after three quarters of a second so, so that it does not
+        /// flicker between the two near the line. (And since then each ship's patch is walked for the ships' picture as it is drawn this
+        /// frame even in a frame with no Step, the game paused, when nothing else sets it: see Site.WalkShips. Settings.TestShipsHalf 1:
+        /// all as until then.)
         /// </summary>
         public static bool ShipsHalf;
         bool shipsHalfNow;                        // (what the patches were set going with this frame: ShipsHalf as it was when they were)
+        float shipsUnderFor;                      // (how long the ships' boxes have covered too little for half size, while it is: see Frame)
+        const float ShipsWholeAfter = 0.75f;      // (seconds so before the ships' picture is whole again)
+#if DEV
+        static float wholeCovered, flamesCovered;
+        static readonly int[] flamesSaid = new int[2];   // (the last said, for each of the two cameras: see below)
+        static int flamesDrawn;
+        static string flamesWhy = "";
+
+        /// <summary>(Development build: the burning patches, how many had their flames walked whole the last frame and how much of the
+        /// screen their rectangles cover; and the ships' picture, at half size or not.)</summary>
+        public static string Whole()
+        {
+            Air air = Air.Instance;
+            if (air == null) return "not running";
+            int burning = 0, ships = 0, all = 0;
+            foreach (Site s in air.Sites)
+            {
+                all++;
+                if (s.Riding) ships++;
+                if (s.Burning) burning++;
+            }
+            return all + " patches: " + ships + " a ship's, " + burning + " burning; flames walked whole " + flamesDrawn + ", their rectangles " + (flamesCovered * 100f).ToString("F0")
+                   + "% of the screen; the ships' picture " + (ShipsHalf ? "at half size" : "whole") + " (they cover " + (wholeCovered * 100f).ToString("F0") + "%); fireswhole " + Settings.FiresWhole + " " + flamesWhy + " | the first burning one, against this camera: " + FirstFlames(air);
+        }
+#endif
+
+#if DEV
+        static string FirstFlames(Air air)
+        {
+            Camera cam = FlightCamera.fetch != null ? FlightCamera.fetch.mainCamera : null;
+            if (cam == null) return "no camera";
+            foreach (Site s in air.Sites)
+            {
+                if (!s.Burning) continue;
+                bool got = s.FlameRect(cam.projectionMatrix * cam.worldToCameraMatrix, out Vector4 r);
+                return (got ? "a rectangle " : "none ") + Site.FlameWhy;
+            }
+            return "none burning";
+        }
+#endif
 
         static RenderTextureFormat colourFormat = RenderTextureFormat.Default, depthFormat = RenderTextureFormat.Default;
         static bool formatsLooked;
@@ -65,6 +108,16 @@ namespace VolumetricExplosions
         readonly List<Site> world = new List<Site>(), ships = new List<Site>(), inRange = new List<Site>();
         readonly float[] away = new float[64];
         RenderTexture atlas, atlasDepth, full, fullDepth;
+        // (the picture of the smoke in front, at half the screen's size, for what is drawn as sprites after the sheet: see
+        // FrontPass and sprite.glsl. Two pictures: the nearest patch's, and the rest's.)
+        RenderTexture front, front1;
+        readonly RenderTargetIdentifier[] frontTargets = new RenderTargetIdentifier[2];
+        readonly MaterialPropertyBlock frontBlock = new MaterialPropertyBlock();
+        static readonly int frontNote = Shader.PropertyToID("_VolFront"), front1Note = Shader.PropertyToID("_VolFront1");
+        /// <summary>(Set for every camera, before each draws: 1 once Layers has drawn its picture of the smoke in front for it.)</summary>
+        public static readonly int FrontOnNote = Shader.PropertyToID("_VolFrontOn");
+        /// <summary>(For testing: each sprite drawn as how much of it shows through the smoke in front, green all, red none.)</summary>
+        public static bool TestFront;
         readonly RenderTargetIdentifier[] atlasBoth = new RenderTargetIdentifier[2], fullBoth = new RenderTargetIdentifier[2];
         int capacity, perRow, slotWide, slotTall;
         float roomyFor;                           // how long the atlas has had more than twice the room needed (it is then made smaller)
@@ -74,6 +127,36 @@ namespace VolumetricExplosions
         Material material;
         Mesh quad;
         static readonly int slotNote = Shader.PropertyToID("_VolSlot"), layersNote = Shader.PropertyToID("_VolLayers"), slotsNote = Shader.PropertyToID("_VolSlots"), sheetNote = Shader.PropertyToID("_VolSheet");
+        static readonly int holeNote = Shader.PropertyToID("_VolHole"), holeWayNote = Shader.PropertyToID("_VolHoleWay");
+        static readonly int holeANote = Shader.PropertyToID("_VolHoleA"), holeBNote = Shader.PropertyToID("_VolHoleB"), holeCNote = Shader.PropertyToID("_VolHoleC"),
+            holeSlotsNote = Shader.PropertyToID("_VolHoleSlots");
+        // (Since 2026-10-25: the burning patches whose flames are walked whole this frame, by their place in inRange, and each one's
+        // rectangle of the screen; at most so many, so much of the screen in all: see ForCamera)
+        readonly List<int> flaming = new List<int>();
+        Vector4[] holes = new Vector4[16];
+        const int FlamesMost = 3;
+        const float FlamesCoverMost = 0.35f;
+        // (a block of settings of its own for each draw that needs one: see Block)
+        readonly List<MaterialPropertyBlock> holeBlocks = new List<MaterialPropertyBlock>(), flameBlocks = new List<MaterialPropertyBlock>();
+
+        /// <summary>A rectangle of the screen (0 to 1 each way from its bottom left corner, see Site.FlameRect) as a walk tells where it
+        /// is drawing (_VolHole in volume.glsl: upside down where the game draws into its pictures so, Direct3D), drawn in by so much
+        /// each way.</summary>
+        static Vector4 Walked(Vector4 r, float inX, float inY)
+        {
+            r = new Vector4(r.x + inX, r.y + inY, r.z - inX, r.w - inY);
+            return SystemInfo.graphicsUVStartsAtTop ? new Vector4(r.x, 1f - r.w, r.z, 1f - r.y) : r;
+        }
+
+        /// <summary>A block of settings for one draw, emptied: a patch's one material is walked twice in a frame when its flames are
+        /// walked whole, each walk with settings of its own.</summary>
+        static MaterialPropertyBlock Block(List<MaterialPropertyBlock> pool, int k)
+        {
+            while (pool.Count <= k) pool.Add(new MaterialPropertyBlock());
+            MaterialPropertyBlock b = pool[k];
+            b.Clear();
+            return b;
+        }
         static readonly Vector3[] cube = Corners();
 
         // ---- a patch walked a quarter of its pixels a frame, the rest carried over (2026-10-18; research/rendering/notes/smoke-temporal.md)
@@ -151,17 +234,42 @@ namespace VolumetricExplosions
             // (how much of the screen the ships' boxes cover, the corners of the rectangle that holds them all: see ShipsHalf)
             shipsHalfNow = ShipsHalf;
             Camera seer = cameras.Length > 0 && cameras[0] != null ? cameras[0] : cameras.Length > 1 ? cameras[1] : null;
-            if (!Settings.Half || ships.Count == 0 || seer == null) ShipsHalf = false;
+            if (!Settings.Half || seer == null) { ShipsHalf = false; shipsUnderFor = 0f; }
+            else if (ships.Count == 0)
+            {
+                // (no ships' patch this frame: whole, but after the same wait as below if half, for in a crash the ships' patches
+                // go and come again within a second (four crashes of 2026-11-04: half, whole 0.57 s later with none, half again
+                // 1.1 s after), each change making both pictures afresh)
+                if (ShipsHalf && Settings.TestShipsHalf != 1f && (shipsUnderFor += Time.unscaledDeltaTime) < ShipsWholeAfter) { }
+                else { ShipsHalf = false; shipsUnderFor = 0f; }
+            }
             else
             {
                 Vector4 r = new Vector4(2f, 2f, -2f, -2f);
                 Matrix4x4 v = seer.projectionMatrix * seer.worldToCameraMatrix;
                 foreach (Site s in ships) Covers(ref r, v, s.BoxMatrix, seer);
-                float covered = r.z > r.x && r.w > r.y ? Mathf.Clamp01((Mathf.Min(r.z, 1f) - Mathf.Max(r.x, -1f)) * (Mathf.Min(r.w, 1f) - Mathf.Max(r.y, -1f)) * 0.25f) : 0f;
-                ShipsHalf = ShipsHalf ? covered > 1f / 6f : covered > 0.25f;
+                float covered = Area(r);
+                bool wanted = ShipsHalf ? covered > 1f / 6f : covered > 0.25f;
+                // (Since 2026-11-04: back to whole only once under the line for ShipsWholeAfter seconds running; to half at once, as
+                // before, for the frame rate inside a plume. A plume's edge going to and fro across the line went sharp and soft by turns,
+                // and the ground fires' flames with it. Settings.TestShipsHalf 1: back at once, as until then.)
+                if (ShipsHalf && !wanted && Settings.TestShipsHalf != 1f)
+                {
+                    shipsUnderFor += Time.unscaledDeltaTime;
+                    if (shipsUnderFor < ShipsWholeAfter) wanted = true;
+                }
+                else shipsUnderFor = 0f;
+                ShipsHalf = wanted;
+#if DEV
+                wholeCovered = covered;
+#endif
                 // (for testing: 8 always so, 9 never)
                 if (Settings.TestLayers == 8f) ShipsHalf = true; else if (Settings.TestLayers == 9f) ShipsHalf = false;
             }
+#if DEV
+            // (drawn so from the next frame on, which reads it as shipsHalfNow)
+            if (ShipsHalf != shipsHalfNow) Addon.Log("the ships' picture now " + (ShipsHalf ? "half size" : "whole") + " (frame " + Time.frameCount + ", drawn so from the next; " + ships.Count + " ships' patches covering " + wholeCovered.ToString("F2") + ")");
+#endif
             bool any = world.Count + ships.Count > 0;
             for (int which = 0; which < 2; which++)
             {
@@ -235,6 +343,7 @@ namespace VolumetricExplosions
 
             inRange.Clear();
             foreach (Site s in world) if (s.Within(camera)) inRange.Add(s);
+            if (inRange.Count > SlotsMost) Trim();
             int slots = inRange.Count;
             if (slots > 0)
             {
@@ -243,6 +352,34 @@ namespace VolumetricExplosions
                 c.SetRenderTarget(atlasBoth, atlas);
                 c.ClearRenderTarget(false, true, Color.clear);
                 ChooseCarried(which, camera, view, half);
+                // (Since 2026-10-25: a burning patch's flames are walked whole, by themselves, into the ships' picture, and their rectangle
+                // of the screen is left to that walk, by its walk at half size (but for a couple of its pixels inside the edge) and by the
+                // picture: see Site.FlameRect, and _VolHoleA in layers.glsl. Not where the ships' picture is itself at half size; and only
+                // so many, so much of the screen in all, that walking them whole costs little: past that the rest are walked at half size,
+                // flames and all, as before.)
+                flaming.Clear();
+                if (holes.Length < slots) holes = new Vector4[slots + 8];
+                bool flamesWhole = Settings.FiresWhole && half && !shipsHalfNow;
+                float flamesCover = 0f;
+                for (int k = 0; k < slots; k++)
+                {
+                    holes[k] = Vector4.zero;
+                    if (!flamesWhole || flaming.Count >= FlamesMost || !inRange[k].FlameRect(view, out Vector4 r)) continue;
+                    // (a patch whose flames were walked whole a frame or two ago goes on so a little past the limit: at the limit, as the
+                    // fire grew and died back or the camera came and went, its flames went sharp and soft by turns)
+                    float cover = (r.z - r.x) * (r.w - r.y);
+                    bool was = Time.frameCount - inRange[k].FlamesWholeAt <= 2;
+                    if (flamesCover + cover > FlamesCoverMost + (was ? 0.08f : 0f)) continue;
+                    flamesCover += cover;
+                    holes[k] = r;
+                    flaming.Add(k);
+                    inRange[k].FlamesWholeAt = Time.frameCount;
+                }
+#if DEV
+                flamesDrawn = flaming.Count; flamesCovered = flamesCover; flamesWhy = flamesWhole ? "" : "not tried: fireswhole " + Settings.FiresWhole + ", half " + half + ", the ships' picture at half size " + shipsHalfNow;
+                // (when the fires walked whole change, and above when the ships' picture goes to half size or back: for lining a film's one-frame changes up with the log, see tools/dev/scratch-2026-11-03-pc/lineup.py; since 2026-11-04)
+                if (flaming.Count != flamesSaid[which & 1]) { Addon.Log("fires walked whole, camera " + which + ": " + flamesSaid[which & 1] + " -> " + flaming.Count + " (frame " + Time.frameCount + ", " + (flamesWhole ? "covering " + flamesCover.ToString("F2") : flamesWhy) + ")"); flamesSaid[which & 1] = flaming.Count; }
+#endif
                 for (int k = 0; k < slots; k++)
                 {
                     Site s = inRange[k];
@@ -252,7 +389,15 @@ namespace VolumetricExplosions
                     s.Marching.SetVector(shiftNote, Vector4.zero);
                     s.Marching.SetVector(quarterNote, Vector4.zero);
                     c.SetViewport(new Rect(x, y, slotWide, slotTall));
-                    c.DrawMesh(Assets.Cube, s.BoxMatrix, s.Marching, 0, 0);
+                    if (holes[k].z > holes[k].x)
+                    {
+                        // (two of its pixels into the rectangle: see _VolHoleA in layers.glsl)
+                        MaterialPropertyBlock b = Block(holeBlocks, k);
+                        b.SetVector(holeNote, Walked(holes[k], 4f / wide, 4f / tall));
+                        b.SetVector(holeWayNote, new Vector4(1f, 0f, 0f, 0f));
+                        c.DrawMesh(Assets.Cube, s.BoxMatrix, s.Marching, 0, 0, b);
+                    }
+                    else c.DrawMesh(Assets.Cube, s.BoxMatrix, s.Marching, 0, 0);
                     Covers(ref rect, view, s.BoxMatrix, camera);
                 }
                 // Where this camera's picture is smoothed between frames (it then keeps a picture of how far each pixel has
@@ -271,7 +416,8 @@ namespace VolumetricExplosions
             }
             int shipsIn = 0;
             foreach (Site s in ships) if (s.Within(camera)) shipsIn++;
-            if (shipsIn > 0)
+            if (slots == 0) flaming.Clear();
+            if (shipsIn > 0 || flaming.Count > 0)
             {
                 Full(shipsHalfNow ? slotWide : wide, shipsHalfNow ? slotTall : tall);
                 fullBoth[0] = full; fullBoth[1] = fullDepth;
@@ -281,8 +427,28 @@ namespace VolumetricExplosions
                 {
                     if (!s.Within(camera)) continue;
                     s.Marching.SetVector(slotNote, Vector4.zero);
+                    // (walked for the picture as it is this frame. Its Step has set it so already in a frame that runs (TuneVolume, from
+                    // ShipsHalf as the frame before left it, which is shipsHalfNow), and this writes the same again; but paused, or in a
+                    // frame of no length, there is no Step, the camera can still turn and the picture change size, and walked at half size
+                    // into the whole picture its smoke was cut by the depth of the wrong pixels of the scene till the game went on. A ship's
+                    // patch is walked once for each camera, into this picture only, so its own material, read when the camera draws,
+                    // holds. Settings.TestShipsHalf 1: as its Step last left it.)
+                    if (Settings.TestShipsHalf != 1f) s.WalkShips(shipsHalfNow && half);
                     c.DrawMesh(Assets.Cube, s.BoxMatrix, s.Marching, 0, 0);
                     Covers(ref rect, view, s.BoxMatrix, camera);
+                }
+                // (and the burning patches' flames, walked whole, each within its own rectangle only: see above)
+                for (int n = 0; n < flaming.Count; n++)
+                {
+                    Site s = inRange[flaming[n]];
+                    MaterialPropertyBlock b = Block(flameBlocks, n);
+                    s.Whole(b);
+                    b.SetVector(slotNote, Vector4.zero);
+                    b.SetVector(shiftNote, Vector4.zero);
+                    b.SetVector(quarterNote, Vector4.zero);
+                    b.SetVector(holeNote, Walked(holes[flaming[n]], 0f, 0f));
+                    b.SetVector(holeWayNote, new Vector4(2f, 0f, 0f, 0f));
+                    c.DrawMesh(Assets.Cube, s.BoxMatrix, s.Marching, 0, 0, b);
                 }
                 // (and the ships' flames say where they are going: with the ship. Left to the ground's motion behind them,
                 // a flame over ground that streams past was smeared along the ground's way.)
@@ -298,15 +464,81 @@ namespace VolumetricExplosions
                 }
             }
             if (slots + shipsIn == 0) { NotFor(); return; }
-            c.SetRenderTarget(BuiltinRenderTextureType.CameraTarget);
             // (a few pixels to spare all round: a pixel at the edge takes its smoke from the slot's pixels about it)
             float spareX = 8f / Mathf.Max(1, wide), spareY = 8f / Mathf.Max(1, tall);
             rect = new Vector4(Mathf.Max(-1f, rect.x - spareX), Mathf.Max(-1f, rect.y - spareY), Mathf.Min(1f, rect.z + spareX), Mathf.Min(1f, rect.w + spareY));
+            FrontPass(c, wide, tall, rect);
+            c.SetRenderTarget(BuiltinRenderTextureType.CameraTarget);
             float test = Settings.TestLayers == 1f ? 1f : Settings.TestLayers == 3f ? 2f : Settings.TestLayers == 4f ? 3f : Settings.TestLayers == 6f ? 4f : Settings.TestLayers == 7f ? 5f : 0f;
-            material.SetVector(layersNote, new Vector4(slots, shipsIn > 0 ? (shipsHalfNow ? 2f : 1f) : 0f, perRow, half ? 1f : 0f));
+            material.SetVector(layersNote, new Vector4(slots, shipsIn + flaming.Count > 0 ? (shipsHalfNow ? 2f : 1f) : 0f, perRow, half ? 1f : 0f));
             material.SetVector(slotsNote, new Vector4(slotWide, slotTall, test, 0f));
             material.SetVector(sheetNote, rect.z > rect.x && rect.w > rect.y ? rect : Vector4.zero);
+            // (and the burning patches whose flames were walked whole: within each one's rectangle, its slot is passed over)
+            int holed = flaming.Count;
+            material.SetVector(holeANote, holed > 0 ? Pixels(holes[flaming[0]], wide, tall) : Vector4.zero);
+            material.SetVector(holeBNote, holed > 1 ? Pixels(holes[flaming[1]], wide, tall) : Vector4.zero);
+            material.SetVector(holeCNote, holed > 2 ? Pixels(holes[flaming[2]], wide, tall) : Vector4.zero);
+            material.SetVector(holeSlotsNote, new Vector4(holed > 0 ? flaming[0] : -10f, holed > 1 ? flaming[1] : -10f, holed > 2 ? flaming[2] : -10f, holed > 0 ? 1f : 0f));
         }
+
+        /// <summary>
+        /// (Since 2026-11-04.) No more patches for one camera than the sheet's shader puts on the screen, fifteen: its walk goes
+        /// through fifteen slots of the atlas, and the sixteenth place in its front pass is the ships' picture, not a slot
+        /// (tools/shaderpack/layers.glsl). With fifteen patches staying (Settings.Patches, Air.Most) and those thinning away or giving
+        /// their smoke to another beside them, a battle can have more in one camera's range; the sixteenth, the nearest, was walked
+        /// into the atlas and never shown. Left out for this camera, this frame: those thinning away first (they are going), the farthest
+        /// first; then the farthest. (inRange is the farthest first.)
+        /// </summary>
+        void Trim()
+        {
+#if DEV
+            int was = inRange.Count;
+#endif
+            for (int k = 0; k < inRange.Count && inRange.Count > SlotsMost;)
+                if (inRange[k].Leaving) inRange.RemoveAt(k); else k++;
+            if (inRange.Count > SlotsMost) inRange.RemoveRange(0, inRange.Count - SlotsMost);
+#if DEV
+            if (Time.frameCount - trimSaid > 60) { trimSaid = Time.frameCount; Addon.Log("more patches in a camera's range than the atlas has slots: " + was + ", " + (was - inRange.Count) + " left out (frame " + Time.frameCount + ")"); }
+#endif
+        }
+        const int SlotsMost = 15;
+#if DEV
+        int trimSaid = -100;
+#endif
+
+        /// <summary>
+        /// The picture of the smoke in front (layers.glsl's start of main), drawn by the sheet's own shader at half the screen's size, after
+        /// every patch is walked and before the sheet puts them on the screen; then handed to everything drawn after (sprite.glsl), with
+        /// _VolFrontOn. A sprite behind a cloud of smoke is then hidden by as much of it as lies in front of it, pixel by pixel. (Until
+        /// 2026-10-28 each sprite was laid over all the smoke or under all of it, by its queue: the owner, "fire or other smoke will
+        /// show in front of the main smoke even if it's behind".) Only with the sprite shader there to read it, and pictures of sixteen
+        /// bits a number to keep how far off the smoke is.
+        /// </summary>
+        void FrontPass(CommandBuffer c, int wide, int tall, Vector4 rect)
+        {
+            if (!Assets.FrontReady || ColourFormat != RenderTextureFormat.ARGBHalf || !(rect.z > rect.x && rect.w > rect.y)) return;
+            int fw = (wide + 1) / 2, ft = (tall + 1) / 2;
+            if (front == null || front.width != fw || front.height != ft)
+            {
+                Release(ref front);
+                Release(ref front1);
+                front = Picture(fw, ft, RenderTextureFormat.ARGBHalf, "VolumetricExplosions the smoke in front: the nearest patch's");
+                front1 = Picture(fw, ft, RenderTextureFormat.ARGBHalf, "VolumetricExplosions the smoke in front: the rest's");
+            }
+            frontTargets[0] = front;
+            frontTargets[1] = front1;
+            c.SetRenderTarget(frontTargets, front);
+            c.ClearRenderTarget(false, true, Color.clear);
+            frontBlock.SetVector(slotsNote, new Vector4(slotWide, slotTall, 0f, 1f));
+            frontBlock.SetVector(sheetNote, rect);
+            c.DrawMesh(quad, Matrix4x4.identity, material, 0, 0, frontBlock);
+            c.SetGlobalTexture(frontNote, front);
+            c.SetGlobalTexture(front1Note, front1);
+            c.SetGlobalVector(FrontOnNote, new Vector4(1f, TestFront ? 1f : 0f, 0f, 0f));
+        }
+
+        /// <summary>A rectangle of the screen (0 to 1 each way from its bottom left corner) in pixels, as the picture tells where it is.</summary>
+        static Vector4 Pixels(Vector4 r, int wide, int tall) => new Vector4(r.x * wide, r.y * tall, r.z * wide, r.w * tall);
 
         /// <summary>
         /// Which of this camera's patches are walked a quarter at a time this frame (see Carrying): those with no fire in them
@@ -327,7 +559,7 @@ namespace VolumetricExplosions
                 if (Mathf.Max(lamps.x, Mathf.Max(lamps.y, lamps.z)) > 0f) { fires++; if (k != null) k.Covering = false; continue; }
                 Vector4 r = new Vector4(2f, 2f, -2f, -2f);
                 Covers(ref r, view, s.BoxMatrix, camera);
-                float covers = r.z > r.x && r.w > r.y ? Mathf.Clamp01((Mathf.Min(r.z, 1f) - Mathf.Max(r.x, -1f)) * (Mathf.Min(r.w, 1f) - Mathf.Max(r.y, -1f)) * 0.25f) : 0f;
+                float covers = Area(r);
                 bool covering = k != null && k.Covering ? covers > 1f / 6f : covers > 0.25f;
                 if (!covering) { small++; if (k != null) k.Covering = false; continue; }
                 if (k == null) { k = new Carried(); mine[s] = k; }
@@ -477,20 +709,80 @@ namespace VolumetricExplosions
             if (material != null) material.SetVector(sheetNote, Vector4.zero);
         }
 
-        /// <summary>Widen the part of the screen the sheet covers to take in a patch's box. (A box with a corner behind the camera can be anywhere on the screen: all of it.)</summary>
-        static void Covers(ref Vector4 rect, Matrix4x4 view, Matrix4x4 box, Camera camera)
+        /// <summary>What Covers found of a box: nothing of it before the camera, some of it, or (the camera in it) the whole screen.</summary>
+        internal enum Reach { None, Part, All }
+
+        /// <summary>
+        /// Widen the part of the screen the sheet covers to take in a patch's box (and, from Site.Sight, how much of the screen a patch
+        /// covers, for which grid comes first: the one rule for both).
+        ///
+        /// Until 2026-11-04 a box with a corner less than half the near distance ahead of the camera was taken as anywhere on the screen,
+        /// all of it. A ship's box with one corner just behind the camera, as a ship's patch is when the camera flies by its trail or sits by
+        /// its nozzle, then counted as the whole screen: the ships' picture went to half size at once and back the next moment, and with it
+        /// the ground fires' flames from sharp to soft, the whole picture in one frame (the 34 % flash at 29.5 s in fire-crash-lineup-e).
+        /// Now the box is cut where it crosses that plane (each of its twelve edges cut there, and the cut points taken with the corners in
+        /// front of it), and only what is in front counts. That holds every pixel that can show the box's smoke: a ray's smoke is walked
+        /// only from the near plane on and anything nearer thrown away (tools/shaderpack/volume.glsl), so a pixel shows it only where the
+        /// back of the box lies past the near plane, within the part of the box in front of half of it; and that part, a box cut by a
+        /// plane, seen in perspective, lies within the rectangle of its corners on the screen. (On Direct3D the card does not cut the box at
+        /// the near plane itself, volume.glsl holding its depth in; this does not lean on that. research/layers/covers-flash.md.)
+        /// A box that holds the camera is still all the screen: it is all round it. One wholly behind adds nothing.
+        /// (Settings.TestShipsHalf 1: as until then, everywhere this rule is used.)
+        /// </summary>
+        internal static Reach Covers(ref Vector4 rect, Matrix4x4 view, Matrix4x4 box, Camera camera)
         {
             Matrix4x4 m = view * box;
+            float least = camera.nearClipPlane * 0.5f;
+            bool behind = false, any = false;
             for (int n = 0; n < 8; n++)
             {
                 Vector4 p = m * new Vector4(cube[n].x, cube[n].y, cube[n].z, 1f);
-                if (p.w < camera.nearClipPlane * 0.5f) { rect = new Vector4(-1f, -1f, 1f, 1f); return; }
-                float x = p.x / p.w, y = p.y / p.w;
-                if (x < rect.x) rect.x = x;
-                if (y < rect.y) rect.y = y;
-                if (x > rect.z) rect.z = x;
-                if (y > rect.w) rect.w = y;
+                seenCorners[n] = p;
+                if (p.w < least) { behind = true; continue; }
+                Take(ref rect, p.x / p.w, p.y / p.w);
+                any = true;
             }
+            if (!behind) return Reach.Part;
+            // (the camera in the box, or the old rule: all of it)
+            Vector3 inBox = box.inverse.MultiplyPoint3x4(camera.transform.position);
+            if (Settings.TestShipsHalf == 1f || Mathf.Abs(inBox.x) <= 0.5f && Mathf.Abs(inBox.y) <= 0.5f && Mathf.Abs(inBox.z) <= 0.5f)
+            {
+                rect = new Vector4(-1f, -1f, 1f, 1f);
+                return Reach.All;
+            }
+            // (each edge from a corner behind the plane to one in front of it, cut where it crosses: there its w is the plane's)
+            for (int e = 0; e < 24; e += 2)
+            {
+                Vector4 a = seenCorners[boxEdges[e]], b = seenCorners[boxEdges[e + 1]];
+                if ((a.w < least) == (b.w < least)) continue;
+                Vector4 q = a + (b - a) * ((least - a.w) / (b.w - a.w));
+                Take(ref rect, q.x / least, q.y / least);
+                any = true;
+            }
+            return any ? Reach.Part : Reach.None;
+        }
+        static readonly Vector4[] seenCorners = new Vector4[8];   // (Covers's, one call at a time: on the main thread only)
+        // (the twelve edges of the box, the corners as Corners numbers them: those one bit apart)
+        static readonly int[] boxEdges = { 0, 1, 2, 3, 4, 5, 6, 7, 0, 2, 1, 3, 4, 6, 5, 7, 0, 4, 1, 5, 2, 6, 3, 7 };
+
+        static void Take(ref Vector4 rect, float x, float y)
+        {
+            if (x < rect.x) rect.x = x;
+            if (y < rect.y) rect.y = y;
+            if (x > rect.z) rect.z = x;
+            if (y > rect.w) rect.w = y;
+        }
+
+        /// <summary>
+        /// How much of the screen a rectangle of it covers (-1 to 1 each way), 0 to 1. (Each way's overlap no less than nothing, as
+        /// Site.Sight has it: until 2026-11-04 a rectangle wholly off the screen past a corner, its two overlaps each below nothing, gave
+        /// their product, as much as the whole screen. Settings.TestShipsHalf 1: so again.)
+        /// </summary>
+        internal static float Area(Vector4 r)
+        {
+            if (Settings.TestShipsHalf == 1f)
+                return r.z > r.x && r.w > r.y ? Mathf.Clamp01((Mathf.Min(r.z, 1f) - Mathf.Max(r.x, -1f)) * (Mathf.Min(r.w, 1f) - Mathf.Max(r.y, -1f)) * 0.25f) : 0f;
+            return Mathf.Clamp01(Mathf.Max(0f, Mathf.Min(r.z, 1f) - Mathf.Max(r.x, -1f)) * Mathf.Max(0f, Mathf.Min(r.w, 1f) - Mathf.Max(r.y, -1f)) * 0.25f);
         }
 
         /// <summary>
@@ -604,6 +896,8 @@ namespace VolumetricExplosions
             Release(ref atlasDepth);
             Release(ref full);
             Release(ref fullDepth);
+            Release(ref front);
+            Release(ref front1);
             for (int which = 0; which < 2; which++) { foreach (Carried k in carried[which].Values) ReleaseCarried(k); carried[which].Clear(); }
             if (carryMaterial != null) Object.Destroy(carryMaterial);
             carryMaterial = null;

@@ -51,8 +51,7 @@ namespace VolumetricExplosions
             {
                 frame = f;
                 Now.Clear();
-                // (the ids taken in the frame before are the answer given in this one)
-                if (tookFrame != f) { HashSet<int> swap = tookBefore; tookBefore = tookNow; tookNow = swap; tookNow.Clear(); tookFrame = f; }
+                Answering(f);
                 if (laid.Count > 2000) Forget(f);
             }
             if (Now.Count >= 600) return false;
@@ -62,7 +61,69 @@ namespace VolumetricExplosions
             return tookBefore.Contains(trail.id);
         }
 
-        internal static void Took(int id) => tookNow.Add(id);
+        internal static void Took(int id) { Answering(Time.frameCount); tookNow.Add(id); }
+
+        // (the ids taken in the frame before are the answer given in this one: turned over by the first of a frame to ask or to tell)
+        static void Answering(int f)
+        {
+            if (tookFrame == f) return;
+            HashSet<int> swap = tookBefore; tookBefore = tookNow; tookNow = swap; tookNow.Clear(); tookFrame = f;
+        }
+
+        /// <summary>
+        /// (Since Level 6.) Whether a burst said with this id (see Burst) was laid in the frame before: asked the frame after it was said,
+        /// and the one after that (a burst said is laid in the frame it was said in, or in the next where no patch stepped meanwhile). For
+        /// the one who said it to show its own again where Burst's promise was not kept: a patch that would have had it may be put away,
+        /// or let thin away, by smoke said after it in the same frame, before it steps.
+        /// </summary>
+        public static bool BurstLaid(int id)
+        {
+            Answering(Time.frameCount);
+            return tookBefore.Contains(id);
+        }
+
+        // (since Level 6: bursts said and not yet laid, each for the first patch whose step finds it in its box; see Burst)
+        internal struct Queued { public Trail trail; public int puffs, frame; public bool laid; }
+        internal static readonly List<Queued> Bursts = new List<Queued>(64);
+        const int MostBursts = 200;
+
+        /// <summary>(What was said before the frame before and is not laid yet will not be: no patch had it. Nor is what is laid kept.)</summary>
+        internal static void Prune(int f)
+        {
+            if (Bursts.Count == 0 || f - Bursts[0].frame <= 1) return;
+            int kept = 0;
+            for (int k = 0; k < Bursts.Count; k++)
+                if (!Bursts[k].laid && f - Bursts[k].frame <= 1) Bursts[kept++] = Bursts[k];
+            Bursts.RemoveRange(kept, Bursts.Count - kept);
+        }
+
+        /// <summary>
+        /// (Since Level 6.) A burst of so many puffs at once at trail.at (a hit's smoke: a shell striking armour, a bullet into the
+        /// ground), laid only into a patch of air that is there already, as a trail is, and never beginning one. True if a patch
+        /// near would take it, as the air is now, and the puffs it may have this frame are not spent: the burst is then laid when
+        /// that patch next steps, in this frame if said while Sources.Asked is being answered. True is a promise: smoke said later in
+        /// the same frame may put that patch away to make room before it steps, and the burst is then not laid (BurstLaid says, the frame
+        /// after). False where there is none (and nothing is laid: the one who said it is to show its own). trail.id is what BurstLaid
+        /// is asked by (a number of its own for each burst); going, size, smoke, fire, shade, warm,
+        /// tint and lasts as for Smoking. At most 32 puffs, and fewer as the air fills: the puffs of all the trails and bursts of
+        /// a frame together are capped (see Puff).
+        /// </summary>
+        public static bool Burst(in Trail trail, int puffs)
+        {
+            Air air = Air.Instance;
+            if (air == null || Assets.Volume == null || !Settings.Volume || puffs <= 0) return false;
+            int f = Time.frameCount;
+            Prune(f);
+            if (Bursts.Count >= MostBursts) return false;
+            if (!air.HasTrailFor(trail)) return false;
+            // (the puffs it is promised are kept from the trails' share of this frame: see Puff)
+            PuffFrame();
+            int may = Mathf.Min(Mathf.Min(puffs, 32), puffsLeft - held);
+            if (may <= 0) return false;
+            held += may;
+            Bursts.Add(new Queued { trail = trail, puffs = may, frame = f });
+            return true;
+        }
 
         /// <summary>
         /// Begin a patch of air out of sight and put it away again at once. The first patch begun in a scene takes half a second and more on
@@ -85,13 +146,28 @@ namespace VolumetricExplosions
         // (at most so many puffs a frame for all the trails together, as the air has room: a crash's hundred pieces are a few hundred particles a
         // second, not thousands)
         const int MostPuffs = 120;
-        static int puffFrame = -1, puffsLeft;
-        internal static bool Puff()
+        static int puffFrame = -1, puffsLeft, held;          // (held: puffs promised this frame to bursts not laid yet, see Burst)
+        static void PuffFrame()
         {
             int f = Time.frameCount;
-            if (f != puffFrame) { puffFrame = f; puffsLeft = Mathf.RoundToInt(MostPuffs * Air.Room()); }
+            if (f != puffFrame) { puffFrame = f; puffsLeft = Mathf.RoundToInt(MostPuffs * Air.Room()); held = 0; }
+        }
+
+        internal static bool Puff()
+        {
+            PuffFrame();
+            if (puffsLeft - held <= 0) return false;
+            puffsLeft--;
+            return true;
+        }
+
+        /// <summary>(A puff of a burst: out of what was promised it, see Burst, or of what is left this frame where it was said in the last.)</summary>
+        internal static bool BurstPuff()
+        {
+            PuffFrame();
             if (puffsLeft <= 0) return false;
             puffsLeft--;
+            if (held > 0) held--;
             return true;
         }
 
@@ -106,25 +182,48 @@ namespace VolumetricExplosions
     /// <summary>The fifth part of a Site: the trails of small things that are in it (see Trails).</summary>
     public sealed partial class Site
     {
-        /// <summary>Each trail said this frame that is in or near this patch of air, and not had by another: puffs along the way it came.</summary>
-        void TakeTrails(float dt)
+        /// <summary>
+        /// (Since Level 6, for Trails.Burst: as the air is now.) Whether this patch of air would take a trail's smoke at this place
+        /// when it next steps, as TakeTrails has it: one that stays where it is, has smoke in it already, and holds the place in its
+        /// box or near it.
+        /// </summary>
+        internal bool TakesTrail(in Trail tr)
         {
-            List<Trail> list = Trails.Now;
-            if (list.Count == 0 || Trails.frame != Time.frameCount || riding || leaving || count == 0 || dt <= 0f) return;
-            if (FlightGlobals.currentMainBody != body) return;
+            if (riding || leaving || count == 0 || FlightGlobals.currentMainBody != body || nuke != null) return false;
+            if (vacuum && tr.fire <= 0.01f) return false;
+            frame.Refresh();
+            return InTrailBox(frame.ToLocal(tr.at));
+        }
+
+        /// <summary>(In this patch's own axes.) Within its box, or near enough it: by the larger of 25 m and three tenths of its half-diagonal.</summary>
+        bool InTrailBox(Vector3 at)
+        {
             float mx = (bx0 + bx1) * 0.5f, my = (by0 + by1) * 0.5f, mz = (bz0 + bz1) * 0.5f;
             float hx = (bx1 - bx0) * 0.5f, hy = (by1 - by0) * 0.5f, hz = (bz1 - bz0) * 0.5f;
             float margin = Mathf.Max(25f, 0.3f * Mathf.Sqrt(hx * hx + hy * hy + hz * hz));
-            float q = Mathf.Clamp(Settings.Quality * Air.Room(), 0.15f, 1.5f);
+            return !(Mathf.Abs(at.x - mx) > hx + margin || Mathf.Abs(at.y - my) > hy + margin || Mathf.Abs(at.z - mz) > hz + margin);
+        }
+
+        /// <summary>Each trail said this frame that is in or near this patch of air, and not had by another: puffs along the way it came. And each burst said that is (see Trails.Burst): all its puffs at once.</summary>
+        void TakeTrails(float dt)
+        {
+            List<Trail> list = Trails.Now;
+            bool trails = list.Count > 0 && Trails.frame == Time.frameCount;
+            if (!trails && Trails.Bursts.Count == 0 || riding || leaving || count == 0 || dt <= 0f) return;
+            if (FlightGlobals.currentMainBody != body) return;
             float lasting = Mathf.Max(0.3f, Settings.Smoke);
             int f = Time.frameCount;
+            // (the bursts first: their puffs were promised them when they were said, see Trails.Burst)
+            if (Trails.Bursts.Count > 0) TakeBursts(f, lasting);
+            if (!trails) return;
+            float q = Mathf.Clamp(Settings.Quality * Air.Room(), 0.15f, 1.5f);
             for (int k = 0; k < list.Count; k++)
             {
                 if (Trails.taken[k]) continue;
                 Trail tr = list[k];
                 if (vacuum && tr.fire <= 0.01f) continue;                   // (nothing for smoke to hang in out here: only flame)
                 Vector3 at = frame.ToLocal(tr.at);
-                if (Mathf.Abs(at.x - mx) > hx + margin || Mathf.Abs(at.y - my) > hy + margin || Mathf.Abs(at.z - mz) > hz + margin) continue;
+                if (!InTrailBox(at)) continue;
                 Trails.taken[k] = true;
                 Trails.Took(tr.id);
                 Vector3 going = frame.DirToLocal(tr.going);
@@ -150,6 +249,33 @@ namespace VolumetricExplosions
                 }
                 // (what could not be laid this frame is not saved up: a trail is thinner when the air is full, not laid in a lump later)
                 Trails.laid[tr.id] = new Trails.Laid { last = tr.at, due = Mathf.Min(1f, (due - n) / Mathf.Max(q, 0.01f)), seen = f };
+            }
+        }
+
+        /// <summary>
+        /// The bursts said this frame or the one before (see Trails.Burst) that are in or near this patch and not laid by another: each
+        /// its puffs at once, over a ball a little wider than the thing it was said for, moving as it was said to.
+        /// </summary>
+        void TakeBursts(int f, float lasting)
+        {
+            Trails.Prune(f);
+            List<Trails.Queued> bursts = Trails.Bursts;
+            for (int k = 0; k < bursts.Count; k++)
+            {
+                Trails.Queued b = bursts[k];
+                if (b.laid || f - b.frame > 1) continue;
+                Trail tr = b.trail;
+                if (vacuum && tr.fire <= 0.01f) continue;
+                Vector3 at = frame.ToLocal(tr.at);
+                if (!InTrailBox(at)) continue;
+                b.laid = true;
+                bursts[k] = b;
+                // (for the one who said it, a frame later: see Trails.BurstLaid)
+                Trails.Took(tr.id);
+                Vector3 going = frame.DirToLocal(tr.going);
+                float size = Mathf.Clamp(tr.size, 0.05f, 2f);
+                for (int j = 0; j < b.puffs; j++)
+                    if (!Trails.BurstPuff() || !TrailPuff(at + Random.insideUnitSphere * (1.2f * size), going, size, tr, lasting)) break;
             }
         }
 

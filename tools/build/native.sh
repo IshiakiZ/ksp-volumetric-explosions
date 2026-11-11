@@ -67,7 +67,7 @@ others() {  # others <folder to put them in>
   if command -v zig >/dev/null 2>&1; then zig="zig"; elif [ -x "$HOME/.ksp-ai-bridge/zig/zig" ]; then zig="$HOME/.ksp-ai-bridge/zig/zig"; fi
   if [ -n "$zig" ]; then
     "$zig" cc -target x86_64-windows-gnu -O3 -shared -fno-math-errno -s -I "$TMP" -o "$out/vfxgrid.dll" "$source" && rm -f "$out/vfxgrid.lib" "$out/vfxgrid.pdb"
-    [ "$(uname -s)" = Linux ] || "$zig" cc -target x86_64-linux-gnu.2.17 -O3 -shared -fPIC -fvisibility=hidden -fno-math-errno -s -I "$TMP" -o "$out/vfxgrid.so" "$source" -lm
+    [ "$(uname -s)" = Linux ] || "$zig" cc -target x86_64-linux-gnu.2.17 -O3 -shared -fPIC -fvisibility=hidden -fno-math-errno -s -I "$TMP" -o "$out/vfxgrid.so" "$source" -lm -lpthread
   elif command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
     x86_64-w64-mingw32-gcc -O3 -shared -fno-math-errno -s -static-libgcc -I "$TMP" -o "$out/vfxgrid.dll" "$source"
   else

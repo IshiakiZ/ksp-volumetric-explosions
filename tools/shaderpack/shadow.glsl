@@ -34,6 +34,8 @@ uniform vec4 _ShadowGridY;
 uniform vec4 _ShadowGridZ;
 uniform vec4 _ShadowSun;       // xyz: towards the sun, in the grid box's own axes (and its sizes); w: how dark a shadow may be (0: none)
 uniform vec4 _ShadowSunWorld;  // xyz: towards the sun, in the scene's axes; w: how wide the sun looks, radians
+uniform vec4 _ShadowSky;       // xyz: a few metres straight up, in the grid box's own axes; w: how much of the light on the ground is the sky's (0: none to take)
+uniform vec4 _ShadowSkyKeep;   // x: how much of the smoke over a place a few metres up is still counted at the place (the grid's sky light fades with the height of the smoke over it, in a rising column)
 uniform vec4 _VolFlow;         // as the smoke's own (volume.glsl): x twice how far the fastest smoke on the grid has gone since the grid was made, m; z the farthest it is carried on, m
 uniform vec4 _VolSize;         // xyz: the size of the grid's box, m
 uniform sampler3D _Volume;
@@ -58,34 +60,64 @@ void main()
     float size = length(facing);
     facing = size > 1e-8 ? facing / size : -rd;
     if (dot(facing, rd) > 0.0) facing = -facing;
-    float lit = clamp(dot(facing, _ShadowSunWorld.xyz) * 4.0, 0.0, 1.0);
-    if (lit <= 0.0) discard;
-    // Into the grid's box, on the way to the sun.
+    float lit = _ShadowSun.w > 0.0 ? clamp(dot(facing, _ShadowSunWorld.xyz) * 4.0, 0.0, 1.0) : 0.0;
     vec3 p = vec3(dot(_ShadowGridX.xyz, place) + _ShadowGridX.w, dot(_ShadowGridY.xyz, place) + _ShadowGridY.w, dot(_ShadowGridZ.xyz, place) + _ShadowGridZ.w);
-    vec3 d = _ShadowSun.xyz;
-    vec3 safe = vec3(abs(d.x) < 1e-6 ? 1e-6 : d.x, abs(d.y) < 1e-6 ? 1e-6 : d.y, abs(d.z) < 1e-6 ? 1e-6 : d.z);
-    vec3 ta = (vec3(-0.5) - p) / safe, tb = (vec3(0.5) - p) / safe;
-    vec3 lo = min(ta, tb), hi = max(ta, tb);
-    float t0 = max(max(lo.x, lo.y), max(lo.z, 0.0)), t1 = min(min(hi.x, hi.y), hi.z);
-    if (t1 <= t0) discard;
-    vec3 e = clamp(p + d * (t0 + 1e-3 * (t1 - t0)), vec3(-0.5), vec3(0.5));
-    // Carried on, as the smoke itself is between one grid and the next (volume.glsl): the grid is a moment old, so it is
-    // read where the smoke now on the way to the sun was when the grid was made, and the shadow goes along with the smoke.
-    vec4 going = textureLod(_Flow, e + 0.5, 0.0);
-    vec3 gone = (going.xyz - 0.5) * _VolFlow.x;
-    gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
-    e = clamp(e - gone / max(_VolSize.xyz, vec3(1e-3)), vec3(-0.5), vec3(0.5));
-    vec4 air = textureLod(_Volume, e + 0.5, 0.0);
-    float before = (air.r * 0.99611 + air.g * 0.0038911) * 16.0;
-    // (as the smoke's own light reckons it: a part of the sunlight finds its way round inside a cloud)
-    float through = 0.8 * exp(-before) + 0.2 * exp(-0.25 * before);
-    float dark = _ShadowSun.w * lit * (1.0 - through);
-    // (The sun is a disc, not a point: a shadow is as soft as the sun is wide seen from where it falls, by how far off the
-    // smoke is. Under a cloud a few metres up it is sharp; under a rocket's trail thirty kilometres up, which is some tens of
-    // metres wide and whose shadow is spread over a kilometre, it is nothing to be seen. Drawn as sharp from any height,
-    // the trails of a launch lay dark lines across the ground far below.)
-    float wide = 0.5 * min(_VolSize.x, min(_VolSize.y, _VolSize.z));
-    dark *= wide / (wide + _ShadowSunWorld.w * t0);
+    // The sky's light the smoke takes (since 2026-11-04): what lies on the ground in smoke is lit by less of the sky than the
+    // open ground round it, on every face, whichever way the sun is or under an overcast with none. Only the smoke within a few
+    // metres over the place counts (how much there is straight up from it less how much from a few metres higher): a cloud
+    // high above takes little of the sky from it, smoke lying on it takes most. (Before, the ground under smoke lying on it
+    // was as light as the open ground beside it in all but the sun's shadow, and in the shade or under an overcast, the smoke
+    // stood on it as if it were not touching.)
+    float skyDark = 0.0;
+    // (less than nought: every place inside the grid's box darkened by that much, to see where it reaches; a development build's TestGroundShade 3)
+    if (_ShadowSky.w < 0.0 && max(abs(p.x), max(abs(p.y), abs(p.z))) <= 0.5) skyDark = -_ShadowSky.w;
+    if (_ShadowSky.w > 0.0 && max(abs(p.x), max(abs(p.y), abs(p.z))) <= 0.5)
+    {
+        // (carried on with the smoke, as the sun's shadow is below: the grid is a moment old)
+        vec4 going = textureLod(_Flow, p + 0.5, 0.0);
+        vec3 gone = (going.xyz - 0.5) * _VolFlow.x;
+        gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
+        vec3 q = clamp(p - gone / max(_VolSize.xyz, vec3(1e-3)), vec3(-0.5), vec3(0.5));
+        float here = textureLod(_Volume, q + 0.5, 0.0).b;
+        float over = textureLod(_Volume, clamp(q + _ShadowSky.xyz, vec3(-0.5), vec3(0.5)) + 0.5, 0.0).b;
+        // (what is over the place counts as near it where the grid can say no more: as much smoke over it as the grid holds,
+        // a few metres up as well, is a place deep in thick smoke)
+        float near = over > 0.996 ? here : max(here - _ShadowSkyKeep.x * over, 0.0);
+        skyDark = _ShadowSky.w * (1.0 - exp(-8.0 * near));
+    }
+    float dark = 0.0;
+    if (lit > 0.0)
+    {
+        // Into the grid's box, on the way to the sun.
+        vec3 d = _ShadowSun.xyz;
+        vec3 safe = vec3(abs(d.x) < 1e-6 ? 1e-6 : d.x, abs(d.y) < 1e-6 ? 1e-6 : d.y, abs(d.z) < 1e-6 ? 1e-6 : d.z);
+        vec3 ta = (vec3(-0.5) - p) / safe, tb = (vec3(0.5) - p) / safe;
+        vec3 lo = min(ta, tb), hi = max(ta, tb);
+        float t0 = max(max(lo.x, lo.y), max(lo.z, 0.0)), t1 = min(min(hi.x, hi.y), hi.z);
+        if (t1 > t0)
+        {
+            vec3 e = clamp(p + d * (t0 + 1e-3 * (t1 - t0)), vec3(-0.5), vec3(0.5));
+            // Carried on, as the smoke itself is between one grid and the next (volume.glsl): the grid is a moment old, so it is
+            // read where the smoke now on the way to the sun was when the grid was made, and the shadow goes along with the smoke.
+            vec4 going = textureLod(_Flow, e + 0.5, 0.0);
+            vec3 gone = (going.xyz - 0.5) * _VolFlow.x;
+            gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
+            e = clamp(e - gone / max(_VolSize.xyz, vec3(1e-3)), vec3(-0.5), vec3(0.5));
+            vec4 air = textureLod(_Volume, e + 0.5, 0.0);
+            float before = (air.r * 0.99611 + air.g * 0.0038911) * 16.0;
+            // (as the smoke's own light reckons it: a part of the sunlight finds its way round inside a cloud)
+            float through = 0.8 * exp(-before) + 0.2 * exp(-0.25 * before);
+            dark = _ShadowSun.w * lit * (1.0 - through);
+            // (The sun is a disc, not a point: a shadow is as soft as the sun is wide seen from where it falls, by how far off the
+            // smoke is. Under a cloud a few metres up it is sharp; under a rocket's trail thirty kilometres up, which is some tens of
+            // metres wide and whose shadow is spread over a kilometre, it is nothing to be seen. Drawn as sharp from any height,
+            // the trails of a launch lay dark lines across the ground far below.)
+            float wide = 0.5 * min(_VolSize.x, min(_VolSize.y, _VolSize.z));
+            dark *= wide / (wide + _ShadowSunWorld.w * t0);
+        }
+    }
+    // (the two together, as light taken first by the one and then by the other)
+    if (skyDark > 0.0) dark = 1.0 - (1.0 - dark) * (1.0 - skyDark);
     if (!(dark > 0.004)) discard;
     SV_Target0 = vec4(vec3(1.0 - min(dark, 0.95)), 1.0);
 }

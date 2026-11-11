@@ -2,7 +2,8 @@ Volumetric Explosions @VERSION@
 for Kerbal Space Program 1.12.x
 
 The game's explosions as a simulation of fire, smoke and dust, drawn as a true volume.
-It needs no other mod.
+It needs no other mod. With BD Armory installed, BD Armory's explosions, fire and smoke are
+drawn the same way (Alt-B, or Option-B on a Mac, flips between these and BD Armory's own).
 
 INSTALL
   Copy the folder VolumetricExplosions from this download into your KSP's

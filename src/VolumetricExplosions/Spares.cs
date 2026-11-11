@@ -33,14 +33,21 @@ namespace VolumetricExplosions
         /// <summary>
         /// The most memory kept in grids, bytes: three patches' worth where the library makes the grids (a patch is some 15 MB, most of
         /// it the sixty grids that carry its smoke on between grids), one and a half where C# does. (No more than the game's memory
-        /// had grown to hold them anyway: the runtime's collector does not give what it frees back to the system.)
+        /// had grown to hold them anyway: the runtime's collector does not give what it frees back to the system.) As much more as
+        /// there may be more patches than nine (Settings.Patches, since 2026-11-04: in a battle they come and go the faster).
         /// </summary>
-        const long Most = 48L << 20;
-        /// <summary>The most textures kept of each size and kind: nine patches' worth (a patch has five of the one kind), as the warm-up
-        /// makes (see Site.PutByTextures).</summary>
-        const int MostTextures = 48;
+        static long Most => (48L << 20) * ForPatches / 9;
+        /// <summary>The most textures kept of each size and kind: as many patches' worth as there may be patches (a patch has five of
+        /// the one kind), and three over, as the warm-up makes (see Site.PutByTextures): 48 for nine, as until 2026-11-04.</summary>
+        static int MostTextures => 5 * ForPatches + 3;
+        /// <summary>The most memory kept in lists of particles (see TakeList), bytes, apart from the grids: some eight of the largest a
+        /// trail's patch holds (16384 particles, the list of them and the grid's copy 4 MB each, what is drawn of them 2.3 MB), with
+        /// nine patches; as much more as there may be more.</summary>
+        static long MostLists => (32L << 20) * ForPatches / 9;
+        static int ForPatches => Mathf.Clamp(Settings.Patches, 9, 15);      // (as many patches as there may be, nine at the least)
 
-        static long kept;
+        static long kept, keptLists;
+        static int listsReused, listsMade;
         static readonly object locked = new object();
         static readonly List<Action> drops = new List<Action>();
         static readonly List<Func<string>> says = new List<Func<string>>();
@@ -128,6 +135,58 @@ namespace VolumetricExplosions
         }
 
         static int dropped;           // (how many times everything has been let go: an array still being cleared then is let go too)
+
+        /// <summary>
+        /// A list for a patch's particles (or for what is drawn of them) of so many, cleared: one put away (see GiveList), or a new one.
+        /// Kept apart from the grids, under a most of their own (2026-10-25). A rocket's trail begins a patch every few seconds and
+        /// makes two old ones one as often (see Air.Merge), the one they go into growing its lists at once to hold both (8192 or
+        /// 16384 particles, 2 to 4 MB a list) and the lists of the two let go a second later: made new each time, these and the
+        /// grids made ahead for the patches to come (see Site.TopUp) had the collector sweep every four seconds or so, 15 to 20 ms
+        /// each time, the frame it fell in 30 to 50 ms (the Windows PC, a straight climb of win_pad's Kerbal X).
+        /// </summary>
+        public static T[] TakeList<T>(int n) where T : struct
+        {
+            T[] a = null;
+            lock (locked)
+            {
+                if (Of<T>.Kept.TryGetValue(n, out Stack<T[]> stack) && stack.Count > 0)
+                {
+                    a = stack.Pop();
+                    keptLists -= (long)n * Of<T>.Size;
+                    listsReused++;
+                }
+                else listsMade++;
+            }
+            return a ?? new T[n];
+        }
+
+        /// <summary>Put a list of particles away for another patch (or let it go, where enough are kept already), cleared first on a worker as a grid is (see Give).</summary>
+        public static void GiveList<T>(T[] a) where T : struct
+        {
+            if (a == null || a.Length == 0) return;
+            long size = (long)a.Length * Of<T>.Size;
+            int round;
+            lock (locked)
+            {
+                if (keptLists + size > MostLists) return;
+                keptLists += size;
+                round = dropped;
+            }
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                Array.Clear(a, 0, a.Length);
+                lock (locked) { if (round == dropped) Put(a); }
+            });
+        }
+
+        /// <summary>A list of so many holding what a held at its beginning (as Array.Resize makes it), and a put away for another patch (see TakeList). Nothing may be working on a.</summary>
+        public static T[] Grown<T>(T[] a, int n) where T : struct
+        {
+            T[] b = TakeList<T>(n);
+            Array.Copy(a, b, Math.Min(a.Length, n));
+            GiveList(a);
+            return b;
+        }
 
         /// <summary>Every array of a list of them put away, and the list emptied.</summary>
         public static void GiveAll<T>(T[][] list) where T : struct
@@ -223,7 +282,7 @@ namespace VolumetricExplosions
             lock (locked)
             {
                 foreach (Action drop in drops) drop();
-                kept = 0;
+                kept = keptLists = 0;
                 dropped++;
             }
             Native.Drop();
@@ -244,10 +303,10 @@ namespace VolumetricExplosions
         {
             int count = 0;
             foreach (Stack<Texture3D> stack in textures.Values) count += stack.Count;
-            long now;
-            lock (locked) now = kept;
-            return (now / 1048576.0).ToString("F1") + " MB of grids and " + count + " volume textures kept for the next patches; so far " + reused + " grids and " + texturesReused + " textures used again, "
-                   + made + " grids and " + texturesMade + " textures made new; " + Patches + " patches made (" + Riding + " riding on ships);" + Kinds();
+            long now, lists;
+            lock (locked) { now = kept; lists = keptLists; }
+            return (now / 1048576.0).ToString("F1") + " MB of grids, " + (lists / 1048576.0).ToString("F1") + " MB of lists of particles and " + count + " volume textures kept for the next patches; so far " + reused + " grids, "
+                   + listsReused + " lists and " + texturesReused + " textures used again, " + made + " grids, " + listsMade + " lists and " + texturesMade + " textures made new; " + Patches + " patches made (" + Riding + " riding on ships);" + Kinds();
         }
     }
 }

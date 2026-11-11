@@ -66,6 +66,30 @@ namespace VolumetricExplosions
         }
 
         /// <summary>
+        /// (Since 0.10.0.) Embers off a fire on the ground (see Site.Ember): glowing bits of what burns, carried up in its hot gas and
+        /// fluttering as they go, dimming from orange to a dull red and out within a few seconds. No fall: the gas holds them up, and
+        /// they lose the speed it gives them as it slows.
+        /// </summary>
+        public static ParticleSystem Embers(Transform parent, float air)
+        {
+            ParticleSystem system = New(parent, "Embers", Assets.Spark, -30f, 600);
+            Fall(system, 0f, 0.45f * Mathf.Max(0.3f, air));
+            Fade(system, new[] { new Color(1f, 0.8f, 0.45f), new Color(1f, 0.45f, 0.12f), new Color(0.55f, 0.1f, 0.02f) }, new[] { 0.95f, 0.85f, 0f }, 0.5f);
+            ParticleSystem.NoiseModule flutter = system.noise;
+            flutter.enabled = true;
+            flutter.strength = 1.4f;
+            flutter.frequency = 0.4f;
+            flutter.scrollSpeed = 0.5f;
+            flutter.damping = false;
+            flutter.quality = ParticleSystemNoiseQuality.Low;
+            // (never less than a pixel or two across: a tenth of a metre a hundred metres off is less than a pixel, and a thing that
+            // small comes and goes from frame to frame with the pixels it falls on, a twinkling where a camera sees steady dots)
+            system.GetComponent<ParticleSystemRenderer>().minParticleSize = 0.0022f;
+            system.Play(false);
+            return system;
+        }
+
+        /// <summary>
         /// Dust thrown off airless ground by an engine's jet (see Site.Regolith): streaks flying out low along the ground in straight
         /// lines, nothing to slow them or hold them up, falling back at the world's own pull. They fly in the world, not with the
         /// ship whose jet threw them.
@@ -215,12 +239,17 @@ namespace VolumetricExplosions
             AudioSource from = stockEffect != null ? stockEffect.GetComponent<AudioSource>() : null;
             var to = root.AddComponent<AudioSource>();
             to.playOnAwake = false;
+            // (switched off on the original, so that a copy cannot start its rumble by itself before the copy's Blast has made it
+            // deaf; Blast.Awake switches it on: a blast 1 km off gave a burst of 30 ms at the flash, 2026-11-03)
+            to.enabled = false;
             if (from == null)
             {
-                to.spatialBlend = 1f;
-                to.rolloffMode = AudioRolloffMode.Linear;
+                // (falling as one over the distance from 10 m, 60 dB down at 10 km, not the linear fall-off, which cuts a sound off
+                // dead at its farthest: docs/sound-rules.md, P3)
+                to.spatialBlend = 1f; to.dopplerLevel = 0f;
+                to.rolloffMode = AudioRolloffMode.Logarithmic;
                 to.minDistance = 10f;
-                to.maxDistance = 2500f;
+                to.maxDistance = 10000f;
                 return;
             }
             // Most of the bang is not the sound the game plays on top (that is only the crack): the stock

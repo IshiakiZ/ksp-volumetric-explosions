@@ -6,6 +6,19 @@
 // of the processor to keep up with. That in turn slowed the game's own threads by more than all the
 // drawing did. The same sums in C take a few milliseconds on one thread.
 //
+// Since 2026-11-09 a grid is made on a few threads for a few milliseconds, where the processor has them to spare (a
+// quarter of its threads at most, four at most, and one more): a big fire's grid had come to take 15 ms early and 35 ms
+// late in its life on one thread, more than a frame, so that the flame, which is drawn from the grid, stepped every
+// second or third frame while the smoke moved every frame (TODO item 18). On the threads the same grids take 10 to 12
+// ms (measured on the Windows PC, Air.NativeCheck: 9.7 to 12.2 ms for 18.7 to 29.3 on one thread). The particles are
+// laid by up to four threads, each with layers of the grid of its own (see deposit), and what the smoke carries with it
+// (carry), which shares nothing with the rest, is worked out beside it on a thread of its own. Every cell still gets
+// the same sums in the same order, so the grid is the same to the last bit whatever the number of threads
+// (Air.NativeCheck makes it both ways and counts the numbers that differ: none in 24 grids of a fire on 2, 3, 4 and 8
+// threads). This is not the every-core load of the first paragraph: three or four threads for a few milliseconds a
+// grid, begun and ended within the grid, with no more work in all than before. vfx_threads(1) puts all of it back on
+// the calling thread.
+//
 // This follows the C# function for function and line for line: the same sums in the same order, so that
 // what comes out is the same to within the last rounding (the game's runtime carries some sums at higher
 // precision on the way; the development build can make a grid both ways and compare, see Site.NativeCheck).
@@ -21,6 +34,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <pthread.h>
+#include <unistd.h>
+#endif
 #include "p.h"
 
 #define G 64
@@ -39,6 +58,10 @@
 // (Windows' own clock, asked for by name: none of its headers is needed for anything else)
 __declspec(dllimport) int __stdcall QueryPerformanceCounter(int64_t *count);
 __declspec(dllimport) int __stdcall QueryPerformanceFrequency(int64_t *frequency);
+// (and its threads' ends, the same way: begun by the C library's own _beginthreadex)
+__declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void *handle, unsigned long milliseconds);
+__declspec(dllimport) int __stdcall CloseHandle(void *handle);
+__declspec(dllimport) unsigned long __stdcall GetActiveProcessorCount(unsigned short group);
 #else
 #define EXPORT __attribute__((visibility("default")))
 #endif
@@ -56,6 +79,7 @@ typedef struct Grid
     float skyX, skyY, skyZ;                              // which way is up, in the grid's own axes: as a rule its second, but the grid of an engine's trail is turned to lie along the trail
     float thickest, thickestFlame, something, restFar, mostBefore, mostAbove;
     float fastest;                                       // (comes back)
+    float shadeSun, shadeSky;                            // how far towards the sun, and the sky, the smoke in the way of a cell is counted, metres (nought: all of it: see Site.Follow)
     float *sunThrough, *skyThrough;                      // G3 each
     float **carry;                                       // CARRIED grids of A3
     uint8_t *cellsA, *cellsB, *cellsC, *cellsD;          // four bytes a cell: G3, G3, A3, A3 cells
@@ -65,8 +89,18 @@ typedef struct Grid
     uint8_t *cellsE;                                     // four bytes a cell, A3 cells: whose turn it is there (the point of its round the smoke is at, for the big billows' three reckonings and for the small ones')
     float *strain;                                       // A3: (comes back) how fast the smoke is being pulled out of shape at each cell, per second
     const float *bells;                                  // BELL_STEPS numbers: how much a reckoning counts by how far through its life it is (see Site.BellAt)
-    int64_t nanoseconds[8];                              // (comes back) what each part took: 1 the particles, 2 the sun, 3 the sky, 4 round about, 5 carry, 7 packing
+    int64_t nanoseconds[8];                              // (comes back) what each part took: 1 the particles, 2 the sun, 3 the sky, 4 round about, 5 carry, 7 packing; 6 how much of those was at the same time as another of them (carry on a thread of its own), to be taken from their sum for the time the grid took
 } Grid;
+
+// What one particle is to put on the grid, written down before any of it is put there (see deposit).
+typedef struct Laid
+{
+    float px, py, pz, qx, qy, qz;                        // its middle as laid, and one over its reach squared each way
+    float s, sl, sd, f, fh;                              // what a whole cell of it gets: smoke, pale, dusty, flame, hotness
+    float wide, follows, ground, down, cut, squash, ry;  // for one lying on the ground (see stand_row)
+    int32_t i0, i1, j0, j1, k0, k1;                      // the cells it reaches
+    int32_t level, resting;                              // which of the grids it goes on (-1: nothing of it is laid); whether it lies on the ground
+} Laid;
 
 // Room to work in, kept from one grid to the next: one for each site.
 typedef struct Work
@@ -79,10 +113,10 @@ typedef struct Work
     float *carried, *carriedTemp;                        // CARRIED numbers for each cell of the coarser grid, side by side (see carry)
     float line[A];
     float sums[CARRIED];
-    float stand[G2];                                     // (see deposit: where each column of a puff lying on the ground stands, and which cells of it the puff reaches)
-    int rows[2 * G];
     uint8_t *known, *clear;
     int wideUsed[LEVELS];
+    Laid *laid;                                          // one for each particle of the grid in the making: made, and made longer, as particles come (see deposit)
+    int laidRoom;
 } Work;
 
 static uint8_t rootByte[65536];
@@ -148,7 +182,7 @@ static void release(Work *w)
     for (int level = 1; level < LEVELS; level++) for (int c = 0; c < 5; c++) free(w->wide[level][c]);
     free(w->spare0); free(w->spare1); free(w->layer[0]); free(w->layer[1]);
     free(w->anything); free(w->roundSmoke); free(w->roundPale); free(w->roundDust); free(w->carried); free(w->carriedTemp);
-    free(w->known); free(w->clear);
+    free(w->known); free(w->clear); free(w->laid);
     free(w);
 }
 
@@ -200,23 +234,135 @@ EXPORT void *vfx_new(void)
     return w;
 }
 
+// ---------------------------------------------------------------- a few threads for a grid's making
+
+// A piece of a grid's making on a thread of its own, begun and waited for within the one grid, so that none is kept
+// waiting between grids: beginning and ending one costs little against the milliseconds of work it is given.
+#define MOST_THREADS 8
+typedef struct Job
+{
+    void (*run)(void *);
+    void *with;
+#ifdef _WIN32
+    uintptr_t thread;
+#else
+    pthread_t thread;
+#endif
+    int started;
+} Job;
+
+#ifdef _WIN32
+static unsigned __stdcall job_run(void *job) { Job *j = (Job *)job; j->run(j->with); return 0; }
+#else
+static void *job_run(void *job) { Job *j = (Job *)job; j->run(j->with); return NULL; }
+#endif
+
+// (where no thread is to be had, the work is done here and now)
+static void job_begin(Job *j, void (*run)(void *), void *with)
+{
+    j->run = run; j->with = with;
+#ifdef _WIN32
+    j->thread = _beginthreadex(NULL, 0, job_run, j, 0, NULL);
+    j->started = j->thread != 0;
+#else
+    j->started = pthread_create(&j->thread, NULL, job_run, j) == 0;
+#endif
+    if (!j->started) run(with);
+}
+
+static void job_end(Job *j)
+{
+    if (!j->started) return;
+#ifdef _WIN32
+    WaitForSingleObject((void *)j->thread, 0xffffffffu);
+    CloseHandle((void *)j->thread);
+#else
+    pthread_join(j->thread, NULL);
+#endif
+    j->started = 0;
+}
+
+// How many threads the processor runs at once.
+static int processors(void)
+{
+    static int found;
+    if (found == 0)
+    {
+#ifdef _WIN32
+        int n = (int)GetActiveProcessorCount(0xffff);
+#else
+        int n = (int)sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+        found = n < 1 ? 1 : n;
+    }
+    return found;
+}
+
+// How many threads a grid's particles are laid by, and whether carry has one of its own: nought, as the processor
+// allows; one, everything on the calling thread, as until 2026-11-09; more, so many for the particles and carry apart.
+static int threadsAsked;
+EXPORT void vfx_threads(int n) { threadsAsked = n < 0 ? 0 : n > MOST_THREADS ? MOST_THREADS : n; }
+
 // ---------------------------------------------------------------- the particles onto the grid (Site.Deposit)
 
 static const float Narrowing[LEVELS] = { 1.5f, 1.5f * 5.0f, 1.5f * 21.0f, 1.5f * 85.0f };
 static const int FloorsAt[LEVELS] = { 0, G2, G2 + G2 / 4, G2 + G2 / 4 + G2 / 16 };
+// How the grid meets the ground (Grid.floored, see Site.GroundWays): the lowest two bits how a puff lying on it is laid (1 as until
+// 2026-11-04, 2 half sunk, 3 flat-bottomed), then 4 the ground not counted as an edge round about, 8 the foot not carried up off it.
+#define CONTACT_WAY 3
+#define CONTACT_SUNK 2
+#define CONTACT_FLAT 3
+#define BASE_BILLOWS 4
+#define FOOT_CARRY 8
+#define SUNK 0.45f
+#define SQUASH 0.25f
 
-static void deposit(Work *w, const Grid *g)
+// Where one column-row of a puff lying on the ground stands: the middle of the ball in each column of the row (stand, by
+// the column's number), and the first and last cells up the columns that the puff can reach there (see the C#).
+static inline void stand_row(const Laid *p, const float *lieRow, float y0, float iy, int side, float *stand, int *first, int *last)
 {
+    float py = p->py, ground = p->ground, wide = p->wide, follows = p->follows;
+    float lowest = 0.0f, highest = 0.0f, lowFloor = 3.40282347e38f;
+    for (int c = p->i0; c <= p->i1; c++)
+    {
+        float lie = lieRow[c], shift = lie - ground;
+        if (lie < lowFloor) lowFloor = lie;
+        if (shift > wide) shift = wide; else if (shift < -wide) shift = -wide;
+        shift *= follows;
+        if (shift < lowest) lowest = shift; else if (shift > highest) highest = shift;
+        stand[c] = py + shift;
+    }
+    float reachTo = py + lowest - p->down, cutAt = lowFloor - p->cut;
+    if (reachTo < cutAt) reachTo = cutAt;
+    int ja = to_int((reachTo - y0) * iy), jb = to_int((py + highest + p->ry - y0) * iy);
+    if (ja < 0) ja = 0; if (jb > side - 1) jb = side - 1;
+    *first = ja; *last = jb;
+}
+
+// One thread's share of a work area's particles, or of the grid's rows (see deposit).
+typedef struct Share { Work *w; const Grid *g; int turn, turns; } Share;
+
+#define MEASURED_TOGETHER 64
+
+// The first half of Site.Deposit, for every particle of this thread's (sixty-four together, by turns): where it goes
+// and how much each cell of it is to get, written down; nothing is put on the grid.
+static void measure_some(void *share)
+{
+    const Share *mine = (const Share *)share;
+    const Grid *g = mine->g;
+    Laid *laid = mine->w->laid;
     const P *a = g->particles;
     int count = g->count;
     float x0 = g->x0, y0 = g->y0, z0 = g->z0, hx = g->dX, hy = g->dY, hz = g->dZ, least = g->leastReach;
     float widest = hx > (hy > hz ? hy : hz) ? hx : (hy > hz ? hy : hz), ihx = 1.0f / hx, ihz = 1.0f / hz;
-    int drawn = g->drawn;
+    int drawn = g->drawn, contactWay = g->floored & CONTACT_WAY;
     const float *lieOf = g->floors;
-    float *stand = w->stand;
-    int *rowsOf = w->rows;
-    for (int i = 0; i < count; i++)
+    float stand[G];
+    for (int from = mine->turn * MEASURED_TOGETHER; from < count; from += mine->turns * MEASURED_TOGETHER)
+    for (int i = from; i < count && i < from + MEASURED_TOGETHER; i++)
     {
+        Laid *p = &laid[i];
+        p->level = -1;
         float r = a[i].r, heat = a[i].heat, life = a[i].life, age = a[i].age;
         if (r <= 0.01f || life < 0.0f) continue;
         float fade = life - age < life * 0.22f ? (life - age) / (life * 0.22f) : 1.0f;
@@ -234,9 +380,9 @@ static void deposit(Work *w, const Grid *g)
         {
             float u = (px - g->keepX0 < g->keepX1 - px ? px - g->keepX0 : g->keepX1 - px) * g->fadeX, v = (py - g->keepY0 < g->keepY1 - py ? py - g->keepY0 : g->keepY1 - py) * g->fadeY,
                   w3 = (pz - g->keepZ0 < g->keepZ1 - pz ? pz - g->keepZ0 : g->keepZ1 - pz) * g->fadeZ;
-            float share = u < v ? (u < w3 ? u : w3) : (v < w3 ? v : w3);
-            if (share <= 0.0f) continue;
-            if (share < 1.0f) { smoke *= share; flame *= share; }
+            float share3 = u < v ? (u < w3 ? u : w3) : (v < w3 ? v : w3);
+            if (share3 <= 0.0f) continue;
+            if (share3 < 1.0f) { smoke *= share3; flame *= share3; }
         }
         float reach = 1.474f * r;
         if (reach < least) reach = least;
@@ -276,43 +422,45 @@ static void deposit(Work *w, const Grid *g)
         ry = ry > fy * fy ? root_(ry) : fy;
         rz = rz > fz * fz ? root_(rz) : fz;
         /* (its foot on the ground even where the grid cannot make it as flat as it should be, a flame standing on what burns: see the C#) */
+        /* (and since 2026-11-04 smoke lying on the ground laid with smoke at the ground itself: half sunk into it, what is under
+           the ground left out and counted back into the rest, or flat-bottomed, its lower half drawn out into the ground; the
+           cells filled one cell under the ground as well as over it; see the C#) */
+        int contact = 0;
         if (resting && flame > 1e-4f) py = ground + 0.35f * ry;
+        else if (resting && contactWay >= CONTACT_SUNK)
+        {
+            contact = 1;
+            if (contactWay == CONTACT_SUNK) py = ground + tall * (1.0f - follows * (1.0f - SUNK));
+            else if (py - ry < ground) py = ground + (tall > 0.5f * ry ? tall : 0.5f * ry);
+        }
         else if (resting && py - ry < ground) py = ground + (tall > 0.5f * ry ? tall : 0.5f * ry);
+        float squash = contact && contactWay == CONTACT_FLAT ? 1.0f - follows * (1.0f - SQUASH) : 1.0f, down = ry / squash, cut = contact ? ly : 1e30f;
         int side = G >> level;
         float ix = 1.0f / lx, iy = 1.0f / ly, iz = 1.0f / lz;
         int i0 = to_int((px - rx - x0) * ix), i1 = to_int((px + rx - x0) * ix), j0 = to_int((py - ry - y0) * iy), j1 = to_int((py + ry - y0) * iy), k0 = to_int((pz - rz - z0) * iz), k1 = to_int((pz + rz - z0) * iz);
         if (i0 < 0) i0 = 0; if (j0 < 0) j0 = 0; if (k0 < 0) k0 = 0;
         if (i1 > side - 1) i1 = side - 1; if (j1 > side - 1) j1 = side - 1; if (k1 > side - 1) k1 = side - 1;
-        if (resting)
-        {
-            // Each column of it stands on the ground under that column: where the middle of the ball is in each
-            // column it reaches, and which cells of that column it can reach (see the C#).
-            int lieAt = FloorsAt[level];
-            for (int k = k0; k <= k1; k++)
-            {
-                int lieRow = lieAt + k * side, standRow = k * side;
-                float lowest = 0.0f, highest = 0.0f;
-                for (int c = i0; c <= i1; c++)
-                {
-                    float shift = lieOf[lieRow + c] - ground;
-                    if (shift > wide) shift = wide; else if (shift < -wide) shift = -wide;
-                    shift *= follows;
-                    if (shift < lowest) lowest = shift; else if (shift > highest) highest = shift;
-                    stand[standRow + c] = py + shift;
-                }
-                int ja = to_int((py + lowest - ry - y0) * iy), jb = to_int((py + highest + ry - y0) * iy);
-                if (ja < 0) ja = 0; if (jb > side - 1) jb = side - 1;
-                rowsOf[2 * k] = ja; rowsOf[2 * k + 1] = jb;
-            }
-        }
         float qx = 1.0f / (rx * rx), qy = 1.0f / (ry * ry), qz = 1.0f / (rz * rz), total;
+        // (written down here, as stand_row reads them: where each column of a puff lying on the ground stands, and which
+        // cells of it the puff reaches, are worked out a row at a time as they are wanted, here and in lay_some)
+        p->px = px; p->py = py; p->pz = pz; p->qx = qx; p->qy = qy; p->qz = qz;
+        p->wide = wide; p->follows = follows; p->ground = ground; p->down = down; p->cut = cut; p->squash = squash; p->ry = ry;
+        p->i0 = i0; p->i1 = i1; p->j0 = j0; p->j1 = j1; p->k0 = k0; p->k1 = k1; p->resting = resting;
         // (How far each cell of a row is from the middle of the ball along the row, squared, over the ball's width
         // squared: the same for every row of the ball, so worked out once and not for every cell of every row.)
         float along[G];
         for (int c = i0; c <= i1; c++) { float dx = x0 + (c + 0.5f) * lx - px; along[c] = dx * dx * qx; }
         if (rx >= 3.2f * lx && ry >= 3.2f * ly && rz >= 3.2f * lz)
         {
-            total = 0.95744f * rx * ry * rz * ix * iy * iz;
+            if (!contact) total = 0.95744f * rx * ry * rz * ix * iy * iz;
+            else
+            {
+                // (lying on the ground, its upper half whole and its lower half down to a cell under the ground: see the C#)
+                float low = py - ground + ly;
+                if (low > down) low = down;
+                float u2 = low * low / (down * down);
+                total = rx * rz * ix * iy * iz * (0.47872f * ry + 1.0471976f * low * (1.0f - u2 * (1.0f - u2 * (0.6f - u2 * 0.14285714f))));
+            }
         }
         else if (!resting)
         {
@@ -341,13 +489,18 @@ static void deposit(Work *w, const Grid *g)
             {
                 float dz = z0 + (k + 0.5f) * lz - pz, wz = 1.0f - dz * dz * qz;
                 if (wz <= 0.0f) continue;
-                int standRow = k * side, jb = rowsOf[2 * k + 1];
-                for (int j = rowsOf[2 * k]; j <= jb; j++)
+                const float *lieRow = lieOf + FloorsAt[level] + k * side;
+                int ja, jb;
+                stand_row(p, lieRow, y0, iy, side, stand, &ja, &jb);
+                for (int j = ja; j <= jb; j++)
                 {
                     float y = y0 + (j + 0.5f) * ly;
                     for (int c = i0; c <= i1; c++)
                     {
-                        float dy = y - stand[standRow + c], wt = wz - dy * dy * qy - along[c];
+                        if (y < lieRow[c] - cut) continue;
+                        float dy = y - stand[c];
+                        if (dy < 0.0f) dy *= squash;
+                        float wt = wz - dy * dy * qy - along[c];
                         if (wt > 0.0f) total += wt * wt;
                     }
                 }
@@ -359,12 +512,44 @@ static void deposit(Work *w, const Grid *g)
         float light = (a[i].ar + a[i].ag + a[i].ab) * 0.3333f;
         float warm = a[i].ar > 1e-3f ? (a[i].ar - a[i].ab) / a[i].ar * 2.5f : 0.0f;
         float sl = s * light, sd = s * (warm < 0.0f ? 0.0f : warm > 1.0f ? 1.0f : warm), fh = f * (heat > 1.2f ? 1.2f : heat);
+        p->s = s; p->sl = sl; p->sd = sd; p->f = f; p->fh = fh;
+        p->level = level;
+    }
+}
+
+// The second half of Site.Deposit: every particle, in their order, put on the grid, in those of the grid's layers (its
+// third axis) that are this thread's: each thread has every layer whose number, over the number of threads, leaves its
+// own. So every cell is written by one thread alone, and is given its particles in the order one thread would give them.
+static void lay_some(void *share)
+{
+    const Share *mine = (const Share *)share;
+    const Grid *g = mine->g;
+    Work *w = mine->w;
+    const Laid *laid = w->laid;
+    int count = g->count, turn = mine->turn, turns = mine->turns;
+    float x0 = g->x0, y0 = g->y0, z0 = g->z0, hx = g->dX, hy = g->dY, hz = g->dZ;
+    const float *lieOf = g->floors;
+    float stand[G], along[G];
+    for (int i = 0; i < count; i++)
+    {
+        const Laid *p = &laid[i];
+        int level = p->level;
+        if (level < 0) continue;
+        int k0 = p->k0, k1 = p->k1, i0 = p->i0, i1 = p->i1;
+        int first = k0 + ((turn - k0) % turns + turns) % turns;
+        if (first > k1) continue;
+        float times = (float)(1 << level);
+        float lx = hx * times, ly = hy * times, lz = hz * times;
+        int side = G >> level;
+        float px = p->px, py = p->py, pz = p->pz, qx = p->qx, qy = p->qy, qz = p->qz;
+        float s = p->s, sl = p->sl, sd = p->sd, f = p->f, fh = p->fh;
+        for (int c = i0; c <= i1; c++) { float dx = x0 + (c + 0.5f) * lx - px; along[c] = dx * dx * qx; }
         float **into = level == 0 ? w->field : w->wide[level];
         float *restrict smokeIn = into[0], *restrict paleIn = into[1], *restrict dustIn = into[2], *restrict flameIn = into[3], *restrict hotIn = into[4];
-        if (level > 0) w->wideUsed[level] = 1;
-        if (!resting)
+        if (!p->resting)
         {
-            for (int k = k0; k <= k1; k++)
+            int j0 = p->j0, j1 = p->j1;
+            for (int k = first; k <= k1; k += turns)
             {
                 float dz = z0 + (k + 0.5f) * lz - pz, wz = 1.0f - dz * dz * qz;
                 if (wz <= 0.0f) continue;
@@ -392,33 +577,68 @@ static void deposit(Work *w, const Grid *g)
             }
             continue;
         }
-        for (int k = k0; k <= k1; k++)
+        float squash = p->squash, cut = p->cut, iy = 1.0f / ly;
+        for (int k = first; k <= k1; k += turns)
         {
             float dz = z0 + (k + 0.5f) * lz - pz, wz = 1.0f - dz * dz * qz;
             if (wz <= 0.0f) continue;
-            const float *standRow = stand + k * side;
-            int jb = rowsOf[2 * k + 1];
-            for (int j = rowsOf[2 * k]; j <= jb; j++)
+            const float *lieRow = lieOf + FloorsAt[level] + k * side;
+            int ja, jb;
+            stand_row(p, lieRow, y0, iy, side, stand, &ja, &jb);
+            for (int j = ja; j <= jb; j++)
             {
                 float y = y0 + (j + 0.5f) * ly;
                 int row = (j + k * side) * side;
+                // (a cell more than a cell under the ground of its column given nothing, which leaves it as it was)
                 if (s > 0.0f)
                     for (int c = i0; c <= i1; c++)
                     {
-                        float dy = y - standRow[c], wt = wz - dy * dy * qy - along[c];
-                        wt = wt > 0.0f ? wt * wt : 0.0f;
+                        float dy = y - stand[c];
+                        dy = dy < 0.0f ? dy * squash : dy;
+                        float wt = wz - dy * dy * qy - along[c];
+                        wt = wt > 0.0f && y >= lieRow[c] - cut ? wt * wt : 0.0f;
                         smokeIn[row + c] += s * wt; paleIn[row + c] += sl * wt; dustIn[row + c] += sd * wt;
                     }
                 if (f > 0.0f)
                     for (int c = i0; c <= i1; c++)
                     {
-                        float dy = y - standRow[c], wt = wz - dy * dy * qy - along[c];
-                        wt = wt > 0.0f ? wt * wt : 0.0f;
+                        float dy = y - stand[c];
+                        dy = dy < 0.0f ? dy * squash : dy;
+                        float wt = wz - dy * dy * qy - along[c];
+                        wt = wt > 0.0f && y >= lieRow[c] - cut ? wt * wt : 0.0f;
                         flameIn[row + c] += f * wt; hotIn[row + c] += fh * wt;
                     }
             }
         }
     }
+}
+
+// The particles onto the grid (Site.Deposit), by so many threads, this one among them: first what each particle is worth
+// to each cell it reaches (measure_some), then all of them laid (lay_some). The C# does both in one pass over the
+// particles; the sums, and the order each cell gets its particles in, are the same. Nought if there was no room to be had.
+static int deposit(Work *w, const Grid *g, int threads)
+{
+    int count = g->count;
+    if (count > w->laidRoom)
+    {
+        int room = count + count / 4 + 256;
+        Laid *more = (Laid *)realloc(w->laid, (size_t)room * sizeof(Laid));
+        if (more == NULL) return 0;
+        w->laid = more; w->laidRoom = room;
+    }
+    if (threads > MOST_THREADS) threads = MOST_THREADS;
+    if (threads < 1 || count < 512) threads = 1;        // (so few are laid sooner than a thread is begun)
+    Share share[MOST_THREADS];
+    Job job[MOST_THREADS];
+    for (int t = 0; t < threads; t++) { share[t].w = w; share[t].g = g; share[t].turn = t; share[t].turns = threads; }
+    for (int t = 1; t < threads; t++) job_begin(&job[t], measure_some, &share[t]);
+    measure_some(&share[0]);
+    for (int t = 1; t < threads; t++) job_end(&job[t]);
+    for (int i = 0; i < count; i++) if (w->laid[i].level > 0) w->wideUsed[w->laid[i].level] = 1;
+    for (int t = 1; t < threads; t++) job_begin(&job[t], lay_some, &share[t]);
+    lay_some(&share[0]);
+    for (int t = 1; t < threads; t++) job_end(&job[t]);
+    return 1;
 }
 
 // Add a grid of 'side' cells each way to one of twice as many (Site.Widen).
@@ -478,7 +698,7 @@ static void gather(Work *w, int which)
 
 // ---------------------------------------------------------------- light through the smoke (Site.Follow)
 
-static void follow(Work *w, const Grid *g, float tx, float ty, float tz, float *through, float soften)
+static void follow(Work *w, const Grid *g, float tx, float ty, float tz, float *through, float soften, float far)
 {
     float cellX = g->dX, cellY = g->dY, cellZ = g->dZ;
     const float *smokeIn = w->field[0];
@@ -493,6 +713,7 @@ static void follow(Work *w, const Grid *g, float tx, float ty, float tz, float *
     int toward = la > 0.0f ? 1 : -1;
     float du = lu / steep * ca / cu, dv = lv / steep * ca / cv;
     float path = ca / steep * soften;
+    float keep = far > 0.0f ? (float)exp((double)(-ca / steep / far)) : 1.0f;
     int ou = to_int(floorf(du)), ov = to_int(floorf(dv));
     float wu = du - ou, wv = dv - ov;
     float w00 = (1.0f - wu) * (1.0f - wv), w10 = wu * (1.0f - wv), w01 = (1.0f - wu) * wv, w11 = wu * wv;
@@ -513,7 +734,7 @@ static void follow(Work *w, const Grid *g, float tx, float ty, float tz, float *
                     if (insideI && j >= jLow && j <= jHigh)
                     {
                         int b = j * G + i + shift;
-                        arriving = before[b] * w00 + before[b + 1] * w10 + before[b + G] * w01 + before[b + G + 1] * w11;
+                        arriving = (before[b] * w00 + before[b + 1] * w10 + before[b + G] * w01 + before[b + G + 1] * w11) * keep;
                     }
                     int at = start + j + i * su;
                     float x = smokeIn[at] * path;
@@ -532,7 +753,7 @@ static void follow(Work *w, const Grid *g, float tx, float ty, float tz, float *
                     if (inside && i >= iLow && i <= iHigh)
                     {
                         int b = row + i + shift;
-                        arriving = before[b] * w00 + before[b + 1] * w10 + before[b + G] * w01 + before[b + G + 1] * w11;
+                        arriving = (before[b] * w00 + before[b + 1] * w10 + before[b + G] * w01 + before[b + G + 1] * w11) * keep;
                     }
                     int at = cells + i * su;
                     float x = smokeIn[at] * path;
@@ -546,27 +767,58 @@ static void follow(Work *w, const Grid *g, float tx, float ty, float tz, float *
 
 // ---------------------------------------------------------------- what is round about each place (Site.Around)
 
+// (and where there is ground, the ground not taken as an edge of the smoke: a cell it cuts through taken from its cells over
+// the ground only, the cells of each column under it filled as a mirror of those over it; see the C#)
 static void around_layer(Work *w, const Grid *g, int k)
 {
     const float *smokeIn = w->field[0], *paleIn = w->field[1], *dustIn = w->field[2], *flameIn = w->field[3];
     float *most = w->anything, *smokes = w->roundSmoke, *pales = w->roundPale, *dusts = w->roundDust;
     const float flameCounts = g->thickest / g->thickestFlame;
+    int grounded = (g->floored & BASE_BILLOWS) != 0;
+    const float *lieOf = g->floors;
+    float y0 = g->y0, hy = g->dY;
     for (int j = 0; j < A; j++)
     {
         int row = (j + k * A) * A, under = (2 * j + 2 * k * G) * G;
+        float yLow = y0 + (2 * j + 0.5f) * hy, yHigh = y0 + (2 * j + 1.5f) * hy;
         for (int i = 0; i < A; i++)
         {
-            int at = under + 2 * i;
+            int at = under + 2 * i, lieAt = 2 * i + 2 * k * G;
             float top = 0.0f, smoke = 0.0f, light = 0.0f, dust = 0.0f;
+            int over = 0;
             for (int c = 0; c < 8; c++)
             {
                 int cell = at + (c & 1) + ((c >> 1) & 1) * G + (c >> 2) * G2;
                 float v = smokeIn[cell] + flameCounts * flameIn[cell];
                 if (v > top) top = v;
+                if (grounded && ((c & 2) != 0 ? yHigh : yLow) < lieOf[lieAt + (c & 1) + (c >> 2) * G]) continue;
                 smoke += smokeIn[cell]; light += paleIn[cell]; dust += dustIn[cell];
+                over++;
             }
+            if (grounded && over > 0 && over < 8) { float more = 8.0f / (float)over; smoke *= more; light *= more; dust *= more; }
             most[row + i] = top;
             smokes[row + i] = smoke; pales[row + i] = light; dusts[row + i] = dust;
+        }
+    }
+    if (!grounded) return;
+    float iy = 1.0f / (2.0f * hy);
+    for (int i = 0; i < A; i++)
+    {
+        float floorAt = (lieOf[FloorsAt[1] + i + k * A] - y0) * iy - 0.5f;
+        if (!(floorAt > 0.0f) || floorAt >= (float)(A - 1)) continue;
+        int last = (int)floorAt;
+        if ((float)last == floorAt) last--;
+        for (int j = last; j >= 0; j--)
+        {
+            float from = 2.0f * floorAt - (float)j;
+            if (from < (float)(last + 1)) from = (float)(last + 1);   // (never from the cell being filled: see the C#)
+            int f0 = (int)from;
+            float t = from - (float)f0;
+            if (f0 >= A - 1) { f0 = A - 1; t = 0.0f; }
+            int at = (j + k * A) * A + i, s0 = (f0 + k * A) * A + i, s1 = f0 < A - 1 ? s0 + A : s0;
+            smokes[at] = smokes[s0] + (smokes[s1] - smokes[s0]) * t;
+            pales[at] = pales[s0] + (pales[s1] - pales[s0]) * t;
+            dusts[at] = dusts[s0] + (dusts[s1] - dusts[s0]) * t;
         }
     }
 }
@@ -854,6 +1106,27 @@ static void carry(Work *w, Grid *g)
                     known[cell] = mark;
                 }
     }
+    // At the foot of the smoke, carried up no faster than leaves it on the ground: within a cell and a half of the ground
+    // the way up taken off it in step with how near the ground it is (see the C#).
+    if (g->floored & FOOT_CARRY)
+    {
+        const float *lieOf = g->floors;
+        float band = 1.5f * hy, perBand = 1.0f / band;
+        for (int k = 0; k < A; k++)
+            for (int i = 0; i < A; i++)
+            {
+                float floorY = lieOf[FloorsAt[1] + i + k * A];
+                for (int j = 0; j < A; j++)
+                {
+                    float over = y0 + (j + 0.5f) * hy - floorY;
+                    if (over >= band) break;
+                    int cell = i + (j + k * A) * A;
+                    float *here = c + (size_t)cell * CARRIED;
+                    float up = here[2] + goesY;          // (the way up over the ground, not in the box; an empty cell left alone: see the C#)
+                    if (up > 0.0f && known[cell] != 0) here[2] = up * (over > 0.0f ? over * perBand : 0.0f) - goesY;
+                }
+            }
+    }
     float fastest = 2.0f;
     for (int cell = 0; cell < A3; cell++)
     {
@@ -1044,7 +1317,18 @@ static void clearance(Work *w, const Grid *g)
 
 // ---------------------------------------------------------------- the whole of it (the second half of Site.Lighting)
 
-// Nought if the grid was made; otherwise which of the things it was handed did not fit what this was built for.
+typedef struct Carrying { Work *w; Grid *g; int64_t took; } Carrying;
+
+static void carry_job(void *carrying)
+{
+    Carrying *c = (Carrying *)carrying;
+    int64_t began = now_ns();
+    carry(c->w, c->g);
+    c->took = now_ns() - began;
+}
+
+// Nought if the grid was made; otherwise which of the things it was handed did not fit what this was built for (7: no
+// room was to be had for the particles' records).
 EXPORT int vfx_grid(void *work, Grid *g)
 {
     Work *w = (Work *)work;
@@ -1063,15 +1347,23 @@ EXPORT int vfx_grid(void *work, Grid *g)
         w->wideUsed[level] = 0;
         for (int c = 0; c < 5; c++) memset(w->wide[level][c], 0, (size_t)side * side * side * sizeof(float));
     }
-    deposit(w, g);
+    // (carry reads the particles and the grids carried from the last grid and writes its own: nothing that the particles'
+    // laying, the light or the packing reads or writes, so it is worked out beside them where there are processors for it)
+    int asked = threadsAsked, cores = processors();
+    int layers = asked > 0 ? asked : cores / 4 < 1 ? 1 : cores / 4 > 4 ? 4 : cores / 4;
+    int apart = g->drawn && (asked > 0 ? asked > 1 : cores >= 4);
+    Carrying carrying = { w, g, 0 };
+    Job beside = { 0 };
+    if (apart) job_begin(&beside, carry_job, &carrying);
+    if (!deposit(w, g, layers)) { job_end(&beside); return 7; }
     if (w->wideUsed[1] || w->wideUsed[2] || w->wideUsed[3]) for (int which = 0; which < 5; which++) gather(w, which);
     int64_t t1 = now_ns();
     g->nanoseconds[1] = t1 - t0;
     // (less than the smoke really blocks: light also finds its way round inside a cloud)
-    if (g->sunUp) follow(w, g, g->sunX, g->sunY, g->sunZ, g->sunThrough, 0.45f);
+    if (g->sunUp) follow(w, g, g->sunX, g->sunY, g->sunZ, g->sunThrough, 0.45f, g->shadeSun);
     int64_t t2 = now_ns();
     g->nanoseconds[2] = t2 - t1;
-    follow(w, g, g->skyX, g->skyY, g->skyZ, g->skyThrough, 0.55f);
+    follow(w, g, g->skyX, g->skyY, g->skyZ, g->skyThrough, 0.55f, g->shadeSky);
     int64_t t3 = now_ns();
     g->nanoseconds[3] = t3 - t2;
     // (what follows is all for the shader: where the smoke is drawn as sprites none of it is asked for)
@@ -1080,12 +1372,16 @@ EXPORT int vfx_grid(void *work, Grid *g)
         around(w, g);
         int64_t t4 = now_ns();
         g->nanoseconds[4] = t4 - t3;
-        carry(w, g);
+        if (apart) job_end(&beside); else carry_job(&carrying);
         int64_t t5 = now_ns();
-        g->nanoseconds[5] = t5 - t4;
+        g->nanoseconds[5] = carrying.took;
         compose(w, g);
         clearance(w, g);
-        g->nanoseconds[7] = now_ns() - t5;
+        int64_t t6 = now_ns();
+        g->nanoseconds[7] = t6 - t5;
+        // (with carry beside the rest, the parts add up to more than the grid took: by how much)
+        int64_t parts = g->nanoseconds[1] + g->nanoseconds[2] + g->nanoseconds[3] + g->nanoseconds[4] + g->nanoseconds[5] + g->nanoseconds[7];
+        if (apart && parts > t6 - t0) g->nanoseconds[6] = parts - (t6 - t0);
     }
     return 0;
 }

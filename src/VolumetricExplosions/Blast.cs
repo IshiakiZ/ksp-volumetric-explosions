@@ -43,6 +43,14 @@ namespace VolumetricExplosions
 
         void Awake()
         {
+            AudioSource speaker = GetComponent<AudioSource>();
+            try { Deafen(); }
+            // (the copy's speaker is made switched off (Recipe.CopySound): on only now it is deaf, if it is to be)
+            finally { if (speaker != null) speaker.enabled = true; }
+        }
+
+        void Deafen()
+        {
             // The game places the copy only after making it, so the Air looks at it at the end of this frame.
             Air.Newborn(this);
             // (And it starts the bang straight after making the copy, before this can know how far off it is: so the copy is
@@ -60,6 +68,7 @@ namespace VolumetricExplosions
                 if (bang != null) { bang.mute = true; bang.volume = 0f; }
                 return;
             }
+            Hush.Add(GetComponent<AudioSource>());
             if (!Settings.SoundTravels) return;
             bang = GetComponent<AudioSource>();
             if (bang == null) return;
@@ -143,7 +152,7 @@ namespace VolumetricExplosions
         /// </summary>
         void Own(AudioClip made, float after)
         {
-            if (own == null) own = gameObject.AddComponent<AudioSource>();
+            if (own == null) { own = gameObject.AddComponent<AudioSource>(); Hush.Add(own); }
             own.clip = made;
             own.playOnAwake = false; own.loop = false; own.dopplerLevel = 0f; own.priority = 32;
             own.spatialBlend = 1f;
