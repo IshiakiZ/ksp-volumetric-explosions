@@ -9,23 +9,14 @@ INSTALL
   Copy the folder VolumetricExplosions from this download into your KSP's
   GameData folder, and start the game. To remove the mod, delete that folder.
 
-ON A MAC, ONE MORE STEP (if a browser downloaded this)
-  The mod has a small library of its own that does its heaviest sums. macOS marks
-  everything a browser downloads and will not let a game load a marked library, so the
-  mod leaves it alone and does those sums the slow way: the picture is the same, the
-  frame rate while there is smoke about is lower. To have the library used, take the
-  mark off that one file, in Terminal:
-
-    xattr -d com.apple.quarantine "<your KSP folder>/GameData/VolumetricExplosions/PluginData/vfxgrid.dylib"
-
-  Only do this for a copy of the mod you trust: that mark is how macOS knows a file
-  came from the internet.
-
 WHERE IT WORKS
-  Made on a Mac, and this version tried on Windows 11, on the game's own Direct3D 11 and on
-  OpenGL: the smoke and fire are drawn as volumes there too (launches, crashes). On Linux
-  it should work as on the Mac; nobody has run it there. (On Windows and Linux the mod does its heaviest sums with its own code:
-  the small library that does them faster is in this download for the Mac only.)
+  This version was made and tried on Windows 11, on the game's own Direct3D 11: launches,
+  crashes, BD Armory's effects, a nuclear explosion. The mod has a small library of its own
+  that does its heaviest sums; in this download it is the one for Windows.
+
+  On a Mac and on Linux (OpenGL) this version has not been tried: the mod does those sums
+  with its own code there, slower, and its newest changes to the shaders are not packed for
+  OpenGL. Version 0.9.0 is the last one made and tried on a Mac.
 
 SETTINGS
   GameData/VolumetricExplosions/PluginData/settings.cfg

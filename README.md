@@ -50,8 +50,9 @@ For Kerbal Space Program 1.12.x. It needs no other mod, and works with [BD Armor
 
 Copy the `VolumetricExplosions` folder from the download into your KSP's `GameData`. To remove it, delete that folder.
 
-On a Mac, a copy downloaded with a browser runs slower until you allow its library with one command: see
-[Installing](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Installing).
+This version's download carries the mod's own fast library for Windows. On a Mac and on Linux it does its heaviest sums
+with its own code, slower; 0.9.0 is the last version made and tried on a Mac
+([Installing](https://github.com/IshiakiZ/ksp-volumetric-explosions/wiki/Installing)).
 
 ## Settings
 
