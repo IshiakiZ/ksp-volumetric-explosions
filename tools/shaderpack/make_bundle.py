@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack one of this project's shaders into a Unity asset bundle, without the Unity editor.
 
-    python3 tools/shaderpack/make_bundle.py <KSP folder> <output file> [volume|layers|motion|enlarge|shadow|mark|shock|sundepth|lens|dnfill|farmotion|shafts|clean|veil|clouds|cloudskeep|cloudsover|cloudshade|wet|snow|blend|fargroundpoints|fargrounddraw|fargrounddepth|fargroundlights]
+    python3 tools/shaderpack/make_bundle.py <KSP folder> <output file> [volume|layers|motion|enlarge|shadow|mark|shock|sundepth|lens|dnfill|farmotion|shafts|clean|veil|clouds|cloudskeep|cloudsover|cloudshade|wet|snow|blend|fargroundpoints|fargrounddraw|fargrounddepth|fargroundlights|anime]
 
 Volumetric Explosions': "volume" (the default) is the smoke, "layers" what puts every patch's smoke on the screen in depth order
 (since 0.5.0; "enlarge" did it a patch at a time before, and is kept for older copies of the mod), "shadow" the shadow it throws
@@ -323,6 +323,20 @@ SHADERS = {
         "cull": 0.0, "ztest": 4.0, "zwrite": 1.0,
         "blend": (1.0, 0.0),
     },
+    # Ribbon Worm's skin: the worm's body and the branching proboscis, tubes built on the game's thread every frame (worm.glsl;
+    # Body.cs, Proboscis.cs). Solid, so it writes how far off it is and shows its outer faces only; it fades itself out where it
+    # goes into the cloud deck, which the game draws as a far picture with no depth. Reads each point's colour (the way the skin
+    # faces, and how much it is the proboscis's flesh) and uv (along, round, how high). 2026-11-11, from the Windows PC.
+    "worm": {
+        "name": "RibbonWorm/Skin", "path": "assets/ribbonworm/skin.shader", "id": 7307199000000000901, "program": 1987650901,
+        "bundle": "ribbonwormskin", "file": "CAB-726962626f6e776f726d736b696e3030", "code": "worm.glsl",
+        "fragment": [("_WorldSpaceCameraPos", 3, False), ("_WormSun", 4, False), ("_WormSunTint", 4, False), ("_WormSky", 4, False), ("_WormShine", 4, False), ("_WormHaze", 4, False),
+                     ("_WormDeck", 4, False), ("_WormCentre", 4, False), ("_WormLook", 4, False)],
+        "textures": [],
+        "given": 0,
+        "vertex": [("unity_ObjectToWorld", 4, True), ("unity_MatrixVP", 4, True)],
+        "cull": 2.0, "ztest": 4.0, "zwrite": 1.0,
+    },
     # Natural Ocean's lens in the water: laid over the finished picture while the camera's glass is at the water or under it.
     "oceanunder": {
         "name": "NaturalOcean/Under", "path": "assets/naturalocean/under.shader", "id": 7307199000000000204, "program": 1987650204,
@@ -412,6 +426,17 @@ SHADERS = {
         "fragment": [("_GradeMode", 4, False), ("_GradeBalance", 4, False), ("_GradePeak", 4, False), ("_GradeTool", 4, False)],
         "textures": [("_GradeLut", 3), ("_GradeScene", 2)],
         "given": 1,                      # (the picture so far: handed over by the command that draws it)
+        "vertex": [],
+        "cull": 0.0, "ztest": 8.0,
+        "blend": (1.0, 0.0),             # what it draws takes the place of what was there
+    },
+    # (Anime Look's ink lines and flat paint over the picture of the solid things: Ink.cs. From the PC, 2026-11-11.)
+    "anime": {
+        "name": "AnimeLook/Ink", "path": "assets/animelook/ink.shader", "id": 7307199000000000701, "program": 1987650701,
+        "bundle": "animeink", "file": "CAB-616e696d65696e6b0000000000000000", "code": "anime.glsl",
+        "fragment": [("_ZBufferParams", 4, False), ("_AnimeInk", 4, False), ("_AnimePaint", 4, False), ("_AnimeHow", 4, False), ("_AnimeMore", 4, False)],
+        "textures": [("_AnimeScene", 2), ("_CameraDepthTexture", 2)],
+        "given": 2,                      # (the picture so far, handed over by the command that draws it, and the game's own depth picture)
         "vertex": [],
         "cull": 0.0, "ztest": 8.0,
         "blend": (1.0, 0.0),             # what it draws takes the place of what was there

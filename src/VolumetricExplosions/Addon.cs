@@ -22,7 +22,7 @@ namespace VolumetricExplosions
     [KSPAddon(KSPAddon.Startup.Flight, false)]
     public sealed class Addon : MonoBehaviour
     {
-        public const string Version = "0.10.0";
+        public const string Version = "0.11.0";
 
         static GameObject[] ours;            // built once, reused for every flight
         static Transform shelf;              // an inactive parent that keeps the templates from playing
@@ -40,7 +40,6 @@ namespace VolumetricExplosions
             Page.FromSettings();
             if (!Settings.Enabled) { Log("switched off in settings.cfg"); enabled = false; return; }
             Records.LoadKinds();
-            VolumetricExplosions.Recorded.Begin(this);
             giveUpAt = Time.realtimeSinceStartup + 20f;
         }
 
@@ -124,8 +123,6 @@ namespace VolumetricExplosions
         public static float FollowFrom = 0.15f, FollowLeast = 0f;
         public static bool SoundTravels = true;        // the bang is heard when its sound has had time to get to the camera, not on the instant
         public static bool Knock = false;              // (since 0.9.0) blasts push craft, and break what they knock harder than it can take (see Site.Knocks): off as installed
-        public static bool OwnBang = true;             // (since 0.8.0) the bang made from the blast itself (Bangs), not the game's two recordings
-        public static bool Recorded = true;            // (since 0.9.0) recordings of real blasts and fires heard in it, where the mod has them (see Recorded)
         public static bool Shadows = true;             // the smoke throws its shadow on what is under it, in sunlight (see tools/shaderpack/shadow.glsl)
         public static bool Shaded = true;              // (since 0.8.0) what stands in the sun (the craft, the tower, buildings, the ground) throws its shadow into the smoke (see SunShadow)
         public static bool Built = false;              // use the shaders built in the Unity editor even where the hand-packed OpenGL ones would do (for comparing the two)
@@ -292,8 +289,6 @@ namespace VolumetricExplosions
                 node.TryGetValue("blasts_push", ref Knock);
                 node.TryGetValue("collide", ref Collide);
                 node.TryGetValue("sound_travels", ref SoundTravels);
-                node.TryGetValue("own_bang", ref OwnBang);
-                node.TryGetValue("recorded", ref Recorded);
                 node.TryGetValue("shadows", ref Shadows);
                 node.TryGetValue("shaded", ref Shaded);
                 node.TryGetValue("predict", ref Predict);

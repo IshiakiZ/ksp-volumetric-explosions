@@ -38,8 +38,8 @@ For Kerbal Space Program 1.12.x. It needs no other mod, and works with [BD Armor
   for minutes, its stem of dust and the dust its blast lifts off the ground, and a scorch mark where it was near the ground,
   worked out from the physics of a real one and judged against photographs of the tests. Nothing in the stock game is a
   nuke: it goes off for BD Armory's.
-* **Its own bang** (0.8.0): a crack close by, a boom and a long rumble far off, as big as what went off, heard when its
-  sound gets to you.
+* **The bang when its sound gets to you:** the game's own bang, held back a second for every 340 metres. The mod makes
+  no sound of its own (0.11.0: the bang it made from 0.8.0 to 0.10.0 is taken out).
 * **Other mods' resources** count as the stock ones they are like, for what each is worth beside it (liquid hydrogen as
   fuel with a clear flame, liquid oxygen as oxidiser, argon as xenon, and so on): `PluginData/resources.cfg` lists all of
   the Community Resource Pack's. With RealBattery, a battery's charge counts for all it holds. (By Rjoande.)

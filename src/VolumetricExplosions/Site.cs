@@ -420,7 +420,6 @@ namespace VolumetricExplosions
             if (job != null) { try { job.Wait(); } catch (Exception) { } job = null; }
             if (raysOut) { raysOut = false; rayJob.Complete(); rays.Dispose(); hits.Dispose(); }
             EndSurvey();
-            FireSoundOff(0f);
             for (int n = 0; n < lights.Length; n++)
                 if (lights[n] != null && lights[n].enabled) { lights[n].enabled = false; lightsOn = Mathf.Max(0, lightsOn - 1); }
             if (lighting != null) { try { lighting.Wait(); } catch (Exception) { } lighting = null; }
@@ -1877,7 +1876,6 @@ namespace VolumetricExplosions
             Air.Lap(6, ref lap);
             long sub = lap;
             Fires(dt);
-            FireSound(dt);
             Air.SubLap(0, ref sub);
             Frags(dt);
             Air.SubLap(1, ref sub);

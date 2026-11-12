@@ -13,18 +13,16 @@ namespace VolumetricExplosions
     /// the sound is held back for as long as sound takes to cover the distance to the camera, in the air of
     /// the place: about a second for every 340 metres at sea level on Kerbin. Where there is no air the game
     /// plays its bang anyway, and it is left at once as it was.
+    ///
+    /// The bang is the game's own, and the mod makes no sound of its own: from 0.8.0 to 0.10.0 it made a bang from the blast
+    /// (Bangs), from 0.9.0 with recordings of real blasts and a fire's roar while it burnt (Recorded, sounds.pack); all of it
+    /// taken out on the owner's word, 2026-11-11 ("Remove the sound effects from volumetric explosions").
     /// </summary>
     public sealed class Blast : MonoBehaviour
     {
         // Filled in by Recipe. Public so that they survive the game copying the object.
         public float strength;
         public bool stockVolume;
-        // (since 0.8.0, filled in by the Air once it knows what went off: its charge in kilograms of TNT, whether near the ground,
-        // and how long its fire burns; for its own bang, see Bangs)
-        public float charge = -1f, fireSeconds;
-        public bool nearGround;
-        AudioSource own;
-        static readonly AnimationCurve Level = AnimationCurve.Constant(0f, 1f, 1f);
 
         float age;
         AudioSource bang;
@@ -123,13 +121,6 @@ namespace VolumetricExplosions
             return to != null ? (to.position - transform.position).magnitude : 1000f;
         }
 
-        /// <summary>(Since 0.8.0, by the Air once it knows what went off.) What went off, and its own bang begun to be made.</summary>
-        public void Knows(float kilograms, bool ground, float burns)
-        {
-            charge = kilograms; nearGround = ground; fireSeconds = burns;
-            if (Settings.OwnBang && Settings.SoundTravels && held && charge > 0f) Bangs.Ask(charge, Distance(), nearGround, fireSeconds);
-        }
-
         /// <summary>How long sound takes from there to the camera, in the air of the place (nothing where there is no air to carry it).</summary>
         static float Travel(Vector3 from)
         {
@@ -143,51 +134,9 @@ namespace VolumetricExplosions
             return Mathf.Min((to.position - from).magnitude / speed, 30f);
         }
 
-        /// <summary>
-        /// Its own bang (see Bangs), on a source of its own, to begin that many seconds from now by the sound's clock. Its loudness
-        /// is set here and not left to the speaker's fall-off with distance, which did not act on it (recorded: as loud at 1500 m
-        /// as at 300 m, where the game's fell 12 dB): as loud as it goes up to a distance that grows as the cube root of the charge
-        /// (300 m for a tonne of TNT), then falling as one over the distance, as a blast wave's pressure does. The speaker is still
-        /// set in the world, for the side it is heard from.
-        /// </summary>
-        void Own(AudioClip made, float after)
-        {
-            if (own == null) { own = gameObject.AddComponent<AudioSource>(); Hush.Add(own); }
-            own.clip = made;
-            own.playOnAwake = false; own.loop = false; own.dopplerLevel = 0f; own.priority = 32;
-            own.spatialBlend = 1f;
-            own.rolloffMode = AudioRolloffMode.Custom;
-            own.maxDistance = 30000f;
-            own.SetCustomCurve(AudioSourceCurveType.CustomRolloff, Level);
-            float near = Mathf.Clamp(30f * Mathf.Pow(charge, 1f / 3f), 10f, 800f), d = Distance();
-            own.volume = GameSettings.SHIP_VOLUME * Mathf.Min(1f, near / Mathf.Max(d, 1f));
-#if DEV
-            heard.Add("  its own: " + d.ToString("F0") + " m off, " + charge.ToString("F0") + " kg, full up to " + near.ToString("F0") + " m, volume " + own.volume.ToString("F3"));
-#endif
-            own.pitch = Random.Range(0.94f, 1.06f);
-            own.PlayScheduled(AudioSettings.dspTime + after);
-            if (bang != null) { bang.Stop(); bang.mute = true; }
-            lasts = Mathf.Max(lasts, age + after * Mathf.Max(Time.timeScale, 0.01f) + made.length / Mathf.Max(own.pitch, 0.5f) + 0.5f);
-        }
-
         void Update()
         {
             age += Time.deltaTime;
-            // (its own bang is begun a little ahead on the sound's own clock, so that it starts as the sound arrives and not up to a frame
-            // and a sound buffer after it, which is heard close by, where the wait is short: measured 0.12 s late at 300 m before)
-            if (held && Settings.OwnBang && charge > 0f && age >= wait - Mathf.Clamp(2f * Time.deltaTime, 0.1f, 0.3f))
-            {
-                AudioClip made = Bangs.Clip(charge, Distance(), nearGround);
-                if (made != null)
-                {
-                    held = false;
-                    float after = Mathf.Max(0f, wait - age - Bangs.Lead) / Mathf.Max(Time.timeScale, 0.01f);
-#if DEV
-                    heard.Add("a bang " + far.ToString("F0") + " m off: sound takes " + wait.ToString("F2") + " s, its own bang set for " + (age + after).ToString("F2") + " s after the flash");
-#endif
-                    Own(made, after);
-                }
-            }
             if (held && age >= wait)
             {
                 held = false;

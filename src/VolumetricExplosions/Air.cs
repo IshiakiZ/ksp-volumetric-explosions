@@ -427,11 +427,6 @@ namespace VolumetricExplosions
                         Plan plan = Plan.Make((Vector3d)blast.transform.position, blast.strength);
                         plan.warm = WarmingNow;
                         LastPlan = plan.label ?? "";
-                        // (what went off, for its own bang (Bangs): its charge taken as a tenth of the propellant that burns, as for liquid
-                        // propellants going off on a pad, and no less than a part breaking up gives; near the ground if within its reach of it;
-                        // its fire's roar as long as the fireball burns, some seconds for tonnes)
-                        bool low = plan.surfaceBelow && (plan.surfacePoint - (Vector3d)blast.transform.position).magnitude < Math.Max(8.0, plan.reach * 1.5);
-                        blast.Knows(Mathf.Max(0.1f * Mathf.Max(plan.fire, plan.charge), 0.4f + 6f * blast.strength * blast.strength), low, plan.radius > 0f ? Mathf.Clamp(0.45f * Mathf.Pow(Mathf.Max(plan.fire, 1f), 0.26f), 0.5f, 6f) : 0f);
                         Site at = SiteFor(plan);
                         at.Explode(plan);
                         if (warming) { warmSite = at; warmBlasts.Add(blast); }
