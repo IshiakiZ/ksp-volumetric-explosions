@@ -38,6 +38,111 @@ namespace VolumetricExplosions
         /// all as until then.)
         /// </summary>
         public static bool ShipsHalf;
+        /// <summary>
+        /// (Since 0.12.0.) Whether the patches that stay where they are are walked at half the screen's size each way, as "half"
+        /// has them (read by Site when it sets a patch going, for the frame after this one's, as ShipsHalf is). Smoke far off
+        /// covers little of the screen, and at half size there is too little of it to draw: a nuclear explosion's cap 12 km
+        /// away, a hundred pixels across, was walked fifty across and enlarged, a clump of soft balls (the films of
+        /// 2026-11-16, br-far-haze). Where all the patches' rectangles together cover under an eighth of the screen (by the
+        /// quality set: less on a slow machine's low quality) they are walked whole, which there costs little; at half size
+        /// again from a fifth, and at once, and always while the ships' picture is at half size (the camera is in a plume).
+        /// Back to whole only after three quarters of a second under the line, as the ships' picture is.
+        /// </summary>
+        public static bool AtlasHalf = true;
+        /// <summary>
+        /// (Since 0.12.0; the settings "sharp_when_fast" and "sharp_fps".) Whether the machine is keeping up well enough for the
+        /// patches that stay where they are to be walked at the screen's full size whatever they cover. At half size and enlarged
+        /// a blast's smoke from 220 m is soft, its billows twice as coarse as the screen could show them; on a fast card walking
+        /// every pixel costs nothing that can be measured (a 4-tonne fuel blast on an RTX 4080 Super at 1280 x 720: 87 frames a
+        /// second whole against 79 at half size, the frame being the processor's), and on a slow one it can cost half the frame
+        /// rate. So it is tried: whole while the frame rate, smoothed over half a second, holds the setting's with smoke in sight;
+        /// to half size when it has been under it for a second (a single long frame, a blast being laid, counting for little); and whole tried again once the game has run at half
+        /// as fast again as that rate, or at the rate it is held to (the display's, or the game's own limit), for eight seconds, twice as
+        /// long after each try that lasted under six seconds, up to two minutes. And where half size turns out to be no help (the
+        /// frames not a tenth shorter a second and a half on: the processor is what is behind, not the card) it is whole again at
+        /// once and for twenty seconds whatever the frame rate. The ships' own patches go by what they cover, as before
+        /// (ShipsHalf), and while they are at half size so is everything.
+        /// </summary>
+        public static bool Roomy = true;
+        static float frameMs = 10f, slowFor, fastFor, roomyWait = 8f, roomySince, wholeMs, halfSince, noHelpTill;
+        // (Tried on 2026-11-16 and taken out: going to half size only while the frame waits on the card, measured from the end of the
+        // game's own drawing to the first thing done in the next frame. In a crash that wait was a millisecond of thirty while the
+        // card was what held the frame: the wait shows where the game's thread hands the card its grids, not after the frame. Whole,
+        // a Kerbal X's crash from 85 m ran at 31 to 34 frames a second where it runs at 48 and 62 at half size.)
+        public static string RoomySays => (Roomy ? "whole while the frame rate holds" : "at half size, the frame rate under the line") + "; " + frameMs.ToString("F1") + " ms a frame smoothed, the line " + (1000f / Mathf.Clamp(Settings.SharpFps, 25f, 120f)).ToString("F1") + ", next try after " + roomyWait.ToString("F0") + " s fast (" + fastFor.ToString("F1") + " so far)";
+
+        /// <summary>Once a frame with smoke in sight: see Roomy.</summary>
+        static void Govern()
+        {
+            float dt = Mathf.Min(Time.unscaledDeltaTime, 0.25f), line = 1000f / Mathf.Clamp(Settings.SharpFps, 25f, 120f);
+            // (a frame no more than half as long again as they have been running: a blast's own long frame or two, the work of laying
+            // it, is not the card falling behind, and a crash's took the smoke to half size at its strike)
+            frameMs += (Mathf.Min(dt * 1000f, 1.5f * frameMs + 2f) - frameMs) * (1f - Mathf.Exp(-dt / 0.5f));
+#if DEV
+            // (for a film at a set step, which the recorder makes slow: the smoke whole as a fast game has it)
+            if (WholeAlways) { Roomy = true; return; }
+#endif
+            if (Roomy)
+            {
+                // (not while half size is known to be no help: see below)
+                slowFor = frameMs > line && Time.unscaledTime > noHelpTill ? slowFor + dt : 0f;
+                if (slowFor > 1f)
+                {
+                    roomyWait = Time.unscaledTime - roomySince < 6f ? Mathf.Min(2f * roomyWait, 120f) : 8f;
+                    Roomy = false; fastFor = 0f; slowFor = 0f;
+                    wholeMs = frameMs; halfSince = Time.unscaledTime;
+#if DEV
+                    Addon.Log("smoke to half size: " + frameMs.ToString("F1") + " ms a frame (frame " + Time.frameCount + "); whole tried again after " + roomyWait.ToString("F0") + " s fast");
+#endif
+                }
+            }
+            else if (wholeMs > 0f && Time.unscaledTime - halfSince > 1.5f && frameMs > 0.9f * wholeMs)
+            {
+                // (Half size was no help: a second and a half on the frames are not a tenth shorter. It is the processor that is behind,
+                // not the card, as in a crash, where the wreck's physics and the smoke's own sums take the frame: whole again, and for the
+                // next twenty seconds whatever the frame rate. A crash on a fast card took the smoke to half size at its strike, the one
+                // moment everything is looked at, for nothing.)
+                Roomy = true; roomySince = Time.unscaledTime; fastFor = 0f; slowFor = 0f; wholeMs = 0f;
+                noHelpTill = Time.unscaledTime + 20f;
+#if DEV
+                Addon.Log("smoke whole again, half size being no help: " + frameMs.ToString("F1") + " ms a frame (frame " + Time.frameCount + ")");
+#endif
+            }
+            else
+            {
+                if (Time.unscaledTime - halfSince > 1.5f) wholeMs = 0f;
+                // (as fast as it is let go: the display's rate where the game waits for it, or the game's own limit)
+                float held = QualitySettings.vSyncCount > 0 && Screen.currentResolution.refreshRate > 0 ? 1000f * QualitySettings.vSyncCount / Screen.currentResolution.refreshRate
+                           : Application.targetFrameRate > 0 ? 1000f / Application.targetFrameRate : 0f;
+                fastFor = frameMs < Mathf.Max(line / 1.5f, Mathf.Min(held * 1.08f, line * 0.9f)) ? fastFor + dt : 0f;
+                if (fastFor > roomyWait)
+                {
+                    Roomy = true; roomySince = Time.unscaledTime; fastFor = 0f; slowFor = 0f;
+#if DEV
+                    Addon.Log("smoke whole again (frame " + Time.frameCount + ")");
+#endif
+                }
+            }
+        }
+        /// <summary>(Development build: true keeps the patches' picture at half size whatever they cover, as until 0.12.0, for setting the two against each other.)</summary>
+        public static bool WholeNever;
+        /// <summary>How keenly the patches' picture is enlarged from half size (see layers.glsl): nought, a plain blend of four pixels, as until 2026-11-16.</summary>
+        internal const float Keen = 0.4f;
+#if DEV
+        /// <summary>(Development build: "always" has the frame rate count as holding whatever it is, so that a film made slowly shows the smoke whole.)</summary>
+        public static bool WholeAlways;
+#endif
+#if DEV
+        /// <summary>(Development build: "never" keeps the patches' picture at half size as until 0.12.0; "far" lets it be whole where they cover little; says which.)</summary>
+        public static string Whole(string how)
+        {
+            if (how == "never") WholeNever = true; else if (how == "far") WholeNever = false;
+            if (how == "always") { WholeAlways = true; WholeNever = false; } else if (how != "") WholeAlways = false;
+            return "the patches' picture: " + (WholeNever ? "always at half size" : "whole where they cover little") + "; now " + (AtlasHalf ? "half size" : "whole") + "; " + RoomySays;
+        }
+#endif
+        bool atlasHalfNow = true;                 // (what the patches were set going with this frame)
+        float atlasUnderFor;
         bool shipsHalfNow;                        // (what the patches were set going with this frame: ShipsHalf as it was when they were)
         float shipsUnderFor;                      // (how long the ships' boxes have covered too little for half size, while it is: see Frame)
         const float ShipsWholeAfter = 0.75f;      // (seconds so before the ships' picture is whole again)
@@ -126,6 +231,52 @@ namespace VolumetricExplosions
         MeshRenderer sheetRenderer;
         Material material;
         Mesh quad;
+        static readonly int hisNote = Shader.PropertyToID("_VolHisClouds"), airNote = Shader.PropertyToID("_VolAir");
+        /// <summary>The air's haze over far smoke (layers.glsl, _VolAir): how many metres of sea-level air hide all but 1/e of what is behind them, and how bright its own light against the sky's on smoke.</summary>
+        public static float HazeReach = 30000f, HazeLight = 1.3f;
+#if DEV
+        /// <summary>(Development build: "30000 1.3": the haze's reach in metres and its light; says what they are.)</summary>
+        public static string HazeTry(string words)
+        {
+            string[] w = (words ?? "").Trim().Split(' ');
+            if (w.Length == 2) { HazeReach = float.Parse(w[0], System.Globalization.CultureInfo.InvariantCulture); HazeLight = float.Parse(w[1], System.Globalization.CultureInfo.InvariantCulture); }
+            return "far smoke's haze: all but 1/e hidden in " + HazeReach + " m of sea-level air, its light " + HazeLight + " of the sky's on smoke" + (Settings.Haze ? "" : " (off in the settings)");
+        }
+#endif
+        static int hisKnown;                      // (0: not looked for yet; 1: Blackrack's volumetric clouds are installed; 2: they are not)
+        /// <summary>
+        /// Whether Blackrack's volumetric clouds are installed (EVE's raymarched renderer, by its type's name), so that the sheet
+        /// reads his pictures and dims smoke that lies behind his clouds (layers.glsl). Looked for once. Without his clouds, or
+        /// with "behind_his_clouds = false" in the settings, nothing of his is read.
+        /// </summary>
+        public static bool HisClouds
+        {
+            get
+            {
+                if (hisKnown == 0)
+                {
+                    hisKnown = 2;
+                    try
+                    {
+                        foreach (System.Reflection.Assembly a in System.AppDomain.CurrentDomain.GetAssemblies())
+                            if (a.GetType("Atmosphere.DeferredRaymarchedVolumetricCloudsRenderer", false) != null) { hisKnown = 1; break; }
+                    }
+                    catch (System.Exception) { }
+                    if (hisKnown == 1) Addon.Log("Blackrack's volumetric clouds are here: smoke behind them is dimmed by them");
+                }
+                return hisKnown == 1 && Settings.BehindHis;
+            }
+        }
+        /// <summary>(Development build: his pictures read the other way up, to find which way a system lays them.)</summary>
+        public static bool HisFlip;
+#if DEV
+        /// <summary>(Development build: "flip" or "straight": which way up his pictures are read; says what is known of his clouds.)</summary>
+        public static string His(string how)
+        {
+            if (how == "flip") HisFlip = true; else if (how == "straight") HisFlip = false;
+            return "Blackrack's clouds " + (hisKnown == 1 ? "installed" : hisKnown == 2 ? "not installed" : "not looked for yet") + ", read " + (HisFlip ? "the other way up" : "as the sheet is laid") + (Settings.BehindHis ? "" : " (off in the settings)");
+        }
+#endif
         static readonly int slotNote = Shader.PropertyToID("_VolSlot"), layersNote = Shader.PropertyToID("_VolLayers"), slotsNote = Shader.PropertyToID("_VolSlots"), sheetNote = Shader.PropertyToID("_VolSheet");
         static readonly int holeNote = Shader.PropertyToID("_VolHole"), holeWayNote = Shader.PropertyToID("_VolHoleWay");
         static readonly int holeANote = Shader.PropertyToID("_VolHoleA"), holeBNote = Shader.PropertyToID("_VolHoleB"), holeCNote = Shader.PropertyToID("_VolHoleC"),
@@ -233,6 +384,7 @@ namespace VolumetricExplosions
             Order(ships, eye);
             // (how much of the screen the ships' boxes cover, the corners of the rectangle that holds them all: see ShipsHalf)
             shipsHalfNow = ShipsHalf;
+            atlasHalfNow = AtlasHalf;
             Camera seer = cameras.Length > 0 && cameras[0] != null ? cameras[0] : cameras.Length > 1 ? cameras[1] : null;
             if (!Settings.Half || seer == null) { ShipsHalf = false; shipsUnderFor = 0f; }
             else if (ships.Count == 0)
@@ -249,7 +401,13 @@ namespace VolumetricExplosions
                 Matrix4x4 v = seer.projectionMatrix * seer.worldToCameraMatrix;
                 foreach (Site s in ships) Covers(ref r, v, s.BoxMatrix, seer);
                 float covered = Area(r);
-                bool wanted = ShipsHalf ? covered > 1f / 6f : covered > 0.25f;
+                // (Since 2026-11-16, while the frame rate holds (see Roomy): from six tenths of the screen and back under four tenths. A
+                // wreck's burning patch 85 m off covers a quarter of the screen, and took its fire and all the crash's smoke to half
+                // size for the seconds of the crash; a rocket's plume from beside the pad the same. Inside a plume the boxes cover all
+                // of the screen, and that is half size at once as before; and where the card cannot keep up with less, the frame rate
+                // says so within half a second, and the line is a quarter again.)
+                bool roomy = Settings.Sharp && Roomy && Settings.TestShipsHalf != 1f;
+                bool wanted = ShipsHalf ? covered > (roomy ? 0.4f : 1f / 6f) : covered > (roomy ? 0.6f : 0.25f);
                 // (Since 2026-11-04: back to whole only once under the line for ShipsWholeAfter seconds running; to half at once, as
                 // before, for the frame rate inside a plume. A plume's edge going to and fro across the line went sharp and soft by turns,
                 // and the ground fires' flames with it. Settings.TestShipsHalf 1: back at once, as until then.)
@@ -268,9 +426,38 @@ namespace VolumetricExplosions
             }
 #if DEV
             // (drawn so from the next frame on, which reads it as shipsHalfNow)
-            if (ShipsHalf != shipsHalfNow) Addon.Log("the ships' picture now " + (ShipsHalf ? "half size" : "whole") + " (frame " + Time.frameCount + ", drawn so from the next; " + ships.Count + " ships' patches covering " + wholeCovered.ToString("F2") + ")");
+            if (ShipsHalf != shipsHalfNow) Addon.Log("the ships' picture now " + (ShipsHalf ? "half size" : "whole") + " (frame " + Time.frameCount + ", drawn so from the next; " + ships.Count + " ships' patches covering " + wholeCovered.ToString("F2") + "; " + RoomySays + (Settings.Sharp ? "" : ", sharp_when_fast off") + ")");
 #endif
+            // (the patches that stay where they are: whole where they cover little of the screen, see AtlasHalf)
+            if (!Settings.Half || seer == null) { AtlasHalf = Settings.Half; atlasUnderFor = 0f; }
+            else if (ShipsHalf || shipsHalfNow || Settings.TestLayers != 0f || WholeNever) { AtlasHalf = true; atlasUnderFor = 0f; }
+            else if (Settings.Sharp && Roomy) { AtlasHalf = false; atlasUnderFor = 0f; }
+            else if (world.Count > 0)
+            {
+                Matrix4x4 v = seer.projectionMatrix * seer.worldToCameraMatrix;
+                float covered = 0f;
+                foreach (Site s in world)
+                {
+                    Vector4 r = new Vector4(2f, 2f, -2f, -2f);
+                    Covers(ref r, v, s.BoxMatrix, seer);
+                    covered += Area(r);
+                }
+                float line = Mathf.Clamp(0.125f * Settings.Quality, 0.03f, 0.2f);
+                bool wanted = AtlasHalf ? covered > line : covered > 1.6f * line;
+                if (!AtlasHalf && wanted) atlasUnderFor = 0f;
+                else if (AtlasHalf && !wanted)
+                {
+                    atlasUnderFor += Time.unscaledDeltaTime;
+                    if (atlasUnderFor < ShipsWholeAfter) wanted = true;
+                }
+                else atlasUnderFor = 0f;
+#if DEV
+                if (wanted != AtlasHalf) Addon.Log("the patches' picture now " + (wanted ? "half size" : "whole") + " (frame " + Time.frameCount + ", drawn so from the next; " + world.Count + " patches covering " + covered.ToString("F3") + ")");
+#endif
+                AtlasHalf = wanted;
+            }
             bool any = world.Count + ships.Count > 0;
+            if (any && Settings.Half && Settings.Sharp) Govern();
             for (int which = 0; which < 2; which++)
             {
                 Camera c = which < cameras.Length ? cameras[which] : null;
@@ -327,7 +514,7 @@ namespace VolumetricExplosions
             CommandBuffer c = commands[which];
             if (c == null || attached[which] != camera || material == null) { NotFor(); return; }
             c.Clear();
-            bool half = Settings.Half;
+            bool half = Settings.Half && atlasHalfNow;
             int wide = camera.pixelWidth, tall = camera.pixelHeight;
             slotWide = half ? (wide + 1) / 2 : wide;
             slotTall = half ? (tall + 1) / 2 : tall;
@@ -433,7 +620,7 @@ namespace VolumetricExplosions
                     // into the whole picture its smoke was cut by the depth of the wrong pixels of the scene till the game went on. A ship's
                     // patch is walked once for each camera, into this picture only, so its own material, read when the camera draws,
                     // holds. Settings.TestShipsHalf 1: as its Step last left it.)
-                    if (Settings.TestShipsHalf != 1f) s.WalkShips(shipsHalfNow && half);
+                    if (Settings.TestShipsHalf != 1f) s.WalkShips(shipsHalfNow && Settings.Half);
                     c.DrawMesh(Assets.Cube, s.BoxMatrix, s.Marching, 0, 0);
                     Covers(ref rect, view, s.BoxMatrix, camera);
                 }
@@ -471,7 +658,14 @@ namespace VolumetricExplosions
             c.SetRenderTarget(BuiltinRenderTextureType.CameraTarget);
             float test = Settings.TestLayers == 1f ? 1f : Settings.TestLayers == 3f ? 2f : Settings.TestLayers == 4f ? 3f : Settings.TestLayers == 6f ? 4f : Settings.TestLayers == 7f ? 5f : 0f;
             material.SetVector(layersNote, new Vector4(slots, shipsIn + flaming.Count > 0 ? (shipsHalfNow ? 2f : 1f) : 0f, perRow, half ? 1f : 0f));
-            material.SetVector(slotsNote, new Vector4(slotWide, slotTall, test, 0f));
+            // (w: how keenly a half-sized slot is enlarged, see layers.glsl; under three quarters, which is the picture of the smoke in front's)
+            material.SetVector(slotsNote, new Vector4(slotWide, slotTall, test, half ? Mathf.Clamp(Settings.TryF >= 0f ? Settings.TryF : Keen, 0f, 0.7f) : 0f));
+            material.SetVector(hisNote, new Vector4(HisClouds ? 1f : 0f, HisFlip ? 1f : 0f, 0f, 0f));
+            // (the air between the camera and far smoke: the sky's light as the nearest patch here has it, a little more than a
+            // white thing in shade shows of it, and a share hidden a metre that is all but e-fold in HazeReach at sea level)
+            Vector4 haze = Vector4.zero;
+            if (Settings.Haze && slots > 0 && inRange[0] != null) haze = inRange[0].Haze;
+            material.SetVector(airNote, new Vector4(HazeLight * haze.x, HazeLight * haze.y, HazeLight * haze.z, haze.w > 0.004f ? haze.w / HazeReach : 0f));
             material.SetVector(sheetNote, rect.z > rect.x && rect.w > rect.y ? rect : Vector4.zero);
             // (and the burning patches whose flames were walked whole: within each one's rectangle, its slot is passed over)
             int holed = flaming.Count;

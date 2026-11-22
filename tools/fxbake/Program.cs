@@ -19,8 +19,19 @@ static class Program
 
     static int Main(string[] args)
     {
-        if (args.Length < 1) { Console.Error.WriteLine("usage: fxbake <output folder> [--preview]"); return 2; }
+        if (args.Length < 1) { Console.Error.WriteLine("usage: fxbake <output folder> [--preview] | <output folder> --detail [side] [share of each size of lump, four numbers] [share of each of the three bigger in the slope]"); return 2; }
         string folder = args[0];
+        if (args.Length > 1 && args[1] == "--detail")
+        {
+            // (the cube of noise alone, for trying another against the one in use: its side, and how much each size of lump counts for)
+            Directory.CreateDirectory(folder);
+            int side = args.Length > 2 ? int.Parse(args[2]) : Detail.Side;
+            if (args.Length > 3) { string[] w = args[3].Split(','); for (int k = 0; k < w.Length && k < 4; k++) Detail.Shares[k] = float.Parse(w[k], System.Globalization.CultureInfo.InvariantCulture); }
+            if (args.Length > 4) { string[] w = args[4].Split(','); for (int k = 0; k < w.Length && k < 3; k++) Detail.Slopes[k] = float.Parse(w[k], System.Globalization.CultureInfo.InvariantCulture); }
+            File.WriteAllBytes(Path.Combine(folder, "detail.bin"), Detail.Block(side, out float steep));
+            Console.WriteLine("detail.bin (" + side + " cells each way; shares " + string.Join(", ", Detail.Shares) + "; steepest slope " + steep.ToString("F2") + " per repeat: the shader's Steepest)");
+            return 0;
+        }
         bool preview = args.Length > 1 && args[1] == "--preview";
         Directory.CreateDirectory(folder);
 
@@ -41,8 +52,8 @@ static class Program
             Png.Write(Path.Combine(folder, "scorch" + tag + ".png"), marks[k], 512, 512);
             Png.Write(Path.Combine(folder, "embers" + tag + ".png"), Simple.Embers(256, k), 256, 256);
         }
-        File.WriteAllBytes(Path.Combine(folder, "detail.bin"), Detail.Block(96, out float steepest));
-        Console.WriteLine("puff.png " + width + "x" + height + ", glow.png, spark.png, ring.png, shard.png, " + Burn.Kinds + " kinds of scorch.png and embers.png, detail.bin (96 cells each way; mean " + Detail.Mean + ", spread " + Detail.Spread + ", steepest slope " + steepest.ToString("F2") + " per repeat: the shader's Steepest)");
+        File.WriteAllBytes(Path.Combine(folder, "detail.bin"), Detail.Block(Detail.Side, out float steepest));
+        Console.WriteLine("puff.png " + width + "x" + height + ", glow.png, spark.png, ring.png, shard.png, " + Burn.Kinds + " kinds of scorch.png and embers.png, detail.bin (" + Detail.Side + " cells each way; mean " + Detail.Mean + ", spread " + Detail.Spread + ", steepest slope " + steepest.ToString("F2") + " per repeat: the shader's Steepest)");
 
         if (preview)
         {
@@ -128,13 +139,20 @@ static class Splat
 static class Detail
 {
     public const float Mean = 0.45f, Spread = 0.2f;          // what the first byte is scaled to: its mean and how widely it varies about it
+    public const int Side = 160;
+    /// <summary>How much each size of lump counts for, biggest first (4, 9, 20 and 40 to a repeat). The fourth only where the cube has the cells for it.</summary>
+    /// <summary>How much each of the three bigger sizes counts for in the slope (which side of a lump faces the sun). Until 2026-11-16 the two biggest
+    /// alone, 0.62 and 0.38: the smoke's light and shade had nothing in it finer than three metres in a big blast's cloud.</summary>
+    public static readonly float[] Slopes = { 0.48f, 0.30f, 0.22f };
+    public static readonly float[] Shares = { 0.40f, 0.27f, 0.20f, 0.13f };      // (until 2026-11-16: 96 cells each way and 0.52, 0.32, 0.16 of three sizes, which `--detail 96 0.52,0.32,0.16,0 0.62,0.38,0` still makes to the byte)
 
     public static byte[] Block(int side, out float steepest)
     {
         int count = side * side * side;
         var lumps = new float[count];
         var broad = new float[count];                            // the big lumps alone: the slope is taken from these, so that it is whole puffs that get a lit side and a shaded one, not every pimple
-        Vector3[][] points = { Points(4, 11), Points(9, 12), Points(20, 13) };
+        Vector3[][] points = { Points(4, 11), Points(9, 12), Points(20, 13), Points(40, 14) };
+        float s0 = Shares[0], s1 = Shares[1], s2 = Shares[2], s3 = Shares[3];
         Parallel.For(0, side, z =>
         {
             for (int y = 0; y < side; y++)
@@ -150,8 +168,9 @@ static class Detail
                     float push = 0.06f * (Tiled(u, v, w, 6, 42) - 0.5f);
                     float big = Cells(points[0], 4, u + bu, v + bv, w + bw), middling = Cells(points[1], 9, u + 0.6f * bu + push, v + 0.6f * bv - push, w + 0.6f * bw + push),
                           little = Cells(points[2], 20, u + 0.3f * bu - push, v + 0.3f * bv + push, w + 0.3f * bw - push);
-                    lumps[x + (y + z * side) * side] = 0.52f * big + 0.32f * middling + 0.16f * little;
-                    broad[x + (y + z * side) * side] = 0.62f * big + 0.38f * middling;
+                    float least = s3 > 0f ? Cells(points[3], 40, u + 0.15f * bu + push, v + 0.15f * bv + push, w + 0.15f * bw - push) : 0f;
+                    lumps[x + (y + z * side) * side] = s0 * big + s1 * middling + s2 * little + s3 * least;
+                    broad[x + (y + z * side) * side] = Slopes[0] * big + Slopes[1] * middling + Slopes[2] * little;
                 }
         });
         double sum = 0, squares = 0;

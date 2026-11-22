@@ -186,6 +186,23 @@ namespace VolumetricExplosions
             return OverAt(z);
         }
 
+        /// <summary>(for Razing, outside a patch) Kinney and Graham's peak overpressure at z metres for a kilogram of TNT, in atmospheres.</summary>
+        internal static float OverAtOpen(float z) => OverAt(z);
+
+        /// <summary>
+        /// (Since 0.12.0.) A blast told to the buildings of the space centre (Razing): its charge as its push has it (a tenth of
+        /// what burns, and all of an explosive's own), 1.8 times on the ground, in the air of the place.
+        /// </summary>
+        void Raze(Plan pl, Vector3 c, bool onGround)
+        {
+            if (pl.warm || !Settings.Raze || !HighLogic.LoadedSceneIsFlight) return;
+            float tnt = 0.1f * Mathf.Max(pl.charge, pl.fire) + pl.explosive;
+            if (tnt < 0.5f) return;
+            Vector3d world = frame.ToWorld(c);
+            double kPa = body != null && body.atmosphere ? FlightGlobals.getStaticPressure(world, body) : 0.0;
+            Razing.Blast((Vector3)world, onGround ? 1.8f * tnt : tnt, (float)(kPa * 1000.0), sound > 0f ? sound : 340f);
+        }
+
         /// <summary>Kinney and Graham's peak overpressure of a blast in the open air, in atmospheres, at z metres for a kilogram of TNT.</summary>
         static float OverAt(float z)
         {

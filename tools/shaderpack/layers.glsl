@@ -51,6 +51,10 @@ uniform sampler2D _CameraDepthTexture;
 uniform vec4 _WeatherClouds;           // x: 1 if a weather mod's clouds were laid on before the smoke in this camera's drawing (Natural Weather 0.4 and on)
 uniform sampler2D _WeatherCloudsPic;   // those clouds: their light, and how much shows through them
 uniform sampler2D _WeatherCloudsDist;  // and how far off along the ray each is, on the whole, in kilometres
+uniform vec4 _VolAir;                  // the air between the camera and far smoke: rgb the light it scatters towards the camera where it hides all (the sky's, as light); w how much of what is behind it a metre of it hides (0: none: no air, or "far_haze = false")
+uniform vec4 _VolHisClouds;            // x: 1 if Blackrack's volumetric clouds (EVE) are installed and their pictures below are to be read; y: 1 to read them the other way up
+uniform sampler2D scattererReconstructedCloud;   // his clouds as he lays them on this camera's picture (his own name for it): their light, and in a how much shows through them
+uniform sampler2D historyDistance;               // and how far off along the ray they lie, in hundreds of metres (his own name; less than nought: none)
 in vec2 vs_TEXCOORD0;
 layout(location = 0) out vec4 SV_Target0;
 layout(location = 1) out vec4 SV_Target1;   // (only for the picture of the smoke in front: see the start of main)
@@ -115,7 +119,7 @@ void main()
     // pixel takes a slot's own pixel there (a slot the screen's size, or the ships' picture at it: the four under it, as
     // much as they hide on the whole). Until 2026-10-28 everything drawn as sprites was put over the smoke or under it whole,
     // by the queue it was drawn in: a fire's flash or a puff behind a cloud showed through it.
-    if (_VolSlots.w > 0.5)
+    if (_VolSlots.w > 0.75)
     {
         float a0 = 0.0, d0 = 0.0, w0 = 0.0, sumA = 0.0, sumD = 0.0, sumD2 = 0.0, through = 1.0;
         int found = 0;
@@ -212,6 +216,20 @@ void main()
         if (!weighed) { weighed = true; share = weighFour(share, pixel, c00, c10, c01, c11); }
         vec4 smoke = s00 * share.x + s10 * share.y + s01 * share.z + s11 * share.w;
         if (smoke.a <= 0.0005 && smoke.r + smoke.g + smoke.b <= 0.0005) continue;
+        // (Enlarged keenly, since 2026-11-16: a blend of the four pixels round a place is the softest way there is to enlarge a
+        // picture, and a busy scene's smoke is all walked at half size: its billows' edges, a pixel or two wide in the slot, came
+        // out twice as wide and soft on the screen. So what the blend has more or less of than the slot has on the whole just
+        // there (the four and the eight pixels that touch them) is made more so, and never beyond the four themselves, so that
+        // no edge gets a halo. _VolSlots.w: how much.)
+        if (small && _VolSlots.w > 0.001)
+        {
+            vec4 ring = texelFetch(_VolAtlas, origin + clamp(base + ivec2(0, -1), ivec2(0), last), 0) + texelFetch(_VolAtlas, origin + clamp(base + ivec2(1, -1), ivec2(0), last), 0)
+                      + texelFetch(_VolAtlas, origin + clamp(base + ivec2(-1, 0), ivec2(0), last), 0) + texelFetch(_VolAtlas, origin + clamp(base + ivec2(2, 0), ivec2(0), last), 0)
+                      + texelFetch(_VolAtlas, origin + clamp(base + ivec2(-1, 1), ivec2(0), last), 0) + texelFetch(_VolAtlas, origin + clamp(base + ivec2(2, 1), ivec2(0), last), 0)
+                      + texelFetch(_VolAtlas, origin + clamp(base + ivec2(0, 2), ivec2(0), last), 0) + texelFetch(_VolAtlas, origin + clamp(base + ivec2(1, 2), ivec2(0), last), 0);
+            vec4 round_ = (ring + s00 + s10 + s01 + s11) / 12.0;
+            smoke = clamp(smoke + (smoke - round_) * (4.0 * _VolSlots.w), min(min(s00, s10), min(s01, s11)), max(max(s00, s10), max(s01, s11)));
+        }
         vec2 deep = texelFetch(_VolAtlasDepth, origin + c00, 0).rg * share.x + texelFetch(_VolAtlasDepth, origin + c10, 0).rg * share.y
                   + texelFetch(_VolAtlasDepth, origin + c01, 0).rg * share.z + texelFetch(_VolAtlasDepth, origin + c11, 0).rg * share.w;
         colours[n] = smoke;
@@ -261,6 +279,39 @@ void main()
         vec2 onScreen = vs_TEXCOORD0;
         float cover = clamp(1.0 - textureLod(_WeatherCloudsPic, onScreen, 0.0).a, 0.0, 1.0);
         float cloudAt = textureLod(_WeatherCloudsDist, onScreen, 0.0).r * 1000.0;
+        if (cover > 0.002 && cloudAt > 0.0)
+        {
+            float cloudSpread = max(cloudAt / 6.0, 60.0);
+            for (int i = 0; i < n; i++)
+            {
+                float wide = sqrt(spreads[i] * spreads[i] + cloudSpread * cloudSpread);
+                float behind = 1.0 / (1.0 + exp(-clamp(1.702 * (depths[i] - cloudAt) / wide, -30.0, 30.0)));
+                colours[i] *= 1.0 - cover * behind;
+            }
+        }
+    }
+
+    // The air between (2026-11-16). Smoke kilometres off is seen through kilometres of air, which hides a share of it and
+    // puts its own pale light in its place, as it does with the hills behind: the further, the paler and bluer. Without it
+    // a nuclear explosion's cloud 12 km off stood as dark and sharp as one at arm's length, pasted onto a hazy landscape (the
+    // films of 2026-11-16, br-first). Nothing within 300 m, where it could not be told, and the smoke hides what it hid.
+    if (_VolAir.w > 0.0)
+        for (int i = 0; i < n; i++)
+        {
+            float kept = exp(-_VolAir.w * max(depths[i] - 300.0, 0.0));
+            colours[i].rgb = mix(colours[i].a * _VolAir.rgb, colours[i].rgb, kept);
+        }
+
+    // Blackrack's volumetric clouds, the same way (2026-11-16). He lays his clouds on just before the see-through things,
+    // so smoke in front of them is right already; smoke behind them was drawn over them whole: a nuclear explosion's cloud
+    // 12 km off stood dark and sharp in front of the low cloud and haze that veiled the ground it stood on (the owner: "the
+    // nuke's smoke showing behind clouds"). His renderer leaves two pictures set for every shader as it lays the clouds on:
+    // their light with how much shows through, and how far off they lie. Read here as the weather's are above.
+    if (_VolHisClouds.x > 0.5)
+    {
+        vec2 onScreen = vec2(vs_TEXCOORD0.x, _VolHisClouds.y > 0.5 ? 1.0 - vs_TEXCOORD0.y : vs_TEXCOORD0.y);
+        float cover = clamp(1.0 - textureLod(scattererReconstructedCloud, onScreen, 0.0).a, 0.0, 1.0);
+        float cloudAt = textureLod(historyDistance, onScreen, 0.0).r * 100.0;
         if (cover > 0.002 && cloudAt > 0.0)
         {
             float cloudSpread = max(cloudAt / 6.0, 60.0);

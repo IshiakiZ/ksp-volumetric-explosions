@@ -391,6 +391,9 @@ namespace VolumetricExplosions
                         piece.due += piece.resting ? every * 2.5f : every;
                         if (!Trail(piece.x.x, piece.x.y, piece.x.z, piece.v.x, piece.v.y, piece.v.z, piece.trail, piece.tint, piece.white, lasts)) break;
                     }
+                    // (the flame at its head while it flies: see Head)
+                    if (!piece.resting && piece.v.sqrMagnitude > 1f && Settings.TestSoot < 1f && Settings.TryX != 0f)
+                        Head(piece.x.x, piece.x.y, piece.x.z, piece.v.x, piece.v.y, piece.v.z, piece.trail, piece.tint);
                 }
             }
         }

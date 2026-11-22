@@ -22,7 +22,7 @@ namespace VolumetricExplosions
     [KSPAddon(KSPAddon.Startup.Flight, false)]
     public sealed class Addon : MonoBehaviour
     {
-        public const string Version = "0.11.0";
+        public const string Version = "0.12.0";
 
         static GameObject[] ours;            // built once, reused for every flight
         static Transform shelf;              // an inactive parent that keeps the templates from playing
@@ -95,6 +95,12 @@ namespace VolumetricExplosions
             Log("v" + Version + " ready (quality " + Settings.Quality + ", up to " + Settings.MaxParticles + " particles, " + Air.Threads + " threads)");
         }
 
+        // (Since 2026-11-19: each ship's believed speed, for the speed of a part that dies: see Records.Pace.)
+        void FixedUpdate()
+        {
+            if (hooked) Records.Watch();
+        }
+
         void OnDestroy()
         {
             // Hand the game its own effects back when the flight scene goes away.
@@ -123,6 +129,11 @@ namespace VolumetricExplosions
         public static float FollowFrom = 0.15f, FollowLeast = 0f;
         public static bool SoundTravels = true;        // the bang is heard when its sound has had time to get to the camera, not on the instant
         public static bool Knock = false;              // (since 0.9.0) blasts push craft, and break what they knock harder than it can take (see Site.Knocks): off as installed
+        public static bool Raze = true;                // (since 0.12.0) a blast strong enough where a building of the space centre stands brings it down (see Razing)
+        public static bool BehindHis = true;           // (since 0.12.0) smoke that lies behind Blackrack's volumetric clouds is dimmed by them (see Layers.HisClouds)
+        public static bool Sharp = true;               // (since 0.12.0) with "half" on, smoke that stays where it is is still walked at the screen's full size while the frame rate holds (see Layers.Roomy)
+        public static float SharpFps = 50f;            // (since 0.12.0) the frame rate under which it goes back to half size
+        public static bool Haze = true;                // (since 0.12.0) far smoke is seen through the air between: paler and bluer the further off (see Layers, _VolAir)
         public static bool Shadows = true;             // the smoke throws its shadow on what is under it, in sunlight (see tools/shaderpack/shadow.glsl)
         public static bool Shaded = true;              // (since 0.8.0) what stands in the sun (the craft, the tower, buildings, the ground) throws its shadow into the smoke (see SunShadow)
         public static bool Built = false;              // use the shaders built in the Unity editor even where the hand-packed OpenGL ones would do (for comparing the two)
@@ -158,6 +169,10 @@ namespace VolumetricExplosions
         /// <summary>For measuring how steady the picture is (development build; never read from the file): move the samples along each ray by this part of a step, make the grid's cells this much bigger, move the grid by this part of a cell, draw only part of the picture (see the shader), and (1) leave the smoke where each grid has it instead of carrying it on between grids.</summary>
         public static float TestCloudGrids = 0f, TestCloudRepeat = 0f, TestCloudMass = 0f;      // (development build, for tuning clouds made of thermals: how much longer between grids than usual; the billows' repeat as a share of the thermal's radius; how much thicker)
         public static float TestLattice = 0f, TestCell = 1f, TestShift = 0f, TestView = 0f, TestSmoke = 0f;
+        /// <summary>(development build, 2026-11-21: 1 writes to the log, each frame, where a ship's strongest nozzle is on its patch's cells, its flame's bits (how many, their heat, age and place, how many were laid) and its grid's flame: for the flame's glow that swelled and faded)</summary>
+        public static float TestJetPhase = 0f;
+        /// <summary>(for trying, since 2026-11-21: 1 lays an engine's flame as until then, its gusts slow as well as quick and its bits fewer as the scene fills; see Site.Flame)</summary>
+        public static float TestJetSteady = 0f;
         /// <summary>(for trying: more than nought shows, instead of the smoke, how many times each ray went round its loop, over this many: red all, green in smoke, blue leaps over clear air)</summary>
         public static float TestRounds = 0f;
         /// <summary>(for trying: 1 lights the ground and the craft as until 0.7.1: as strong by night as by day, the quick flicker alone, left to the game to draw cheaply; 2 as until 2026-11-10: a blast's flash takes a fire's farther-reaching light at once, and under cloud by day a fire's light is as strong as by night)</summary>
@@ -170,6 +185,10 @@ namespace VolumetricExplosions
         public static float JetPace = 9f, JetCore = 0.25f, JetUneven = 1f, JetWavers = 0.05f, JetRuns = 30f, JetRunsOn = 0.33f;
         // (and the line its pattern is drawn along comes round to the nozzle's so many of the gas's own times late: the time the gas would take over the flame's length at the speed it leaves at)
         public static float JetLags = 1.2f;
+        // (Since 2026-11-20.) And the far part of its pattern boils, its lumps made afresh where they are: so many times a second, from
+        // so much of the flame's length down (begun), fully by so much (full); JetBoils nought: carried down it and no more, as until
+        // then. See jetPattern in the shader.
+        public static float JetBoils = 8f, JetBoilFrom = 0.15f, JetBoilFull = 0.6f;
         // A re-entry glow's head (see Site.Plasma): its shock layer's heat against the glow's own, and how thick its layer and its
         // sheath are laid, against the glow's. (Fields so that a development build can try others while it runs: dev_fx_set.)
         public static float PlasmaHead = 1.2f, PlasmaLayer = 0.75f, PlasmaSheath = 0.25f;
@@ -209,8 +228,12 @@ namespace VolumetricExplosions
         // lumps taller, finer at the edge and less those of the smoke's billows. Filmed from 60, 120 and 220 m by day, and at dusk
         // and at night: tall tongues of flame in black smoke, at no cost that could be measured on the PC (Direct3D), its flames
         // walked whole too. tools/dev/windows/firelook.py.)
-        public static float FireFine = 0.25f, FireDrawnUp = 0.42f, FireEdge = 0.045f, FireBillows = 0.25f, FireBright = 0.45f, FireCreases = 0.25f,
-            FireLightFalls = 1.7f, FireLight = 8f, FireShineFrom = 0.40f, FireShine = 0.15f, FireRises = 1.8f, FireTongues = 1f, FireTall = 1.5f, FireHeat = 1.6f, FireShown = 0.7f, FireCut = 0.35f;
+        public static float FireFine = 0.25f, FireDrawnUp = 0.42f, FireEdge = 0.045f, FireBillows = 0.25f, FireBright = 0.55f, FireCreases = 0.4f,
+            FireLightFalls = 1.7f, FireLight = 8f, FireShineFrom = 0.40f, FireShine = 0.15f, FireRises = 1.8f, FireTongues = 1f, FireTall = 1.5f, FireHeat = 1.6f, FireShown = 0.8f, FireCut = 0.35f;
+        // (Since 2026-11-16 brighter, its creases less dark and its flame drawn hotter: FireBright 0.45, FireCreases 0.25 and FireShown 0.7 until
+        // then. Set beside NASA's photographs of a jet-fuel fireball by daylight (EC84-31808, -31809: yellow-white at its heart, orange at its
+        // edges, opaque, black smoke rolling round its foot), a crash's fireball was orange and grey in equal parts. Filmed at 0.65, 0.5 and 0.9
+        // too (`fire1`): at 0.9 the young fireball was white.)
         // The fires' light on the smoke (see Site.SmokeLamps; since 2026-11-03): each of its three slots keeps to its fire until that
         // is out or a fire with no slot is so many times as strong (without its flicker); a slot going over to another fire fades
         // out over so many seconds and in again there. The light of a fire that puffs keeps so much of its puff's swing on the smoke
@@ -235,11 +258,56 @@ namespace VolumetricExplosions
         public static float TestFire;                  // (for setting one against the other: 1 draws a fire in the open as it was until 2026-10-10, a glow following the billows, instead of in sharp tongues lit by their heat; 2 as it was until 2026-10-18: its thick flame burnt whole, its light through any smoke, its hot smoke unlit by its heat, the daylight taken off the smoke round it, and a fuel blast's dust as a dry crash's)
         public static float TestDusk;                  // (for setting one against the other: 1 lights a fire in the open as on the morning of 2026-10-18: its light stopped by a tenth of the smoke on its way, four times as strong, its smoke's glow up to the flame's own heat)
         public static float TestRise;                  // (for setting one against the other: 1 lets a fuel fireball rise at half the root of its radius and its rind at 0.3 of it, as until 2026-10-18, lying on the ground as a dome)
-        public static float TestPlasma;                // (for setting one against the other: 1 lays a re-entry glow as until 2026-10-21: its shock layer no denser nor hotter than the sheath behind it, the sheath spread a body's width round the craft and as hot, the wake as long as the craft's own reckoning, and all of it soft-edged and torn as an engine's flame)
+        public static float TestPlasma;                // (for setting one against the other: a re-entry glow is laid as until 2026-10-21 again since 2026-11-20, its shock layer no denser nor hotter than the sheath behind it, the sheath spread a body's width round the craft, the wake as long as the craft's own reckoning, and all of it soft-edged and torn as an engine's flame, and its colours go with how strong it is, pink-violet when faint and gold when strong; 1: all of it gold and as hot as the strongest, as until 2026-10-21; 2: the thin bright head of 2026-10-21 to 2026-11-20, see Site.Plasma)
         public static float TestGlare;                 // (for setting one against the other: 1 draws the glare behind every fire at its full strength by day, as until 2026-10-18)
         public static float TestFlash;                 // (for setting one against the other: 1 draws a blast's flash over all smoke, as until 0.7.0, however much of it lies between
                                                        // the camera and the flash; 2 shows it dimmed but tells the log, once a second, how much smoke each flash was dimmed by; 3 leaves the picture's smoothing its
                                                        // memory through a nuclear flash, as until 2026-11-09: see Air.Forget)
+        public static float TestSmokeBlend;            // (for setting one against the other: 1 shows the smoke from each grid as it comes, as until 2026-11-16; 2 the smoke gone over from grid to grid but the billows' places from each as it comes: see Site.FireWas)
+        public static float TryF = -1f;                // (trying: how keenly the smoke's picture is enlarged from half size, 0 to 0.7; below nought, as set in Layers.Keen)
+        public static float TryG = -1f, TryH = -1f, TryI = -1f, TryJ = -1f, TryK = -1f, TryN = -1f;     // (trying, the smoke's surface: G how far it is drawn with one (0: not, as until 2026-11-16), H the least smoke there is any of, I how deep the billows cut, J over how much it comes on, K how thick it is inside, N how much smoke round about it takes; below nought, as set in Site.TuneVolume)
+        public static float TryV = -1f;                // (trying: how strong the light of a rocket's flame on its pad's cloud is; below nought, as set in Site.FlameLights)
+        public static float TryQ = -1f, TryR = -1f;     // (trying: Q how far the light of a rocket's flame on its pad's cloud reaches, as so much of the flame's length; R how high over the grate it is, as so much of the flame out in the open over it; below nought, as set in Site.FlameReach and FlameFoot)
+        public static float TestPadLamp;               // (for setting one against the other: 1 puts the light of a rocket's flame on its pad's cloud as until 2026-11-19, four tenths of the way down the flame, down in the trench: see Site.Ends)
+        public static float TestLampLine;              // (for setting one against the other: 1 lights the smoke from one point of a rocket's flame over its pad, at its foot, as until 2026-11-20, not from all along it: see Site.Ends, FlameLine, and lampFrom in volume.glsl)
+        public static float TestPadShine;              // (for setting one against the other: 1 puts out the light of a rocket's flame on its pad's cloud over a second once its jet leaves the grate, as until 2026-11-20, not as it climbs away: see Pad.Shine)
+        public static float TestDeck;                  // (for setting one against the other: 1 makes no steam off the pad's deck round the flame's foot, as until 2026-11-19: see Site.Ends)
+        public static float TestSpray;                 // (for setting one against the other: 1 draws no streaks of water for a blast at sea, as until 2026-11-19: see Site.Splash)
+        public static float TestLand;                  // (for setting one against the other: 1 lets water or earth a blast threw up go in the frame it comes down, as until 2026-11-20, not thin away: see Site.ComeDown)
+        public static float TestSeed;                  // (for setting one against the other: above nought, a splash's chance, its own and the game's, starts from this number, so that two films of it lay the same jets; nought, as always, each from its own: see Site.Splash)
+        public static float TestVent;                  // (for setting one against the other: 1 lays an explosive's blast under the water with no grey gas coming up through its dome, as until 2026-11-20; 2 its gas but its plumes white, as first made that day; 3 its gas climbing as hot gas and lasting 6 to 16 s, as made at 00:2x that day, where it now goes down with the water and pales: see Site.Splash)
+        public static float TryVent = -1f;             // (trying: how grey an explosive's gas is coming up through a blast at sea's dome, 0 to 1; below nought, as set in Site.Splash)
+        public static float TryPlume = -1f;            // (trying: how grey the plumes an explosive's gas throws up through a blast at sea's dome are at most, as so much of its gas's grey, 0 to 1; below nought, as set in Site.Splash)
+        public static float TryTip = -1f, TryTipThin = -1f;     // (trying: how much faster the lumps at the head of a blast at sea's jets widen, and how much thinner they are, 0 and 0 as until 2026-11-20; below nought, as set in Site.TipSpread and TipThin)
+        public static float TrySprayGrow = -1f, TrySpraySpread = -1f;     // (trying: how much wider a blast at sea's streaks of water get over their lives, 2.2 / 0.6 as until 2026-11-20, and how far round their jets they go, 1 as until then (TryZ 0.2 their drawing out as then); below nought, as set in Site.SprayGrows and SpraySpread, 2.2 and 2)
+        public static float TryGasSettle = -1f, TryGasLife = -1f;     // (trying: how fast an explosive's gas out of a blast at sea settles, metres a second, more or less, where it climbed 0.3 to 0.9 until 2026-11-20 (TestVent 3); how long it lasts, so many times the 6 to 16 s it lasted then; below nought, as set in Site.GasSettles and GasLasts, 1 and 0.5)
+        public static float TrySurge = -1f;            // (trying: how far a blast under the sea's mist runs out low along the water as one widening ring, 0 as until 2026-11-20; below nought, as set in Site.MistSurge)
+        public static float TrySprayDrag = -1f;        // (trying: how hard the air holds back a blast at sea's streaks of water, as the slowing of each metre a second of its speed by each metre a second of it at the sea's air, 0.004 as until 2026-11-20; below nought, as set in Site.SprayDrag)
+        public static float TrySteamStops = -1f;       // (trying: how much a launch's steam stops its rocket's flame's light on the way through it, as a share of what it would stop along a straight line: 0 as until 2026-11-20; below nought, as set in Site.SteamStops)
+        public static float TrySteamLevel = -1f;       // (trying: a launch's steam by night, its flame's light at its strongest so much of the day's: 1 as until 2026-11-20; below nought, as set in Site.SteamNightLevel)
+        public static float TryShoulder = -1f;         // (trying: the camera's shoulder on the smoke, how far light too strong for the picture goes over to white: 0 as until 2026-11-20; below nought, as set in Site.Shoulder)
+        public static float TrySteamScatter = -1f, TrySteamReach = -1f;     // (trying: a launch's steam by night, how much of its flame's light it sends on inside itself to where the straight way does not reach, 0 as until 2026-11-20, and how far that goes, as a share of the straight way's stopping; below nought, as set in Site.SteamScatter)
+        public static float TrySteamWhite = -1f;       // (trying: a launch's steam by night, how much whiter its flame's light the straight way is than what comes round through the steam, 0 none as until 2026-11-20; below nought, as set in Site.SteamWhite)
+        public static float TrySteamKnee = -1f;        // (trying: a launch's steam by night, how much of the top of the picture's range a camera's tone curve bends, colour by colour, 0 none as until 2026-11-20; below nought, as set in Site.SteamKnee)
+        public static float TryJetFades = -1f, TryJetSoot = -1f, TryJetStreaks = -1f, TryJetStreaksFar = -1f, TryJetEndCool = -1f, TryJetCool = -1f, TryJetHot = -1f, TryJetEdge = -1f, TryJetEndTorn = -1f, TryJetTongues = -1f;     // (trying, since 2026-11-20: the sooty engines' flames, kerosene's and a solid motor's, as Site.Plumes has them; below nought, as set there. See Site.PlumeOf)
+        public static float TryJetSheath = -1f, TryJetSheathFrom = -1f, TryJetSheathTo = -1f, TryJetSheathNozzle = -1f;     // (trying: an engine's flame's outer part cooler than its core, by how much of its heat at the edge, 0 as until 2026-11-20; between what thicknesses of flame it goes from that to none; and how much of it there is at the nozzle; below nought, as set in Site.JetSheaths)
+        public static float TryJetHue = -1f, TryJetGain = -1f;     // (trying: a kerosene engine's flame, how far its colours go over to the orange of the Falcon 9's, 0 as until 2026-11-20, and so many times as bright in the thick air, 1 as until then; below nought, as set in Site.JetFuelHue and JetFuelGain)
+        public static float TrySceneStops = -1f, TrySceneScatter = -1f, TrySceneReach = -1f, TrySceneRelief = -1f;     // (trying: the lamps of the scene's light on smoke at night (the floodlights): how much of what the smoke between would stop along a straight line it stops, how much goes round inside the smoke, how far that goes as a share, and how much the billows shade it, all 0 as until 2026-11-20 (lit evenly through); below nought, as set in Site.SceneStops)
+        public static float TryLampLine = -1f;         // (trying: how far up a rocket's flame over its pad, from its foot to the nozzle's mouth, its light on the smoke comes from all along, 0 the foot alone as until 2026-11-20; below nought, as set in Site.FlameLine)
+        public static float TryS = -1f;                // (trying: how much steam boils up off the pad's deck round the flame's foot, as so much of what the trench's ends make; below nought, as set in Site.DeckSteam)
+        public static float TryX = -1f;                // (trying: how many of its own sizes a burning piece's flame is long, the rest of its trail smoke: 0 as until 2026-11-19, by the clock; below nought, as set in Site.Trail, 3)
+        public static float TryW = -1f;                // (trying: the fires' light on the smoke at night, so many times as strong as by day: 1 as until 2026-11-19; below nought, as set in Site.FireGain's use for the smoke, 2.5, and for a launch's steam, Site.SteamNight, 2.5 until 2026-11-20)
+        public static float TryT = -1f, TryU = -1f;     // (trying: T the big billows' size, as so many to what there were until 2026-11-16; U how much the small billows count for in the billows' shade; below nought, as set in Site.TuneVolume)
+        public static float TestRound = -1f;           // (trying: 0 a nuclear explosion's cap stays twice as wide as it is tall once it has rolled up, as until 2026-11-19; below nought, as set in SiteNuke's Shape)
+        public static float TryP = -1f;                // (trying: how far back along its stream new smoke's place among the billows is put, 1 all the way, 0 not at all as until 2026-11-16; below nought, as set in Site.Streams)
+        public static float TryE = -1f;                // (trying: the most metres the billows' pattern repeats over for a blast's smoke; below nought, as set in Site.Burst)
+        public static float TestMass;                  // (for setting one against the other: 1 lays every blast of a crash as a fireball of its own, as until 2026-11-16: see Site.Burst, "one fire of many blasts")
+        public static float TestTakes;                 // (for setting one against the other: 1 gives a blast to any patch of air within 160 m, as until 2026-11-16: see Site.Takes)
+        public static float TestTrail;                 // (for setting one against the other: 1 throws a blast's burning pieces as until 2026-11-16, all much alike, their trails thick and laid a step's worth at one place)
+        public static float TryA = -1f, TryB = -1f, TryC = -1f, TryD = -1f;     // (for a trial in hand: what each stands for is said where it is read; below nought, not set)
+        public static float TryL = -1f, TryM = -1f, TryY = -1f, TryZ = -1f, TryO = -1f;     // (trying, a blast at sea's streaks of water: L how many, so many times what its size gives; M how high, as so much of its jet's height; Y how thick to the eye, so many times as set; Z how far each is drawn out by its speed; O how wide, so many times as set; below nought, as set in Site.Splash)
+        public static float TestFine = -1f;            // (trying: how many pixels a cell of the billows' pattern is read across at the least; below nought, as set in Site.TuneVolume)
+        public static float TestEdge = -1f, TestEdge2 = -1f;     // (trying: how hard the smoke's cut edge is, and how much thicker just inside it; below nought, as set in Site.TuneVolume)
         public static float TestSoot;                  // (for setting one against the other: 1 makes the smoke of a fire as it was until 2026-10-09: a fireball's soot shown dot by dot, burning things' smoke thrown as an engine's)
         public static float TestFireSlots;             // (for setting one against the other: 1 gives the smoke the light of a patch's three strongest fires as each frame has them, as until 2026-11-03, not each slot kept to its fire: see Site.SmokeLamps)
         public static float TestBurnSmoke;             // (for setting one against the other: 1 sends up the smoke of something burning with a flame of its own from just over its foot, already dark, as until 2026-11-03, not hot from its flames' tips: see Site.Smoulder)
@@ -253,6 +321,7 @@ namespace VolumetricExplosions
         public static float TestFireBlend;             // (for setting one against the other: 1 shows a fire that stands from each new grid as it comes, as until 2026-11-04, not going over from the grid before's flame: see _VolFireWasSize in volume.glsl)
         public static float TestSlump;                 // (for setting one against the other: 1 leaves cold smoke lying on flat ground where it lies, as until 2026-11-04, not spreading out from where it lies thickest as heavy air does: see Site.Slumps)
         public static float TestShipsHalf;             // (for setting one against the other: 1 sends the ships' picture to half size and back as until 2026-11-04: a box with a corner behind the camera taken as the whole screen, here and for which grid comes first, a rectangle off the screen past a corner as covering it, back to whole at once, and each ship's patch walked as its last Step left it, which differs from the picture as drawn only in a frame with no Step, the game paused: see Layers.Covers, Layers.ShipsHalf and Site.WalkShips)
+        public static float TestSceneCone;             // (for setting one against the other: 1 lets the scene's spotlights (the floodlights) light smoke every way, not only inside their cones; 2 puts none of the scene's lamps on smoke at all: see Site.TuneScene)
         public static float TestLayers;                // (for seeing what putting the patches' smoke in depth order pixel by pixel is worth, see Layers: 1 lays them over one another in the order the game used to draw them in; 2 has each patch put on the screen by its own box, as before 0.5.0; 3 shows each patch in a colour of its own, in depth order, and 4 the same in the old order; 5 puts one slot to a row of the atlas; 6 shows how far behind the nearest patch's smoke the next lies (red, 0 to 10 m) and how widely each is spread along the ray (green the nearest, blue the next, 0 to 5 m); 7 lays them over one another in depth order, mixed where close, as until 2026-10-10; 8 walks the ships' patches at half size always, and 9 never: see Layers.ShipsHalf)
         public static float TestBlaze;                 // (for setting one against the other, and for measuring what it costs: 1 leaves the fire a blast leaves on the ground as it was until 0.6.2: out within half a minute whatever was spilt, a pool of its own for every blast, however near the last, and nothing burning round about it. 2 is the new fire without the patches of spilt fuel that burn round about the pool; 3 has those patches after sundown too, when as installed they are left out because they cannot light the ground. See Site.AddFire, and Plan)
 
@@ -287,6 +356,11 @@ namespace VolumetricExplosions
                 node.TryGetValue("shake", ref Shake);
                 node.TryGetValue("push", ref Push);
                 node.TryGetValue("blasts_push", ref Knock);
+                node.TryGetValue("blasts_raze", ref Raze);
+                node.TryGetValue("behind_his_clouds", ref BehindHis);
+                node.TryGetValue("far_haze", ref Haze);
+                node.TryGetValue("sharp_when_fast", ref Sharp);
+                node.TryGetValue("sharp_fps", ref SharpFps);
                 node.TryGetValue("collide", ref Collide);
                 node.TryGetValue("sound_travels", ref SoundTravels);
                 node.TryGetValue("shadows", ref Shadows);

@@ -60,6 +60,10 @@ namespace VolumetricExplosions
             streaks.renderMode = ParticleSystemRenderMode.Stretch;
             streaks.velocityScale = 0.035f;
             streaks.lengthScale = 1.6f;
+            // (since 2026-11-19: never thinner than a pixel and a half, as the embers' least size: a spark is a few hundredths of a
+            // metre, under a pixel at sixty metres, and a crash's sparks could not be seen from there even at night; a real one
+            // is a point of light the eye and the camera see whatever its size)
+            streaks.minParticleSize = 0.0012f;
             if (ground) Bounce(system, 0.35f);
             system.Play(false);
             return system;
@@ -108,6 +112,29 @@ namespace VolumetricExplosions
             streaks.renderMode = ParticleSystemRenderMode.Stretch;
             streaks.velocityScale = 0.07f;
             streaks.lengthScale = 1.2f;
+            system.Play(false);
+            return system;
+        }
+
+        /// <summary>
+        /// (Since 2026-11-19.) The water a blast at sea throws up, as streaks (see Site.Splash): thrown out and up along the
+        /// blast's jets, a little slowed by the air and falling back at the world's pull, each drawn stretched along the way it
+        /// goes, widening and thinning as spray does. On the patch's grid alone a jet a metre thick could not be held, and the
+        /// water was a soft white ball with an ear or two, where the Navy's photographs of its shock trials show fingers of
+        /// spray streaking out of a white dome.
+        /// </summary>
+        public static ParticleSystem Spray(Transform parent, float gravity, float air)
+        {
+            ParticleSystem system = New(parent, "Spray", Assets.Dust, -15f, 4000);
+            Fall(system, gravity, 0.012f * Mathf.Max(0.3f, air));          // (as Site.SprayDrag: Site.Splash sets it again at every splash)
+            Fade(system, new[] { Color.white, Color.white, Color.white }, new[] { 1f, 0.75f, 0f }, 0.6f);
+            ParticleSystem.SizeOverLifetimeModule size = system.sizeOverLifetime;
+            size.enabled = true;
+            size.size = new ParticleSystem.MinMaxCurve(1f, new AnimationCurve(new Keyframe(0f, 0.6f), new Keyframe(1f, 1.32f)));     // (as Site.SprayGrows: Site.Splash sets it again at every splash)
+            var streaks = system.GetComponent<ParticleSystemRenderer>();
+            streaks.renderMode = ParticleSystemRenderMode.Stretch;
+            streaks.velocityScale = 0.32f;                 // (as Site.SprayDrawnOut; Site.Splash sets it again at every splash, for TryZ)
+            streaks.lengthScale = 1.3f;
             system.Play(false);
             return system;
         }

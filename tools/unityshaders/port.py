@@ -640,10 +640,19 @@ def program(which, header):
             if name in GIVEN or name in seen: continue
             seen.add(name); declared.append("            %s %s;%s" % (kind(glsl_type), name, "     // " + note if note else ""))
     textures = []
+    # (A picture named as another with "Was" after it, the same thing a moment before, is read through that other's sampler:
+    # Direct3D gives a pixel program sixteen samplers, and volume.glsl, with the grid before's pictures beside the grid's own
+    # since 2026-11-16, has more pictures than that. The packer (windows.py) takes a picture with no sampler of its own.)
+    every = {name for stage in (vertex, fragment) for name, dims, note in stage["textures"]}
     for stage in (vertex, fragment):
         for name, dims, note in stage["textures"]:
             if name in seen: continue
-            seen.add(name); textures.append("            Texture%s %s; SamplerState sampler%s;%s" % (dims if dims in ("2DArray", "Cube") else "%dD" % dims, name, name, "     // " + note if note else ""))
+            shape = dims if dims in ("2DArray", "Cube") else "%dD" % dims
+            if name.endswith("Was") and name[:-3] in every:
+                seen.add(name); textures.append("            Texture%s %s;%s" % (shape, name, "     // " + note if note else ""))
+                textures.append("            #define sampler%s sampler%s" % (name, name[:-3]))
+                continue
+            seen.add(name); textures.append("            Texture%s %s; SamplerState sampler%s;%s" % (shape, name, name, "     // " + note if note else ""))
     statics = ["            static %s %s;" % (kind(t), n) for n, t in fragment["statics"] + vertex["statics"]]
     # (a pixel's place asked for outside main, as grade.glsl's zebras do: the pixel program's input (IN) is frag's own, which a
     # function outside it cannot see, so frag puts the place in a static first and those functions read that. 2026-10-20)

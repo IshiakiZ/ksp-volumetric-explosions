@@ -247,6 +247,9 @@ namespace VolumetricExplosions
                     float s = n == 1 ? 1f : (j + 1f) / n;
                     if (!Trails.Puff() || !TrailPuff(Vector3.Lerp(from, at, s), going, size, tr, lasting)) { n = j; break; }
                 }
+                // (and the flame at the head of a thing that flies burning, in every frame: see Head)
+                if (tr.fire > 0.01f && going.sqrMagnitude > 1f && !vacuum && Settings.TestSoot < 1f && Settings.TryX != 0f)
+                    Head(at.x, at.y, at.z, going.x, going.y, going.z, size * Mathf.Clamp01(0.4f + tr.fire), (byte)Mathf.Clamp(tr.tint, 0, FireKinds - 1));
                 // (what could not be laid this frame is not saved up: a trail is thinner when the air is full, not laid in a lump later)
                 Trails.laid[tr.id] = new Trails.Laid { last = tr.at, due = Mathf.Min(1f, (due - n) / Mathf.Max(q, 0.01f)), seen = f };
             }
@@ -302,6 +305,10 @@ namespace VolumetricExplosions
             }
             o.drag = 4.5f; o.kloss = 4f;
             o.turb = 0.7f;
+            // (Since 2026-11-16 a thin one's is drawn by itself, off the patch's grid, as a blast's own pieces' trails are: see
+            // Site.Loose. A crash's wreckage flies and burns over hundreds of metres, and its trails, each under a metre thick,
+            // stretched the grid over all of it.)
+            if (size <= 1.2f && Settings.TestTrail != 1f) o.kind = Loose;
             float tone = Mathf.Clamp(tr.shade, 0.02f, 0.9f) * Random.Range(0.8f, 1.2f);
             float brown = Mathf.Clamp01(tr.warm);
             o.ar = tone; o.ag = tone * (1f - 0.12f * brown); o.ab = tone * (1f - 0.28f * brown);
@@ -315,6 +322,13 @@ namespace VolumetricExplosions
                 o.r = size * Random.Range(0.8f, 1.4f) * (1f + 0.6f * tr.fire) * Mathf.Lerp(1f, 0.6f, slow) + 0.05f;
                 o.heat = Random.Range(0.7f, 0.95f) * Mathf.Lerp(0.8f, 1f, tr.fire);
                 o.cool = 3f;
+                // (Since 2026-11-19 the flame of a thing flying a few of its own sizes long, by how fast it goes, as a blast's own
+                // burning pieces' is (see Site.Trail), the flame at its head a puff of its own in every frame (Head): at a third of a
+                // second whatever the speed, a piece falling fast trailed a pale streak of flame many times its own length, where
+                // the photographs show a line of smoke with fire at its head. Off a thing lying still, as before.)
+                float flameLong = Settings.TryX >= 0f ? Settings.TryX : 3f;
+                if (flameLong > 0f && slow < 1f)
+                    o.cool = Random.Range(0.9f, 1.2f) * 1.1f / Mathf.Clamp(flameLong * size / Mathf.Max(going.magnitude, 1f), 0.04f, 0.37f);
                 o.flame = 1f;
                 o.grow = 0.08f + 0.1f * slow * (0.5f + size);
                 o.rise = Mathf.Lerp(0.7f, Random.Range(2.2f, 3.4f) * Mathf.Clamp(0.7f + 0.6f * size, 0.8f, 1.6f), slow);
@@ -335,6 +349,7 @@ namespace VolumetricExplosions
                 o.life = Random.Range(1.5f, 4f) * Mathf.Lerp(0.6f, 1.6f, smoke) * tr.lasts / 8f * lasting;
                 o.fadeIn = 0.15f;
             }
+            if (o.kind == Loose) looseTill = Mathf.Max(looseTill, time + o.life + 0.5f);
             Born(i);
             return true;
         }

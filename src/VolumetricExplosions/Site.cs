@@ -46,9 +46,21 @@ namespace VolumetricExplosions
             public float roll, spin;
             public float ar, ag, ab;         // the colour of the smoke or dust itself
             public float flame;              // how brightly it burns (0 for dust and vapour)
-            public byte tint, tile, flags;
+            public byte tint, tile, flags, kind;     // (kind: in what was padding before the seed, so the record is the size it was, and the library's: see Loose)
             public uint seed;
         }
+
+        /// <summary>
+        /// (Since 2026-11-16; in a bit's "kind".) A bit that is drawn by itself, as a sprite, and is not put on the patch's grid: the
+        /// thin trails of a blast's burning pieces, and the puffs where they come down. The grid has as many cells whatever it holds,
+        /// and it was fitted round everything: a fuel blast's pieces, flying and landing a hundred metres and more from it, had its
+        /// grid 320 m long and 256 m wide, each cell 5 m by 4 m, and nothing on it could be drawn finer than 9 m across: the
+        /// fireball and its smoke were soft as cotton wool from 220 m, and each trail, half a metre thick as laid, a fuzzy
+        /// caterpillar four metres thick (the films of that day, day-base). Left off the grid, the grid fits the fire and its
+        /// smoke, some 90 m, and a thin trail is drawn as thin as it is. See Trail, Strike, the mover's end and StartLighting.
+        /// </summary>
+        const byte Loose = 1;
+        float looseTill = -1f;                  // (the site's clock when the last of its loose bits will be gone)
 
         const byte Ballistic = 1, DiesOnGround = 2, Exhausted = 4;      // (Exhausted: it came out of an engine: see the ships' wash in the mover)
         const byte Raised = 16;              // (an engine's young smoke that has taken up the ground's dust or spray where its jet struck: see the mover)
@@ -64,9 +76,9 @@ namespace VolumetricExplosions
         const float Downhill = 4f;           // metres a second: how fast heavy smoke lying on the ground would run down a slope that was all but sheer (see the mover)
 
         struct Thermal { public float x, y, z, a, w, top, turn; public bool led, stem; public float ah, av, eh, ev, lx, lz; }      // (led, stem, and what follows them: a nuclear explosion's, see SiteNuke.cs)
-        struct Lamp { public float x, y, z, vx, vy, vz, r, peak, power, age, life, climb, flash, seed; public byte tint; public bool steady, quiet; public int owner; public float flashFor, reach, pulse; }      // (vx, vy, vz: the fire it is the light of was thrown on at this speed, which the air takes away)
+        struct Lamp { public float x, y, z, vx, vy, vz, r, peak, power, age, life, climb, flash, seed; public byte tint; public bool steady, quiet; public int owner; public float flashFor, reach, pulse, lx, ly, lz; }      // (vx, vy, vz: the fire it is the light of was thrown on at this speed, which the air takes away; lx, ly, lz, since 2026-11-20: a lamp that is a line, a rocket's flame over its pad, its light coming from all along from x, y, z to so much further on, on the smoke alone, see lampFrom in volume.glsl; nought, a point)
         struct Fire { public float x, y, z, r, left, total, rate, due, soot, shade, scale, puff, tall, lick, smoky, ember; public byte tint; public int lamp; public bool patch; }      // (smoky: the share of its bits that turn to smoke; patch: one of the patches of spilt fuel burning round about the pool, see AddFire; ember: the next ember due, see Ember)
-        struct Frag { public float x, y, z, vx, vy, vz, age, life, due, size, downAt; public byte tint; public bool white, down; }
+        struct Frag { public float x, y, z, vx, vy, vz, age, life, due, size, downAt; public byte tint; public bool white, down, lit; }
         struct Ball { public float x, y, z, vx, vy, vz, r, speed; }
         struct Jet { public float x, y, z, dx, dy, dz, r, speed, length; }
         // (cloud: the blast's size, the cube root of its charge in kilograms of TNT, in metres, where its front leaves a cloud behind it in damp air, else 0;
@@ -105,6 +117,11 @@ namespace VolumetricExplosions
         Texture3D volume, amounts, around, flow, clear, turns;
         // (the grid before's amounts, its box, and when each grid came: a fire that stands goes over from the one to the other, see FireWas)
         Texture3D amountsWas;
+        Texture3D volumeWas;                      // (the light and heat of the grid before, kept as its amounts are: see FireWas)
+        Texture3D aroundWas;                      // (and what was round about: how much smoke, how light, how dusty)
+        static readonly int aroundNote = Shader.PropertyToID("_Around"), aroundWasNote = Shader.PropertyToID("_AroundWas");
+        float wasMix, wasFlow;                    // (how much of the grid before is shown just now, and how far its smoke is carried on: see FireWas, TuneShadow)
+        static readonly int volumeNote = Shader.PropertyToID("_Volume"), volumeWasNote = Shader.PropertyToID("_VolumeWas");
         Vector3 wasSize, wasMiddle, boxSize;
         float showAt, showGap = 0.05f;
         bool wasOk;
@@ -113,6 +130,7 @@ namespace VolumetricExplosions
         readonly Texture3D[] rests = new Texture3D[5];          // eighteen numbers of sixteen bits, four to a texture
         byte flameKind;                      // which fire's colours the volume shows: those of the biggest fire lately
         float flameWeight;
+        float plasmaWarmth = 1f;             // (a re-entry glow's, since 2026-11-20: how far its colours have gone from the pink-violet of the air's own light to gold, 0 to 1: see PlasmaPink)
         Vector3 dustHue = new Vector3(1f, 0.85f, 0.65f);
         Color groundDust;
         bool groundBare, groundWet;
@@ -153,6 +171,11 @@ namespace VolumetricExplosions
         /// <summary>How thin the air is, as an engine's flame feels it: 0 at the ground, a quarter at a tenth of the air, 1 with none (by how many times thinner, counted in tens).</summary>
         float Thin => ThinOf(air);
         /// <summary>The same for air of this thickness (against Kerbin's at sea level).</summary>
+        /// <summary>
+        /// (For the sheet: Layers.) The sky's light here as this patch's smoke is lit by it (rgb), and the air's density against
+        /// Kerbin's at sea level (w): what the air between the camera and far smoke scatters, and how much of it there is.
+        /// </summary>
+        internal Vector4 Haze => new Vector4(Mathf.Max(ambR, 0.16f * sunR), Mathf.Max(ambG, 0.17f * sunG), Mathf.Max(ambB, 0.2f * sunB), space ? 0f : air);
         static float ThinOf(float air) => air < 0.004f ? 1f : Mathf.Pow(Mathf.Clamp01(-Mathf.Log10(Mathf.Max(air, 1e-4f)) / 3.2f), 1.2f);
         bool vacuum, sunUp;
         float daylight = 1f;        // (Look) how much of a day it is here: 0 at night, 1 with the sun more than ten degrees up
@@ -175,8 +198,16 @@ namespace VolumetricExplosions
         // (how long after the last blast the grid still takes in what strays far from the rest of the cloud: an explosive's thrown
         // earth stands that far for seconds, see Thrown and Fit)
         float openFor = 0.6f;
+        // (One fire of many blasts, since 2026-11-16, see Burst: how much fuel has gone up in the fire now being laid, how wide the fireball
+        // of all of it is, where its middle is, when its last blast was, how many bits have been laid for it, and its lamp's seed.)
+        float massFire, massR, massAt = -100f, massLaid, massLampSeed = -1f;
+        Vector3 massC;
+        float fireballFor = 4f;                  // (for how long after its last blast the fireball counts as burning: four seconds, or longer for a fire of many blasts)
         float fireballR, fireballAt = -100f;     // the biggest blast of the last few seconds: its radius and when (for the size of its flames' pattern, see TuneFire)
         float blazeWide, blazeSeen = -100f;      // the widest fire burning on the ship this patch goes along with, and when last (see Blaze)
+#if DEV
+        bool steamLitWas;                         // (development: whether the patch's steam was lit by its flame last frame, see TuneFire)
+#endif
         int tick, chunks;
         Vector3 camL;
         float pixelAngle;
@@ -314,17 +345,27 @@ namespace VolumetricExplosions
                 volume = Spares.Volume(G, TextureFormat.RGBA32, FilterMode.Bilinear);
                 amounts = Spares.Volume(G, TextureFormat.RGBA32, FilterMode.Bilinear);
                 amountsWas = Spares.Volume(G, TextureFormat.RGBA32, FilterMode.Bilinear);
+                volumeWas = Spares.Volume(G, TextureFormat.RGBA32, FilterMode.Bilinear);
+                aroundWas = Spares.Volume(A, TextureFormat.RGBA32, FilterMode.Bilinear);
                 around = Spares.Volume(A, TextureFormat.RGBA32, FilterMode.Bilinear);
                 flow = Spares.Volume(A, TextureFormat.RGBA32, FilterMode.Bilinear);
                 for (int n = 0; n < rests.Length; n++) rests[n] = Spares.Volume(A, Assets.Sixteen, FilterMode.Bilinear);
                 boxMaterial.SetTexture("_Volume", volume);
                 boxMaterial.SetTexture("_Amount", amounts);
                 boxMaterial.SetTexture("_AmountWas", amountsWas);
+                boxMaterial.SetTexture(volumeWasNote, volumeWas);
+                boxMaterial.SetTexture(aroundWasNote, aroundWas);
                 wasOk = false;
                 boxMaterial.SetTexture("_Around", around);
                 boxMaterial.SetTexture("_Detail", Assets.Detail);
                 boxMaterial.SetTexture("_Flow", flow);
                 for (int n = 0; n < rests.Length; n++) boxMaterial.SetTexture("_Rest" + (char)('A' + n), rests[n]);
+                for (int n = 0; n < restsWas.Length && n < rests.Length; n++)
+                {
+                    restsWas[n] = Spares.Volume(A, Assets.Sixteen, FilterMode.Bilinear);
+                    boxMaterial.SetTexture("_Rest" + (char)('A' + n) + "Was", restsWas[n]);
+                }
+                restsWasOk = false; slowWentBefore = false;
                 // (one byte a cell, read cell by cell: see Clearance)
                 clear = Spares.Volume(A, TextureFormat.R8, FilterMode.Point);
                 boxMaterial.SetTexture("_Clear", clear);
@@ -398,7 +439,7 @@ namespace VolumetricExplosions
             if (ms > 2.0) Addon.Log("a patch's " + what + " took " + ms.ToString("F1") + " ms (frame " + Time.frameCount + ", " + Role() + ", " + count + " puffs)");
             return now;
         }
-        string Role() => riding ? "a ship's patch" : mergedFrom != null ? "taking two others' smoke" : mergeInto != null ? "giving its smoke" : vented ? "a trail's" : "other";
+        internal string Role() => riding ? "a ship's patch" : mergedFrom != null ? "taking two others' smoke" : mergeInto != null ? "giving its smoke" : vented ? "a trail's" : "other";
 
         static readonly long[] marks = new long[8];
         /// <summary>(Development build: where the time goes in making a patch, for the last forty made where Mark(0) was set just before.)</summary>
@@ -433,8 +474,9 @@ namespace VolumetricExplosions
             {
                 givenBack = true;
                 Spares.Give(volume); Spares.Give(amounts); Spares.Give(around); Spares.Give(flow); Spares.Give(clear); Spares.Give(turns);
-                Spares.Give(amountsWas);
+                Spares.Give(amountsWas); Spares.Give(volumeWas); volumeWas = null; Spares.Give(aroundWas); aroundWas = null;
                 for (int n = 0; n < rests.Length; n++) { Spares.Give(rests[n]); rests[n] = null; }
+                for (int n = 0; n < restsWas.Length; n++) { Spares.Give(restsWas[n]); restsWas[n] = null; }
                 volume = amounts = amountsWas = around = flow = clear = turns = null;
                 Spares.Give(sunThrough); Spares.Give(skyThrough); Spares.Give(sunNext); Spares.Give(skyNext);
                 Spares.Give(cellsA); Spares.Give(cellsB); Spares.Give(cellsC); Spares.Give(cellsD); Spares.Give(cellsE); Spares.Give(cellsClear); Spares.Give(carryKnown);
@@ -477,7 +519,7 @@ namespace VolumetricExplosions
             // (Settings.TestTrace 1: each grid of the nearest patch with fire as it is shown, for setting against a film frame by
             // frame: where its box begins, its cells, and over the cells with flame the flame, its heat and the smoke between it
             // and the sun, as the card gets them)
-            if (Settings.TestTrace == 1f && NearestFlame)
+            if ((Settings.TestTrace == 1f && NearestFlame) || (Settings.TestJetPhase == 1f && riding))
             {
                 long burn = 0; double hot = 0.0, shade = 0.0; int cells = 0, top = 0;
                 for (int n = 0; n < G3; n++)
@@ -500,8 +542,24 @@ namespace VolumetricExplosions
                 Texture3D keep = amounts; amounts = amountsWas; amountsWas = keep;
                 boxMaterial.SetTexture(amountNote, amounts);
                 boxMaterial.SetTexture(amountWasNote, amountsWas);
+                // (and its light and heat the same, since 2026-11-16)
+                if (volumeWas != null)
+                {
+                    keep = volume; volume = volumeWas; volumeWas = keep;
+                    boxMaterial.SetTexture(volumeNote, volume);
+                    boxMaterial.SetTexture(volumeWasNote, volumeWas);
+                }
+                if (aroundWas != null)
+                {
+                    keep = around; around = aroundWas; aroundWas = keep;
+                    boxMaterial.SetTexture(aroundNote, around);
+                    boxMaterial.SetTexture(aroundWasNote, aroundWas);
+                }
                 wasOk = boxRenderer.enabled && boxSize.x > 0f && box.transform.localRotation == turnNow;
                 wasSize = boxSize; wasMiddle = boxMiddle;
+                // (when the grid now going out of use was made, by the patch's own clock, and whether its box stood still: for its smoke, see FireWas)
+                wasShownTime = beforeTime; wasStill = beforeDrift.sqrMagnitude < 1e-6f;
+                wasGone = new Vector3((float)beforeGoneTurned.x, (float)beforeGoneTurned.y, (float)beforeGoneTurned.z);
                 float nowU = Time.unscaledTime, gap = Mathf.Clamp(nowU - showAt, 0.016f, 0.5f);
                 showGap = wasOk ? Mathf.Lerp(showGap, gap, 0.5f) : gap;
                 showAt = nowU;
@@ -523,6 +581,18 @@ namespace VolumetricExplosions
                 // kind; these are of that kind already); and the slow fields, where the smoke "was" and whose turn it is, a grid in
                 // two where that cannot be seen: see SlowFieldsGo.)
                 bool slow = SlowFieldsGo();
+                // (the billows' places of the grid before kept, where they are sent anew; gone over from only where the grid before sent its own too)
+                if (slow && restsWas[0] != null && Settings.TestFireBlend != 1f)
+                {
+                    for (int n = 0; n < rests.Length && n < restsWas.Length; n++)
+                    {
+                        Texture3D keepRest = rests[n]; rests[n] = restsWas[n]; restsWas[n] = keepRest;
+                        boxMaterial.SetTexture("_Rest" + (char)('A' + n), rests[n]);
+                        boxMaterial.SetTexture("_Rest" + (char)('A' + n) + "Was", restsWas[n]);
+                    }
+                }
+                restsWasOk = wasOk && slow && slowWentBefore && restsWas[0] != null && Settings.TestFireBlend != 1f;
+                slowWentBefore = slow;
                 volume.SetPixelData(cellsA, 0);
                 amounts.SetPixelData(cellsB, 0);
                 around.SetPixelData(cellsC, 0);
@@ -567,6 +637,13 @@ namespace VolumetricExplosions
             boxMaterial.SetVector("_VolSize", size);
             boxMaterial.SetVector("_VolOffset", middle);
             boxRenderer.enabled = true;
+#if DEV
+            // (development, Settings.TestTrace 2: each grid of a pad's patch, and of a ship's own, as it is shown, its box and its
+            // strongest fire's lamp in it, for the small jumps late in some night launch films, 4.2 to 4.6 s)
+            if (Settings.TestTrace == 2f && (trenches.Count > 0 || riding))
+                Debug.Log("[VolumetricExplosions] (dev) a " + (riding ? "ship's" : "pad's") + " grid: frame " + Time.frameCount + ", box at " + middle.ToString("F2") + " of " + size.ToString("F2")
+                          + ", lamp " + SlotLamp(0).ToString("F2") + ", turned " + turned + ", was ok " + wasOk + SlotsSaid() + ", " + lampCount + " lamps");
+#endif
         }
 
         /// <summary>The grid just made, sent by the library (see Sending), if every one of this patch's textures has been on the card before.</summary>
@@ -582,6 +659,31 @@ namespace VolumetricExplosions
             for (int n = 0; ok && n < rests.Length; n++) ok = Sending.Put(rests[n], sixteen, restAt[n], A3 * 8);
             return ok;
         }
+
+        /// <summary>How hard the smoke's cut edge is drawn (0: coming on gently over the width of a lump, as until 2026-11-16; 1: at once), and how much
+        /// of its full thickness the smoke has just inside it. See the walk in volume.glsl.</summary>
+        internal const float SkyByBillows = 1f;
+        // (The smoke's surface, see the shader: how far it is drawn with one; the least smoke there is any of; how deep the billows cut into
+        // it; over how much it comes on; how thick it is inside at the least; how much smoke round about it takes. Tried on a launch's cloud
+        // held still, `surf1`: a least of 0.25 and 0.4 took a third and a half of the cloud away with the fringe; a cut of 0.7 left the grid's
+        // own soft lumps, 1.3 lobes; coming on over 0.08, the lobes' edges were soft again from 75 m.)
+        internal const float Surface = 1f, SurfaceLeast = 0.15f, SurfaceDeep = 1.3f, SurfaceRamp = 0.03f, SurfaceThick = 2f, SurfaceAbout = 0.12f;
+        // (The big billows' size, as so many to what there were, and the small billows' share of the shade: see the shader. Tried on a launch's
+        // cloud held still, `lit2`: at 0.4 of them the cloud was a few smooth balls; with none of the small billows' shade, a cumulus, too smooth.)
+        internal const float BigBillows = 0.6f, SmallShade = 0.4f;
+        internal const float EdgeHard = 1f, EdgeFull = 0.15f;
+        /// <summary>How far the daylight on a nuclear explosion's cap is put out where its gas still glows (see the smoke's light in volume.glsl).</summary>
+        internal const float CapFirelit = 1f;
+        /// <summary>The camera's shoulder on the smoke, since 2026-11-20: how far light too strong for the picture goes over to white
+        /// (see the smoke's light in volume.glsl; 0 as until then: the light clipped to its strongest channels, and the fires' deep
+        /// orange on the pad's steam by the flame came out lemon-yellow by day and by night, where NASA's photographs of the Falcon 9
+        /// have it gold going over to cream). Filmed by night at 0, 0.45, 0.6 and 1.5 (`lift_night_sh*`): 0.45 runs from gold through
+        /// cream to white nearest the flame, 1.5 is white all over. Settings.TryShoulder another.</summary>
+        internal const float Shoulder = 0.45f;
+        /// <summary>How much paler dark smoke is drawn where it is thin (0.05 until 2026-11-16).</summary>
+        internal const float ThinPale = 0.02f;
+        /// <summary>How many pixels a cell of the billows' pattern is read across at the least (the smallest lumps drawn are some four cells).</summary>
+        internal const float Fineness = 1.0f;       // (1.6 until 2026-11-16)
 
         /// <summary>The settings of the volume that change every frame.</summary>
         void TuneVolume()
@@ -626,7 +728,9 @@ namespace VolumetricExplosions
             // The finest step along a ray is fixed for the site too, at half a cell of the detail: the places a ray is
             // sampled at must not shift as the cloud grows. Where there is no smoke the steps are as long as the
             // grid's cells, a whole number of fine steps.
-            float texel = repeat / Assets.DetailCells, finest = 0.5f * texel;
+            // (The steps as long as when the pattern had 96 cells to its repeat, whatever it has now: the 160 it has since 2026-11-16 are there
+            // for a fourth, finer size of lump, read only from near enough to show, not for shorter steps.)
+            float texel = repeat / Assets.DetailCells, finest = 0.5f * repeat / 96f;
             float stride = Mathf.Pow(2f, Mathf.Floor(Mathf.Log(Mathf.Max(cellNow / finest, 1f), 2f)));
             // Drawn at half size and enlarged, or straight onto the screen. At half size a pixel is two of the screen's
             // wide, so steps may be twice as long and the smallest lumps drawn twice as big.
@@ -638,13 +742,13 @@ namespace VolumetricExplosions
             // (And since 2026-10-25 the flames of a patch with fire burning in the open in it are walked whole, by themselves, as a
             // ship's flame is: see FlameRect and Whole.)
             bool layered = Air.Layered;
-            halved = Settings.Half && (riding ? layered && Layers.ShipsHalf : layered || shownMaterial != null);
+            halved = Settings.Half && (riding ? layered && Layers.ShipsHalf : layered ? Layers.AtlasHalf : shownMaterial != null);
             Material shown = halved && !layered ? shownMaterial : boxMaterial;
             if (boxRenderer.sharedMaterial != shown) boxRenderer.sharedMaterial = shown;
             if (boxRenderer.forceRenderingOff != layered) boxRenderer.forceRenderingOff = layered;
-            float pixel = halved ? 2f : 1f;
-            boxMaterial.SetVector("_VolStep", new Vector4(finest, 0f, 0f, 0f));
-            boxMaterial.SetVector("_VolGrid", new Vector4(stride, pixel * 1.6f / Mathf.Sqrt(Settings.Quality), pixel * 1.6f / texel, Settings.TestView));
+            float pixel = halved ? 2f : 1f, fineness = Settings.TestFine > 0f ? Settings.TestFine : Fineness;
+            boxMaterial.SetVector("_VolStep", new Vector4(finest, Settings.TestEdge >= 0f ? Settings.TestEdge : EdgeHard, Settings.TestEdge2 >= 0f ? Settings.TestEdge2 : EdgeFull, Settings.TryB >= 0f ? Settings.TryB : ThinPale));
+            boxMaterial.SetVector("_VolGrid", new Vector4(stride, pixel * 1.6f / Mathf.Sqrt(Settings.Quality), pixel * fineness / texel, Settings.TestView));
             // (at half size there are a quarter as many rays to walk, and each may be walked further in fine steps)
             boxMaterial.SetVector("_VolParams", new Vector4(Thickest, Mathf.Clamp(56f * Settings.Quality + 16f, 24f, 128f) * (halved ? 1.5f : 1f), Mathf.Clamp(Settings.Detail * 1.15f * billows, 0f, 0.85f), ThickestFlame));
             // (An engine's jet is a smoother thing than a fire in the open, and with no air to tear it, quite smooth.)
@@ -652,22 +756,34 @@ namespace VolumetricExplosions
             float smooth = riding ? Mathf.Lerp(0.6f, 1f, Thin) : nuke != null && nukeRole == NukeCap ? Mathf.Lerp(0.75f, 0.2f, Mathf.Clamp01(nuke.Age / nuke.tlum)) : 0f;
             boxMaterial.SetVector("_VolPeak", new Vector4(halved ? 1f : 0f, smooth, Settings.TestLattice, fullLength));
             // (and the same walked whole, for the flames' own walk: see Whole)
-            wholeGrid = new Vector4(stride, 1.6f / Mathf.Sqrt(Settings.Quality), 1.6f / texel, Settings.TestView);
+            wholeGrid = new Vector4(stride, 1.6f / Mathf.Sqrt(Settings.Quality), fineness / texel, Settings.TestView);
             wholeParams = new Vector4(Thickest, Mathf.Clamp(56f * Settings.Quality + 16f, 24f, 128f), Mathf.Clamp(Settings.Detail * 1.15f * billows, 0f, 0.85f), ThickestFlame);
             wholePeak = new Vector4(0f, smooth, Settings.TestLattice, fullLength);
             // (and at half size, for a ship's patch walked for the ships' picture as it is drawn when no Step has set this: see WalkShips)
-            halfGrid = new Vector4(stride, 2f * 1.6f / Mathf.Sqrt(Settings.Quality), 2f * 1.6f / texel, Settings.TestView);
+            halfGrid = new Vector4(stride, 2f * 1.6f / Mathf.Sqrt(Settings.Quality), 2f * fineness / texel, Settings.TestView);
             halfParams = new Vector4(Thickest, Mathf.Clamp(56f * Settings.Quality + 16f, 24f, 128f) * 1.5f, wholeParams.z, ThickestFlame);
             halfPeak = new Vector4(1f, smooth, Settings.TestLattice, fullLength);
             // (smoke too thin to see is passed over: up to this much of what is behind it hidden, in all, along a ray. See the shader.)
             // (and how long ago the grid in use was made: the billows have gone on taking their turns since. The grid whose turns and
             // places the smoke "was" are on the card, that is: a grid in two may leave those as the one before had them, see
             // SlowFieldsGo, and the shader turns them on from when they were so. Every grid that sends them, the grid in use.)
-            boxMaterial.SetVector("_VolThin", new Vector4(Mathf.Clamp(Settings.Thin, 0f, 8f) / 255f, Settings.TestFreeze >= 2f ? 0f : Mathf.Clamp(time - slowTime, 0f, 0.3f), Settings.TestRounds, 0f));
+            boxMaterial.SetVector("_VolThin", new Vector4(Mathf.Clamp(Settings.Thin, 0f, 8f) / 255f, Settings.TestFreeze >= 2f ? 0f : Mathf.Clamp(time - slowTime, 0f, 0.3f), Settings.TestRounds, nuke != null && nukeRole == NukeCap ? (Settings.TryA >= 0f ? Settings.TryA : CapFirelit) : 0f));
             boxMaterial.SetVector("_VolSun", new Vector4(sunR, sunG, sunB, 1.5f));
             boxMaterial.SetVector("_VolSunDir", (Vector3)(frame.east * sunL.x + frame.up * sunL.y + frame.north * sunL.z));
             Vector3 sunTurned = ToGrid(sunL);
             boxMaterial.SetVector("_VolSunLocal", new Vector4(sunTurned.x, sunTurned.y, sunTurned.z, 2.2f * billows));
+            // (the sky's light by the billows and from the side: see the shader; not a nuclear explosion's patches, set by their own films)
+            Vector3 upTurned = ToGrid(Vector3.up);
+            // (The smoke's surface, since 2026-11-16: see the shader. Not with TestMass 1, which is the day's start. A splash's spray
+            // too, since 2026-11-17: beside the Navy's photographs of its shock trials the spray without one was a soft white ball;
+            // with one it has a hard edge at least, though it is a cloud still and not jets of water: see Splash. A nuclear explosion's patches too, since later that day: beside the
+            // photographs of the Nevada tests (Buster-Jangle Dog by daylight, Upshot-Knothole Badger) its cap without one was a soft
+            // blob; with one, a dark crust in lobes with the fire showing through its gaps, on a knotted stem. TryG 0: none.)
+            Func<float, float, float> tryOr = (v, d) => v >= 0f ? v : d;
+            boxMaterial.SetVector("_VolSurface", new Vector4(Settings.TestMass == 1f ? 0f : tryOr(Settings.TryG, Surface), tryOr(Settings.TryH, SurfaceLeast), tryOr(Settings.TryI, SurfaceDeep), tryOr(Settings.TryJ, SurfaceRamp)));
+            bool asBefore = Settings.TestMass == 1f;
+            boxMaterial.SetVector("_VolSurfaceIn", new Vector4(tryOr(Settings.TryK, SurfaceThick), tryOr(Settings.TryN, SurfaceAbout), asBefore ? 1f : tryOr(Settings.TryT, BigBillows), asBefore ? 1f : tryOr(Settings.TryU, SmallShade)));
+            boxMaterial.SetVector("_VolUpLocal", new Vector4(upTurned.x, upTurned.y, upTurned.z, nuke != null || Settings.TestMass == 1f ? 0f : SkyByBillows));
             // Out of doors a good deal of light comes from the whole sky, more than the game's own fill light allows for.
             // (A patch of cloud, high in the air, is lit in its shade by the sky and not by the ground's light, which is what the
             // scene's fill light near the ground mostly is: a heap of thermals had an orange-brown underside by it.)
@@ -679,18 +795,45 @@ namespace VolumetricExplosions
                 boxMaterial.SetVector("_VolAmb", new Vector4(Mathf.Max(0.34f * day, night * ambR), Mathf.Max(0.42f * day, night * ambG), Mathf.Max(0.56f * day, night * ambB), 0f));
             }
             else boxMaterial.SetVector("_VolAmb", new Vector4(Mathf.Max(ambR, 0.16f * sunR), Mathf.Max(ambG, 0.17f * sunG), Mathf.Max(ambB, 0.2f * sunB), 0f));
-            boxMaterial.SetVector("_VolGlow", new Vector4(fireR, fireG, fireB, 0f));
+            // (A launch's steam by night, since 2026-11-20: its flame's light at its strongest less than by day, see SteamNightLevel.)
+            float glowLevel = SteamLit ? FireGain(Settings.TrySteamLevel >= 0f ? Settings.TrySteamLevel : SteamNightLevel) : 1f;
+            boxMaterial.SetVector("_VolGlow", new Vector4(fireR * glowLevel, fireG * glowLevel, fireB * glowLevel, Settings.TryShoulder >= 0f ? Settings.TryShoulder : Shoulder));
             // The strongest fires, for the light they throw on the smoke: three slots, each kept to its fire (see SmokeLamps).
             // (The shader reckons places in the box as it stood when its grid was made; where the box has gone along since, the fires are that much further back in it.)
             boxMaterial.SetVector("_VolLampA", SlotLamp(0));
             boxMaterial.SetVector("_VolLampB", SlotLamp(1));
             boxMaterial.SetVector("_VolLampC", SlotLamp(2));
+            boxMaterial.SetVector(lampLineNotes[0], SlotLine(0));
+            boxMaterial.SetVector(lampLineNotes[1], SlotLine(1));
+            boxMaterial.SetVector(lampLineNotes[2], SlotLine(2));
             // (and which of them are fires burning in one place, the light of a fire on the ground that is not sliding: the smoke at the foot
             // of such a fire's column is carried no more than its flame is, see standsAt in volume.glsl. Only a slot more than half faded
             // in counts: the shader takes it as standing or not, wholly, and a slot fading over to another fire is neither for long.)
             float standing = (slotStands[0] && slotLevel[0] > 0.5f ? 1f : 0f) + (slotStands[1] && slotLevel[1] > 0.5f ? 2f : 0f) + (slotStands[2] && slotLevel[2] > 0.5f ? 4f : 0f);
-            boxMaterial.SetVector("_VolLamps", new Vector4(0.25f * slotPower[0] * slotLevel[0], 0.25f * slotPower[1] * slotLevel[1], 0.25f * slotPower[2] * slotLevel[2], standing));
-            boxMaterial.SetVector("_VolTint", dustHue);
+            // (And as much stronger by night as the fires' light on the ground is, since 2026-11-19: see FireGain. On the ground alone
+            // until then, a launch by night lit the grass gold for a hundred metres round and its own steam grey-white, the steam by
+            // the flame hardly brighter than what the floodlights lit after the rocket had gone; NASA's night photographs (STS-38,
+            // STS-97, STS-116, Antares in 2014) have the steam by the flame as bright as by day, gold-white to peach, falling away to
+            // dark. TryW: so many times as strong at night instead (1: as until then). A launch's steam by night, since 2026-11-20,
+            // SteamNight times instead, reaching further: see there.)
+            float lampGain = FireGain(Settings.TryW >= 0f ? Settings.TryW : SteamLit ? SteamNight : 2.5f);
+            boxMaterial.SetVector("_VolLamps", new Vector4(0.25f * lampGain * slotPower[0] * slotLevel[0], 0.25f * lampGain * slotPower[1] * slotLevel[1], 0.25f * lampGain * slotPower[2] * slotLevel[2], standing));
+            // (and, for a launch's steam, how much of its rocket's flame's light it stops on the way: see SteamStops)
+            boxMaterial.SetVector("_VolTint", new Vector4(dustHue.x, dustHue.y, dustHue.z, SteamLit ? (Settings.TrySteamStops >= 0f ? Settings.TrySteamStops : SteamStops) : 0f));
+            // (and, for a launch's steam by night, its flame's light sent on inside it and a camera's tone curve on it: see SteamScatter)
+            float steamNight = SteamLit ? FireGain(2f) - 1f : 0f;
+            boxMaterial.SetVector("_VolSteamTone", new Vector4(steamNight * (Settings.TrySteamScatter >= 0f ? Settings.TrySteamScatter : SteamScatter),
+                Settings.TrySteamReach >= 0f ? Settings.TrySteamReach : SteamReach, steamNight * (Settings.TrySteamKnee >= 0f ? Settings.TrySteamKnee : SteamKnee),
+                steamNight * (Settings.TrySteamWhite >= 0f ? Settings.TrySteamWhite : SteamWhite)));
+#if DEV
+            // (development, Settings.TestTrace 2: the light a pad's patch is given each frame, its three lamps where they are and how
+            // strong, for the small dip in the steam's light 4.5 s into a night launch, 2026-11-20)
+            if (Settings.TestTrace == 2f && trenches.Count > 0)
+                Debug.Log("[VolumetricExplosions] (dev) a pad's light: frame " + Time.frameCount + ", lamps " + boxMaterial.GetVector("_VolLamps").ToString("F3")
+                          + " at " + SlotLamp(0).ToString("F2") + " " + SlotLamp(1).ToString("F2") + " " + SlotLamp(2).ToString("F2")
+                          + ", glow " + boxMaterial.GetVector("_VolGlow").ToString("F3") + ", sky " + boxMaterial.GetVector("_VolAmb").ToString("F3") + ", sun " + boxMaterial.GetVector("_VolSun").ToString("F3")
+                          + ", billows " + billows.ToString("F3") + ", step " + boxMaterial.GetVector("_VolStep").ToString("F3") + ", params " + boxMaterial.GetVector("_VolParams").ToString("F3"));
+#endif
             TuneCuts();
             TuneScene();
             TuneShadow();
@@ -708,7 +851,25 @@ namespace VolumetricExplosions
                 // not a re-entry glow's, whose brightness its maker gives by how hot the air is made)
                 float gain = !riding ? 1f : flameKind == PlasmaKind ? PlasmaShines[n - 1]
                            : JetShines[n - 1] * Plumes[Mathf.Min((int)flameKind, FireKinds - 1)].shines * Mathf.Lerp(1f, 3f, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.25f, 0.6f, Thin)));
-                boxMaterial.SetVector("_VolHot" + n, new Vector4(gain * Mathf.Lerp(Flames[at], Flames[at + 3], mix), gain * Mathf.Lerp(Flames[at + 1], Flames[at + 4], mix), gain * Mathf.Lerp(Flames[at + 2], Flames[at + 5], mix), 0f));
+                float cr = Mathf.Lerp(Flames[at], Flames[at + 3], mix), cg = Mathf.Lerp(Flames[at + 1], Flames[at + 4], mix), cb = Mathf.Lerp(Flames[at + 2], Flames[at + 5], mix);
+                // (a kerosene engine's own flame in the Falcon 9's colours, and an electric pump's engine's, the same flame: see
+                // JetFuelHues. Not a fire of the same fuel in the open, which keeps its own.)
+                if (riding && (flameKind == 0 || flameKind == 3))
+                {
+                    float hue = Settings.TryJetHue >= 0f ? Settings.TryJetHue : JetFuelHue;
+                    int m = (n - 1) * 3;
+                    cr = Mathf.Lerp(cr, JetFuelHues[m], hue); cg = Mathf.Lerp(cg, JetFuelHues[m + 1], hue); cb = Mathf.Lerp(cb, JetFuelHues[m + 2], hue);
+                    // (and twice as bright in the thick air, see JetFuelGain; in the thin air as it was)
+                    gain *= Mathf.Lerp(Settings.TryJetGain >= 0f ? Settings.TryJetGain : JetFuelGain, 1f, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.25f, 0.6f, Thin)));
+                }
+                // (a re-entry glow not yet strong: the pink-violet of the air's own light, going over to orange and gold as it
+                // strengthens, see Plasma)
+                if (flameKind == PlasmaKind && plasmaWarmth < 1f)
+                {
+                    int m = (n - 1) * 3;
+                    cr = Mathf.Lerp(PlasmaPink[m], cr, plasmaWarmth); cg = Mathf.Lerp(PlasmaPink[m + 1], cg, plasmaWarmth); cb = Mathf.Lerp(PlasmaPink[m + 2], cb, plasmaWarmth);
+                }
+                boxMaterial.SetVector("_VolHot" + n, new Vector4(gain * cr, gain * cg, gain * cb, 0f));
             }
         }
 
@@ -723,8 +884,35 @@ namespace VolumetricExplosions
         {
             float on = wasOk && Settings.TestFireBlend != 1f ? Mathf.Clamp01((Time.unscaledTime - showAt) / Mathf.Max(showGap, 0.016f)) : 1f;
             boxMaterial.SetVector(fireWasSizeNote, new Vector4(Mathf.Max(wasSize.x, 1e-3f), Mathf.Max(wasSize.y, 1e-3f), Mathf.Max(wasSize.z, 1e-3f), on));
-            boxMaterial.SetVector(fireWasOffsetNote, wasMiddle);
+            // (Since 2026-11-16 the smoke too, and flame that is carried on with its gas: each goes over from the grid before's to this
+            // one's over the time between grids, the grid before's carried on to now as this one's is (w: twice how far its fastest
+            // smoke has gone since it was made; less than nought: not so). The shader carries a grid's smoke on between grids by how
+            // the smoke about each place was moving, which is a quarter of what changes from one grid to the next: the rest came
+            // all at once with each new grid. Where the game draws many frames to a grid (a fast machine; a crash, whose patches wait
+            // their turn for a grid) the whole cloud and its fire stepped at the grids' rate, seven or eight times a second, over
+            // motion a quarter as large: found by tools/motion/rates.py on the day it was made, the grids held back to one frame in
+            // seven (the film live-fire-slowgrids). Not where the box goes along with a cloud that flies (its grids' boxes are not
+            // in one place), nor with TestSmokeBlend 1 (as until then).)
+            bool smokeToo = on < 1f && wasStill && shownDrift.sqrMagnitude < 1e-6f && Settings.TestSmokeBlend != 1f;
+            float sinceWas = Settings.TestSmoke == 1f || (riding && Settings.TestSmoke != 2f) ? 0f : Mathf.Clamp(time - wasShownTime, 0f, 0.6f);
+            boxMaterial.SetVector(fireWasOffsetNote, new Vector4(wasMiddle.x, wasMiddle.y, wasMiddle.z, smokeToo ? 2f * shownFastest * sinceWas : -1f));
+            // (for the smoke's shadow on the ground, which goes over the same way: see TuneShadow)
+            wasMix = smokeToo ? 1f - on : 0f; wasFlow = 2f * shownFastest * sinceWas;
+            // (and the billows' places: how far the pattern had been carried along with the smoke as a whole when the grid before was made; w: 1 where they go over too)
+            boxMaterial.SetVector(detailWasNote, new Vector4(wasGone.x, wasGone.y, wasGone.z, smokeToo && restsWasOk && Settings.TestSmokeBlend != 2f ? 1f : 0f));
         }
+        float wasShownTime, beforeTime;
+        bool wasStill;
+        Vector3 beforeDrift, wasGone;
+        Vector3d beforeGoneTurned;
+        // (The billows' places, since 2026-11-16: where the smoke "was" by each reckoning, as the grid before had it, kept as its
+        // amounts are, and the place in the pattern mixed between the two. They are what is seen to step: each new grid says
+        // afresh where the smoke now in each coarse cell "was", from where its particles in fact are, and what the carrying on
+        // between grids had missed of that came all at once, a quarter to a third of a lump's width at every grid. Only where
+        // this grid and the one before both sent them: see SlowFieldsGo.)
+        readonly Texture3D[] restsWas = new Texture3D[5];
+        bool restsWasOk, slowWentBefore;
+        static readonly int detailWasNote = Shader.PropertyToID("_VolDetailWas");
 
         // ---- how a fire in the open is drawn (see firePattern in tools/shaderpack/volume.glsl)
         static readonly int fireNote = Shader.PropertyToID("_VolFire"), fireGoneNote = Shader.PropertyToID("_VolFireGone"),
@@ -740,7 +928,7 @@ namespace VolumetricExplosions
         {
             float biggest = 0f;
             for (int n = 0; n < fireCount; n++) biggest = Mathf.Max(biggest, 0.5f * fires[n].r);
-            if (time - fireballAt < 4f) biggest = Mathf.Max(biggest, 0.2f * fireballR);
+            if (time - fireballAt < fireballFor) biggest = Mathf.Max(biggest, 0.2f * fireballR);
             if (time - blazeSeen < 1f) biggest = Mathf.Max(biggest, 0.6f * blazeWide); else blazeWide = 0f;
             if (biggest <= 0f) biggest = 0.6f;
             float size = Mathf.Clamp(biggest, 0.3f, 2.5f);
@@ -750,7 +938,25 @@ namespace VolumetricExplosions
             // red as it cools, with no tongues and no soot in it. Drawn as a glow, lumped as its cloud is: see the smoothness in
             // TuneVolume. Until 2026-11-09 as a fuel fire's flame, folded, its creases dark with soot: a small orange fire with
             // dark red lumps in it, where the photographs show a ball brighter than the sun.)
-            boxMaterial.SetVector(fireNote, new Vector4(time * Settings.FireRises, 1f / (size * Settings.FireTongues), vacuum ? 0.3f : 0.9f, Settings.TestFire == 1f || nuke != null ? 0f : Settings.TestFire == 2f ? 1f : Settings.TestDusk == 1f ? 3f : 2f));
+            // (And a launch's steam, with nothing burning in it, lit by its rocket's flame as an engine's own smoke is (1), since
+            // 2026-11-19: the day's light on it giving way to the flame's beside the flame, and that light not stopped by the steam on
+            // its way. Lit as round a fire in the open (2), the day's light stayed whole on it, and the flame's light only washed the
+            // white steam cream: in every photograph of a launch by day, NASA's of the Falcon 9 of 30 May 2020 and of Shuttle
+            // launches, the steam beside the flame is orange and gold, white further off, its faces towards the sun cream. See
+            // Ends. Nothing else differs for a patch with no fire in it: no flame is drawn in it, and its steam has no heat to shine
+            // with. Tried and left: the flame's light on the steam a third or six tenths as strong by day as a fire's, so that it would
+            // take the day's light off without being too bright to be orange: grey-peach steam, dull (`lift_steam2`, `lift_s06q3`).
+            // Settings.TestPadLamp 1: as round a fire, as until then. See SteamLit.)
+            boxMaterial.SetVector(fireNote, new Vector4(time * Settings.FireRises, 1f / (size * Settings.FireTongues), vacuum ? 0.3f : 0.9f, Settings.TestFire == 1f || nuke != null ? 0f : Settings.TestFire == 2f || SteamLit ? 1f : Settings.TestDusk == 1f ? 3f : 2f));
+#if DEV
+            // (development: say in the log whenever a pad's steam goes over from one lighting to the other, and why)
+            if (SteamLit != steamLitWas && trenches.Count > 0)
+            {
+                steamLitWas = SteamLit;
+                Debug.Log("[VolumetricExplosions] (dev) a pad's steam " + (steamLitWas ? "lit by its flame" : "lit as round a fire") + " at " + Time.time.ToString("F2") + " s: fires " + fireCount + ", burning wreckage " + fragCount
+                    + ", fireball " + (time - fireballAt).ToString("F1") + " s ago, a blaze " + (time - blazeSeen).ToString("F1") + " s ago, " + count + " particles");
+            }
+#endif
             // (and its look, as the settings have it: see Settings.FireFine)
             boxMaterial.SetVector(fireLookNote, new Vector4(Settings.FireFine, Settings.FireDrawnUp, Settings.FireEdge, Settings.FireBillows));
             boxMaterial.SetVector(fireLightNote, new Vector4(Settings.FireBright, Settings.FireCreases, Settings.FireLightFalls, Settings.FireLight));
@@ -764,7 +970,7 @@ namespace VolumetricExplosions
             // every crash's fires were carried as smoke is for as long as any piece of wreckage still burned, and rose and dropped back.)
             bool flying = false;
             for (int n = 0; n < fragCount && !flying; n++) flying = !frags[n].down;
-            bool goes = fireCount == 0 || flying || time - fireballAt < 4f || time - blazeSeen < 1f || Settings.TestFire >= 1f;
+            bool goes = fireCount == 0 || flying || time - fireballAt < fireballFor || time - blazeSeen < 1f || Settings.TestFire >= 1f;
             flameCarried = Mathf.MoveTowards(flameCarried, goes ? 1f : 0f, 2f * Time.deltaTime);
             // (And its flames' pattern is read where the smoke as a whole has gone by now, which goes on smoothly from frame to frame:
             // see firePattern. From where the shader has each bit of smoke, the grid's "was" carried on since it was made, that is so
@@ -779,10 +985,35 @@ namespace VolumetricExplosions
         // several times as bright as white paper in the sun and the cooled orange end of it a dull glow. (Nearly the same at
         // every heat, as it was at first, the orange end was as bright as the core and the picture cut it off to a flat yellow.)
         static readonly float[] JetShines = { 0.28f, 0.67f, 1.4f, 2.8f };
+        // (Since 2026-11-20.) A kerosene engine's flame at its four heats, as the Falcon 9's is in NASA's film of Demo-2: the
+        // hue of its soot's light orange all through, so that where it is thick it is far past white and the picture shows it
+        // white, and at its rim, where there is little of it to see through, it shows its own orange (and with JetSheaths the gas
+        // there is cooler as well), and twice as bright (JetFuelGain). Across the flame at 1.0, 1.2, 1.5, 2.0, 2.5 and 3.0 of the
+        // white core's half widths out, red over blue against the sky's beside it (tools/dev/scratch-2026-11-20-pc/flameedge.py;
+        // side films from 250 m, frames at 5 to 11 s): NASA's frame at 496 s +54 +71 +68 +43 +25 +14, at 493 and 500 s alike;
+        // ours in the colours of fuel's fires in the open (the row of Flames), near white at full heat (1, 0.95, 0.74), +44 +36
+        // +28 +20 +13 +8, a white flame with a white glow; in these with the sheath +116 +102 +63 +32 +20 +12, an orange flame
+        // round a narrow white core, too orange at the core's edge and too little further out; and twice as bright, +77 +64 +49
+        // +34 +23 +15, the white core wider and the orange round it. Its brightness over the sky's then +72 +58 +43 +28 +18 +11,
+        // for NASA's +77 +53 +41 +22 +12 +7 (+68 +46 +33 +21 +13 +8 before). Still warmer than NASA's at the core's very edge,
+        // where the camera's white runs on a little past the core, and not as orange a little further out. JetFuelHue: how far
+        // over to these from the row of Flames (0 as until 2026-11-20).
+        static readonly float[] JetFuelHues = { 0.66f, 0.17f, 0.03f,   1.00f, 0.45f, 0.10f,   1.00f, 0.62f, 0.24f,   1.00f, 0.72f, 0.38f };
+        const float JetFuelHue = 1f;
+        // (Since 2026-11-20.) How many times as bright a kerosene engine's flame and an electric pump's engine's are in the thick
+        // air, going back to as they were by the thin air of 0.6 (Thin), where they have not been set against a real one: see
+        // JetFuelHues. At 1.3 and 1.6 times, red over blue across the flame +99 +81 +51 +29 +19 +12 and +86 +69 +45 +29 +19 +12;
+        // at twice, +77 +64 +49 +34 +23 +15, nearest NASA's +54 +71 +68 +43 +25 +14.
+        const float JetFuelGain = 2f;
         // (A re-entry glow's colours at its four heats: bright, but within what the film shows, so that its gold, orange and
         // pink-violet are seen. With an engine's gains and its own 2.4, as until 2026-10-18, its hottest was 6.7 times white paper
         // in the sun before the steep end: every part of it white, and the film's glow a halo round it many times its size.)
         static readonly float[] PlasmaShines = { 1.44f, 1.76f, 2.24f, 2.72f };
+        // (Since 2026-11-20.) A re-entry glow's colours at its four heats while it is faint: the pink-violet and magenta of the air's
+        // own light (nitrogen's, and oxygen's red), as in the first streaks past Orion's window on its first flight (NASA,
+        // jsc2022e046313 to 323: about 98,55,72 where it swirls); it goes over to the gold of the row above as it strengthens (see
+        // plasmaWarmth). Pale pink where hottest, magenta where thin and cooling.
+        static readonly float[] PlasmaPink = { 0.40f, 0.08f, 0.32f,   0.78f, 0.30f, 0.55f,   0.95f, 0.55f, 0.75f,   1.00f, 0.80f, 0.92f };
 
         /// <summary>
         /// What each kind of engine's flame is like: how it is made (Flame, in SiteExhaust) and how it is drawn (TuneJet).
@@ -816,10 +1047,16 @@ namespace VolumetricExplosions
         }
         static readonly Plume[] Plumes =
         {
-            /* fuel (kerosene)  */ new Plume { dense = 1f,    hot = 1.9f, cool = 0.41f, edge = 0.75f, shines = 1f,   tongues = 0.8f,  soot = 0.05f,  diamonds = 0.12f, count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0f,   endTorn = 0.7f, endCool = 0.45f, streaks = 1.25f, streaksFar = 4f, outer = 1f },
+            // (Since 2026-11-20 kerosene's flame glows on as it cools, yellow and then orange, and thins away (fades 0.8, soot 0.01),
+            // where it went dark red and brown and hid what was behind it (fades 0, soot 0.05); it cools later (cool 0.35, endCool
+            // 0.35, were 0.41 and 0.45), and its far half is mottled half as much (streaksFar 2, was 4). So it is one white-hot body
+            // with an orange rim that breaks up into flickering tongues at its end, as the Falcon 9's in NASA's film of Demo-2 (its
+            // core white, its rim about 185,145,105); as it was, a long orange fuse of hot and cold patches with dark streaks after
+            // its first third: "the rocket fire does not look like or act like real rocket fire whatsoever", the owner said.)
+            /* fuel (kerosene)  */ new Plume { dense = 1f,    hot = 1.9f, cool = 0.35f, edge = 0.75f, shines = 1f,   tongues = 0.8f,  soot = 0.01f,  diamonds = 0.12f, count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0.8f, endTorn = 0.7f, endCool = 0.35f, streaks = 1.25f, streaksFar = 2f, outer = 1f },
             /* solid fuel       */ new Plume { dense = 1.5f,  hot = 2f,   cool = 0.41f, edge = 0.6f,  shines = 1.3f, tongues = 0.75f, soot = 0.012f, diamonds = 0f,    count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0f,   endTorn = 0.7f, endCool = 0.4f,  streaks = 1.25f, streaksFar = 4f, outer = 1.25f },
             /* monopropellant   */ new Plume { dense = 0.12f, hot = 1f,   cool = 0.8f,  edge = 0.3f,  shines = 1.5f, tongues = 0.25f, soot = 0f,     diamonds = 0f,    count = 4f, body = 3f,   clear = 0.5f, soft = 0.8f, fades = 1f,   endTorn = 0.2f, endCool = 0.3f,  streaks = 0.8f,  streaksFar = 1.5f, outer = 0.15f },
-            /* (electrical)     */ new Plume { dense = 1f,    hot = 1.9f, cool = 0.41f, edge = 0.75f, shines = 1f,   tongues = 0.8f,  soot = 0.05f,  diamonds = 0.12f, count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0f,   endTorn = 0.7f, endCool = 0.45f, streaks = 1.25f, streaksFar = 4f, outer = 1f },
+            /* (electrical)     */ new Plume { dense = 1f,    hot = 1.9f, cool = 0.35f, edge = 0.75f, shines = 1f,   tongues = 0.8f,  soot = 0.01f,  diamonds = 0.12f, count = 4f, body = 1.6f, clear = 1f,   soft = 0f,   fades = 0.8f, endTorn = 0.7f, endCool = 0.35f, streaks = 1.25f, streaksFar = 2f, outer = 1f },
             /* hydrogen         */ new Plume { dense = 0.08f, hot = 1.5f, cool = 0.6f,  edge = 0.3f,  shines = 0.8f, tongues = 0.1f,  soot = 0f,     diamonds = 1.6f,  count = 5f, body = 7f,   clear = 0.7f, soft = 1f,   fades = 1f,   endTorn = 0f,   endCool = 0.3f,  streaks = 0.6f,  streaksFar = 1f, outer = 0.1f },
             /* methane          */ new Plume { dense = 0.25f, hot = 1.6f, cool = 0.45f, edge = 0.5f,  shines = 1.6f, tongues = 0.4f,  soot = 0f,     diamonds = 0.5f,  count = 4f, body = 4f,   clear = 0.8f, soft = 0.5f, fades = 0.7f, endTorn = 0.4f, endCool = 0.4f,  streaks = 1f,    streaksFar = 2.5f, outer = 0.35f },
             /* fuels that keep  */ new Plume { dense = 0.3f,  hot = 1.2f, cool = 0.55f, edge = 0.5f,  shines = 0.8f, tongues = 0.4f,  soot = 0.02f,  diamonds = 0.55f, count = 4f, body = 3f,   clear = 0.7f, soft = 0.5f, fades = 0.8f, endTorn = 0.3f, endCool = 0.4f,  streaks = 1f,    streaksFar = 2.5f, outer = 0.35f },
@@ -839,6 +1076,27 @@ namespace VolumetricExplosions
 
         // ---- how a ship's flames are drawn (see jetPattern in tools/shaderpack/volume.glsl)
         Vector3 jetAxisL = Vector3.down, jetFromL;
+        /// <summary>(What a kind of flame is like, Plumes, with what a development build is trying in its place for the sooty ones,
+        /// kerosene's and a solid motor's: Settings.TryJetFades and the rest, each below nought as set.)</summary>
+        static Plume PlumeOf(int kind)
+        {
+            Plume look = Plumes[Mathf.Clamp(kind, 0, FireKinds - 1)];
+            if (kind <= 1)
+            {
+                if (Settings.TryJetFades >= 0f) look.fades = Settings.TryJetFades;
+                if (Settings.TryJetSoot >= 0f) look.soot = Settings.TryJetSoot;
+                if (Settings.TryJetStreaks >= 0f) look.streaks = Settings.TryJetStreaks;
+                if (Settings.TryJetStreaksFar >= 0f) look.streaksFar = Settings.TryJetStreaksFar;
+                if (Settings.TryJetEndCool >= 0f) look.endCool = Settings.TryJetEndCool;
+                if (Settings.TryJetCool >= 0f) look.cool = Settings.TryJetCool;
+                if (Settings.TryJetHot >= 0f) look.hot = Settings.TryJetHot;
+                if (Settings.TryJetEdge >= 0f) look.edge = Settings.TryJetEdge;
+                if (Settings.TryJetEndTorn >= 0f) look.endTorn = Settings.TryJetEndTorn;
+                if (Settings.TryJetTongues >= 0f) look.tongues = Settings.TryJetTongues;
+            }
+            return look;
+        }
+
         float jetNozzle = 0.5f, jetSpeed = 60f, jetLong = 10f, jetScroll, jetStrongest, jetSeen = -100f;
         // (the mouths of up to eight of the ship's nozzles, as they were told this frame: xyz where, in the patch's axes, w how wide)
         readonly Vector4[] jetMouth = new Vector4[8];
@@ -846,6 +1104,24 @@ namespace VolumetricExplosions
         static readonly int[] jetAtNotes = { Shader.PropertyToID("_VolJetAt0"), Shader.PropertyToID("_VolJetAt1"), Shader.PropertyToID("_VolJetAt2"), Shader.PropertyToID("_VolJetAt3"),
                                              Shader.PropertyToID("_VolJetAt4"), Shader.PropertyToID("_VolJetAt5"), Shader.PropertyToID("_VolJetAt6"), Shader.PropertyToID("_VolJetAt7") };
         int jetKind;
+        static readonly int jetBoilNote = Shader.PropertyToID("_VolJetBoil"), jetSheathNote = Shader.PropertyToID("_VolJetSheath");
+        /// <summary>
+        /// (Since 2026-11-20.) An engine's flame's outer part cooler than its core (volume.glsl, jetSheath): by so much of its heat
+        /// at its edge, going to none between two thicknesses of the flame (its f there: 0 is none, 1 as thick as it gets), and at
+        /// the nozzle so much of that, where the air has not yet got into the gas, all of it by half the flame's reach. By kind of
+        /// flame, as Plumes: the sooty fuels' outer gas burns on with the air, yellow-orange round a white core; a clear flame has
+        /// no such sheath. Settings.TryJetSheath and the others try other values, for every kind. Kerosene's (and the electric
+        /// pumps' engines', the same flame) half its heat at the edge, from a flame 0.3 thick to 0.9, seven tenths of that at the
+        /// nozzle: against NASA's film of the Falcon 9 (see JetFuelHues), 0.4 to 0.7 of the heat, and on the thinnest gas only
+        /// (from 0.05 or 0.15, to 0.4 or 0.6), were tried; on the thinnest gas only, the orange band outside the white core was
+        /// half NASA's, and at 0.7 the flame's far end went brown (these through a misted lens, see Natural Weather's Wet.Forget;
+        /// through a clear one, 0.35 of the heat at 1.3 times as bright, red over blue across the flame +83 +63 +43 +27 +18 +12, as
+        /// half at 1.6 times, and from 0.15 to 0.6 at 1.6 times +60 +53 +45 +33 +23 +15, a near white flame with a faint yellow
+        /// edge). The others none: a solid motor's has not been set against a real one yet.
+        /// </summary>
+        static readonly float[] JetSheaths = { 0.5f, 0f, 0f, 0.5f, 0f, 0f, 0f, 0f, 0f, 0f, 0f };
+        const float JetSheathFrom = 0.3f, JetSheathTo = 0.9f, JetSheathNozzle = 0.7f;
+        float jetBoiled;              // (how far the flame's pattern has boiled: see TuneJet)
         static readonly int jetNote = Shader.PropertyToID("_VolJet"), jetFromNote = Shader.PropertyToID("_VolJetFrom"), jetLookNote = Shader.PropertyToID("_VolJetLook"), jetBodyNote = Shader.PropertyToID("_VolJetBody"), jetFlowNote = Shader.PropertyToID("_VolJetFlow"), jetEndNote = Shader.PropertyToID("_VolJetEnd"), jetGlowNote = Shader.PropertyToID("_VolJetGlow");
 
         /// <summary>
@@ -856,12 +1132,16 @@ namespace VolumetricExplosions
         /// of flame it is comes from the strongest of the ship's engines (see Plumes); in thin air all of it smooths out
         /// into a clear bell. (Each frame; the strongest flame is chosen afresh in Vents.)
         /// </summary>
+#if DEV
+        long jetBitsWere;
+#endif
         void TuneJet()
         {
             bool jet = riding && time - jetSeen < 1f;
             if (!jet)
             {
                 boxMaterial.SetVector(jetLookNote, Vector4.zero);
+                boxMaterial.SetVector(jetSheathNote, Vector4.zero);
                 jetStrongest = 0f; jetMouths = 0;
                 return;
             }
@@ -879,10 +1159,46 @@ namespace VolumetricExplosions
             jetScroll += Time.deltaTime * Settings.JetRuns * size;
             Vector3 axis = ToGrid(jetAxisL), from = ToGrid(jetFromL) - slid;
             boxMaterial.SetVector(jetNote, new Vector4(axis.x, axis.y, axis.z, jetScroll));
+            // (And its far part boils, its lumps made afresh where they are, since 2026-11-20: see jetPattern. Not in thin air, where
+            // it smooths out into a clear bell; nor a re-entry glow's, whose torn wake is the flow's own. The count taken back by a
+            // multiple of the shader's sixty-four places, which leaves it where it was.)
+            jetBoiled += Time.deltaTime * Mathf.Max(Settings.JetBoils, 0f);
+            if (jetBoiled > 4096f) jetBoiled -= 4096f;
+            boxMaterial.SetVector(jetBoilNote, new Vector4(jetBoiled, Settings.JetBoils > 0f && jetKind != PlasmaKind ? 1f - thin : 0f, Settings.JetBoilFrom, Mathf.Max(Settings.JetBoilFull, Settings.JetBoilFrom + 0.01f)));
+            // (and its outer part cooler than its core, since 2026-11-20: see JetSheaths. Not in thin air, where it has no air to burn
+            // on with.)
+            float sheath = Settings.TryJetSheath >= 0f ? Settings.TryJetSheath : JetSheaths[Mathf.Clamp(jetKind, 0, JetSheaths.Length - 1)];
+            boxMaterial.SetVector(jetSheathNote, new Vector4(sheath * (1f - thin), Settings.TryJetSheathFrom >= 0f ? Settings.TryJetSheathFrom : JetSheathFrom,
+                Settings.TryJetSheathTo >= 0f ? Settings.TryJetSheathTo : JetSheathTo, Settings.TryJetSheathNozzle >= 0f ? Settings.TryJetSheathNozzle : JetSheathNozzle));
             boxMaterial.SetVector(jetFromNote, new Vector4(from.x, from.y, from.z, jetNozzle));
-            Plume look = Plumes[Mathf.Clamp(jetKind, 0, FireKinds - 1)];
-            // (a re-entry glow drawn as until 2026-10-21, for setting one against the other: soft-edged and torn as a flame)
-            if (jetKind == PlasmaKind && Settings.TestPlasma == 1f) { look.soft = 0.6f; look.tongues = 0.8f; }
+#if DEV
+            if (Settings.TestJetPhase == 1f && gix > 0f)
+                Addon.Log("(dev) jet at frame " + Time.frameCount + ": cell " + ((from.x - gx0) * gix).ToString("F3") + " " + ((from.y - gy0) * giy).ToString("F3") + " " +
+                          ((from.z - gz0) * giz).ToString("F3") + " of " + (1f / gix).ToString("F2") + " " + (1f / giy).ToString("F2") + " " + (1f / giz).ToString("F2") +
+                          " m; axis " + axis.x.ToString("F3") + " " + axis.y.ToString("F3") + " " + axis.z.ToString("F3") + (turned ? ", turned" : "") + "; nozzle " + jetNozzle.ToString("F2"));
+            if (Settings.TestJetPhase == 1f)
+            {
+                // (and the flame's own bits, as they are now: how many, how much flame, its heat, age and how far down the jet, each by its flame)
+                int jn = 0; double jf = 0.0, jh = 0.0, ja = 0.0, jd = 0.0, jl = 0.0;
+                Vector3 fromL = jetFromL, alongL = jetAxisL;
+                for (int i = 0; i < count; i++)
+                {
+                    if (p[i].life < 0f || (p[i].flags & JetGas) == 0) continue;
+                    float f = p[i].flame;
+                    jn++; jf += f; jh += f * p[i].heat; ja += f * p[i].age; jl += f * p[i].life;
+                    jd += f * ((p[i].x - fromL.x) * alongL.x + (p[i].y - fromL.y) * alongL.y + (p[i].z - fromL.z) * alongL.z);
+                }
+                if (jf > 0.0)
+                    Addon.Log("(dev) jet bits at frame " + Time.frameCount + ": " + jn + ", flame " + jf.ToString("F1") + ", heat " + (jh / jf).ToString("F4") + ", age " + (ja / jf).ToString("F4") +
+                              " s, life " + (jl / jf).ToString("F4") + " s, down " + (jd / jf).ToString("F2") + " m; laid " + (Air.FlameBits - jetBitsWere) + ", long " + jetLong.ToString("F3") +
+                              ", speed " + jetSpeed.ToString("F2") + ", room " + Air.Room().ToString("F3") + ", alive " + Air.Alive + ", frame's time " + (Time.deltaTime * 1000f).ToString("F1") + " ms");
+                jetBitsWere = Air.FlameBits;
+            }
+#endif
+            Plume look = PlumeOf(jetKind);
+            // (a re-entry glow drawn soft-edged and torn as a flame, as until 2026-10-21 and again since 2026-11-20; TestPlasma 2: as the
+            // thin head between, sharp-edged and smooth, see Plasma)
+            if (jetKind == PlasmaKind && Settings.TestPlasma != 2f) { look.soft = 0.6f; look.tongues = 0.8f; }
             // (how far the flame reaches in this air: see Flame)
             float reach = jetLong * Mathf.Lerp(1f, 0.45f, thin);
             boxMaterial.SetVector(jetLookNote, new Vector4(look.tongues * (1f - thin), look.soot * (1f - thin), look.diamonds * (1f - thin) * (1f - thin), size));
@@ -1027,6 +1343,13 @@ namespace VolumetricExplosions
             shadeMaterial.SetVector(shadowSunWorld, new Vector4(sunWorld.x, sunWorld.y, sunWorld.z, wideSun));
             // (carried on between one grid and the next as the smoke itself is: see the shader)
             shadeMaterial.SetTexture("_Volume", volume);
+            // (and from the grid before's to this one's, as the smoke itself goes over: where a place of this box is in that one's,
+            // how much of that one is shown, and how far its smoke is carried on; see FireWas and the shader)
+            shadeMaterial.SetTexture(volumeWasNote, volumeWas != null ? volumeWas : volume);
+            Vector3 was = new Vector3(Mathf.Max(wasSize.x, 1e-3f), Mathf.Max(wasSize.y, 1e-3f), Mathf.Max(wasSize.z, 1e-3f));
+            Vector3 mid = boxMiddle + slid;
+            shadeMaterial.SetVector("_ShadowWasScale", new Vector4(size.x / was.x, size.y / was.y, size.z / was.z, volumeWas != null ? wasMix : 0f));
+            shadeMaterial.SetVector("_ShadowWasShift", new Vector4((mid.x - wasMiddle.x) / was.x, (mid.y - wasMiddle.y) / was.y, (mid.z - wasMiddle.z) / was.z, wasFlow));
             shadeMaterial.SetTexture("_Flow", flow);
             shadeMaterial.SetVector("_VolFlow", boxMaterial.GetVector("_VolFlow"));
             shadeMaterial.SetVector("_VolSize", size);
@@ -1035,9 +1358,22 @@ namespace VolumetricExplosions
         // ---- the lamps of the scene round about that light this patch's smoke at night (see Air.SceneLights)
         readonly Light[] sceneLit = new Light[4];
         float sceneChosen = -10f;
+#if DEV
+        readonly Light[] sceneWas = new Light[4];        // (development: the four chosen last time, to say in the log when they change)
+#endif
         static readonly int[] sceneAt = { Shader.PropertyToID("_VolSceneA"), Shader.PropertyToID("_VolSceneB"), Shader.PropertyToID("_VolSceneC"), Shader.PropertyToID("_VolSceneD") };
         static readonly int[] sceneTint = { Shader.PropertyToID("_VolSceneTintA"), Shader.PropertyToID("_VolSceneTintB"), Shader.PropertyToID("_VolSceneTintC"), Shader.PropertyToID("_VolSceneTintD") };
         static readonly int[] sceneDir = { Shader.PropertyToID("_VolSceneDirA"), Shader.PropertyToID("_VolSceneDirB"), Shader.PropertyToID("_VolSceneDirC"), Shader.PropertyToID("_VolSceneDirD") };
+        static readonly int sceneShadeNote = Shader.PropertyToID("_VolSceneShade");
+
+        /// <summary>
+        /// The lamps of the scene's light on smoke at night (the floodlights, the pad's own lights, buildings' lamps), since
+        /// 2026-11-20 stopped by the smoke between, as so much of what it would stop along a straight line (SceneStops); part of it
+        /// going round inside the smoke (SceneScatter, as so much of the straight way's), which stops so much less (SceneReach,
+        /// as a share); and shaded by the billows, as the fires' light is (SceneRelief). All nought until then: the smoke they
+        /// reached was lit evenly through. Settings.TrySceneStops, TrySceneScatter, TrySceneReach and TrySceneRelief others.
+        /// </summary>
+        const float SceneStops = 0.1f, SceneScatter = 0.6f, SceneReach = 0.25f, SceneRelief = 3f;
 
         /// <summary>
         /// The four lamps of the scene that light this patch most (chosen twice a second), told to the shader every
@@ -1072,11 +1408,34 @@ namespace VolumetricExplosions
                         }
                     }
                 }
+#if DEV
+                // (development: say in the log when the lamps chosen for a pad's smoke change, and their worth: a lamp coming in or
+                // going out changes the smoke's light at once)
+                bool changed = false;
+                for (int n = 0; n < sceneLit.Length; n++) if (sceneLit[n] != sceneWas[n] && System.Array.IndexOf(sceneWas, sceneLit[n]) < 0) changed = true;
+                if (changed && trenches.Count > 0)
+                {
+                    var said = new System.Text.StringBuilder("[VolumetricExplosions] (dev) a pad's scene lamps at " + Time.time.ToString("F2") + " s:");
+                    for (int n = 0; n < sceneLit.Length; n++)
+                    {
+                        Light l = sceneLit[n];
+                        if (l == null) { said.Append(" none;"); continue; }
+                        Vector3 at = frame.ToLocal((Vector3d)l.transform.position);
+                        float dx = Mathf.Max(0f, Mathf.Max(bx0 - at.x, at.x - bx1)), dy = Mathf.Max(0f, Mathf.Max(by0 - at.y, at.y - by1)), dz = Mathf.Max(0f, Mathf.Max(bz0 - at.z, at.z - bz1));
+                        said.Append(' ').Append(l.transform.parent != null ? l.transform.parent.name + "/" : "").Append(l.name).Append(" (").Append((l.intensity * (1f - (dx * dx + dy * dy + dz * dz) / (l.range * l.range))).ToString("F2")).Append(");");
+                    }
+                    Debug.Log(said.ToString());
+                }
+                for (int n = 0; n < sceneLit.Length; n++) sceneWas[n] = sceneLit[n];
+#endif
             }
+            // (shaded by the billows and stopped by the smoke between, since 2026-11-20: see SceneStops)
+            boxMaterial.SetVector(sceneShadeNote, new Vector4(Settings.TrySceneStops >= 0f ? Settings.TrySceneStops : SceneStops, Settings.TrySceneScatter >= 0f ? Settings.TrySceneScatter : SceneScatter,
+                Settings.TrySceneReach >= 0f ? Settings.TrySceneReach : SceneReach, Settings.TrySceneRelief >= 0f ? Settings.TrySceneRelief : SceneRelief));
             for (int n = 0; n < sceneLit.Length; n++)
             {
                 Light l = sceneLit[n];
-                if (l == null || !l.isActiveAndEnabled || night <= 0.01f)
+                if (l == null || !l.isActiveAndEnabled || night <= 0.01f || Settings.TestSceneCone == 2f)
                 {
                     boxMaterial.SetVector(sceneAt[n], Vector4.zero);
                     continue;
@@ -1084,7 +1443,7 @@ namespace VolumetricExplosions
                 Vector3 at = ToGrid(frame.ToLocal((Vector3d)l.transform.position)) - slid, dir = ToGrid(frame.DirToLocal((Vector3d)l.transform.forward));
                 Color c = l.color.linear * (0.5f * l.intensity * night);
                 boxMaterial.SetVector(sceneAt[n], new Vector4(at.x, at.y, at.z, l.range * l.range));
-                boxMaterial.SetVector(sceneTint[n], new Vector4(c.r, c.g, c.b, l.type == LightType.Spot ? Mathf.Cos(0.5f * l.spotAngle * Mathf.Deg2Rad) : -2f));
+                boxMaterial.SetVector(sceneTint[n], new Vector4(c.r, c.g, c.b, l.type == LightType.Spot && Settings.TestSceneCone != 1f ? Mathf.Cos(0.5f * l.spotAngle * Mathf.Deg2Rad) : -2f));
                 boxMaterial.SetVector(sceneDir[n], new Vector4(dir.x, dir.y, dir.z, 0f));
             }
         }
@@ -1101,6 +1460,16 @@ namespace VolumetricExplosions
             return new Vector4(at.x, at.y, at.z, l.w * l.w);
         }
 
+        /// <summary>(Since 2026-11-20.) The line a slot's lamp gives its light from all along, in the grid's axes (see Lamp): nought for a
+        /// point, and for every lamp with Settings.TestLampLine 1, as until then.</summary>
+        Vector4 SlotLine(int s)
+        {
+            if (!(slotLevel[s] > 0f) || Settings.TestLampLine == 1f) return Vector4.zero;
+            Vector3 line = ToGrid(slotLine[s]);
+            return new Vector4(line.x, line.y, line.z, 0f);
+        }
+        static readonly int[] lampLineNotes = { Shader.PropertyToID("_VolLampLineA"), Shader.PropertyToID("_VolLampLineB"), Shader.PropertyToID("_VolLampLineC") };
+
         // ---- the fires' light on the smoke: three slots, each keeping to its fire (see SmokeLamps)
         // (which lamp each slot follows, by its seed, which no other lamp of the patch has (-1: none); which lamp in the list that is
         // this frame (-1: none, or gone); how far the slot is faded in, 0 to 1; and where its fire was last, x y z and its reach, how
@@ -1108,6 +1477,7 @@ namespace VolumetricExplosions
         readonly float[] slotFollows = { -1f, -1f, -1f }, slotLevel = new float[3], slotPower = new float[3];
         readonly int[] slotHeld = { -1, -1, -1 };
         readonly Vector4[] slotAt = new Vector4[3];
+        readonly Vector3[] slotLine = new Vector3[3];      // (and the line its light comes from all along, for a lamp that is one: see Lamp)
         readonly bool[] slotStands = new bool[3];
         int slotChanges, slotFills;          // (how many times since the patch began a slot has gone over from one fire to another, and taken one when it had none: Air.FireLights)
 
@@ -1137,6 +1507,20 @@ namespace VolumetricExplosions
 
         /// <summary>Whether a slot of the smoke's light follows the lamp with this seed.</summary>
         bool Followed(float seed) => slotFollows[0] == seed || slotFollows[1] == seed || slotFollows[2] == seed;
+
+        /// <summary>
+        /// How much stronger a fire's light is made as the sun goes, so many times at night (2.5 for its light on the ground and on
+        /// the smoke), by the daylight here after the weather's clouds: the game's lights are not reckoned in real amounts, and the
+        /// eye opens to what it sees. Settings.TestFireLight 1: as strong by night as by day; 2: the sky's light under the clouds
+        /// left out of the daylight. (Moved here from the fires' lights on the ground in SiteBlasts, 2026-11-19, unchanged.)
+        /// </summary>
+        internal float FireGain(float atNight)
+        {
+            if (Settings.TestFireLight == 1f) return 1f;
+            float skylight = Settings.TestFireLight == 2f ? 0f : 0.3f * sunHidden * sunClear;
+            float daylight = Mathf.Sqrt(Mathf.Max(0f, 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB + skylight));
+            return Mathf.Lerp(atNight, 1f, Mathf.Clamp01(daylight * 1.6f));
+        }
 
         /// <summary>
         /// Which of a patch's fires light its smoke (the shader has three: _VolLampA to C), kept from one frame to the next as the
@@ -1173,7 +1557,7 @@ namespace VolumetricExplosions
                     slotLevel[s] = n >= 0 ? 1f : 0f;
                     slotPower[s] = n >= 0 ? lamps[n].power : 0f;
                     slotStands[s] = Stands(n);
-                    if (n >= 0) slotAt[s] = new Vector4(lamps[n].x, lamps[n].y, lamps[n].z, lamps[n].r);
+                    if (n >= 0) { slotAt[s] = new Vector4(lamps[n].x, lamps[n].y, lamps[n].z, lamps[n].r); slotLine[s] = new Vector3(lamps[n].lx, lamps[n].ly, lamps[n].lz); }
                 }
                 return;
             }
@@ -1260,6 +1644,7 @@ namespace VolumetricExplosions
                 if (held >= 0)
                 {
                     slotAt[s] = new Vector4(lamps[held].x, lamps[held].y, lamps[held].z, lamps[held].r);
+                    slotLine[s] = new Vector3(lamps[held].lx, lamps[held].ly, lamps[held].lz);
                     slotPower[s] = OnSmoke(held);
                     slotStands[s] = Stands(held);
                 }
@@ -1440,6 +1825,7 @@ namespace VolumetricExplosions
             else if (space) Riders.Along(t);
         }
 #if DEV
+        public Vector3 RootAt => t != null ? t.position : Vector3.zero;
         public Vector3 Local(Vector3d world) { frame.Refresh(); return frame.ToLocal(world); }
         public Vector3d World(Vector3 local) { frame.Refresh(); return frame.ToWorld(local); }
         /// <summary>(Where this patch's smoke is on the whole: the middle of its smoke weighed by how much there is, in the patch's own axes, and how widely it is spread each way.)</summary>
@@ -1467,6 +1853,26 @@ namespace VolumetricExplosions
                                  middle.x, middle.y, middle.z, spread.x, spread.y, spread.z, sea, riding ? 1 : 0, count);
         }
         public Vector3 RootPosition => t.position;
+        /// <summary>
+        /// (Development build, 2026-11-19: every bit that burns just now, in the first patch's axes, a line each, with what tells which
+        /// code laid it: a blast's burning pieces' trails (drag 5, kloss 4, turb 0.8), the flame at their heads (turb 0.5, life about a
+        /// tenth of a second), a fire on the ground's (turb 1.4), the fireball's own, another mod's trails (see Trails).)
+        /// </summary>
+        public void FiresSaid(System.Text.StringBuilder say, int n, Site first, bool all = false)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            Vector3 home = this == first ? Vector3.zero : first.Local(World(Vector3.zero));
+            say.Append(string.Format(inv, "# site {0}: {1} bits, its own origin at {2:F0} {3:F0} {4:F0}, box {5:F0}..{6:F0} {7:F0}..{8:F0} {9:F0}..{10:F0}, clock {11:F2}, last blast {12:F2}, riding {13}, space {14}\n",
+                n, count, home.x, home.y, home.z, bx0, bx1, by0, by1, bz0, bz1, time, lastBlast, riding ? 1 : 0, space ? 1 : 0));
+            for (int i = 0; i < count; i++)
+            {
+                ref P o = ref p[i];
+                if (o.life < 0f || !all && (o.flame <= 0f || o.heat < 0.1f)) continue;
+                Vector3 at = this == first ? new Vector3(o.x, o.y, o.z) : first.Local(World(new Vector3(o.x, o.y, o.z)));
+                say.Append(string.Format(inv, "{0} {1:F1} {2:F1} {3:F1} r {4:F2} heat {5:F2} cool {6:F2} age {7:F2} life {8:F2} flame {9:F2} kind {10} flags {11} v {12:F1} {13:F1} {14:F1} k {15:F1} {16:F1} {17:F1} rise {18:F2} turb {19:F2} grow {20:F2} drag {21:F1} kloss {22:F1} tint {23} mass {24:F2}\n",
+                    n, at.x, at.y, at.z, o.r, o.heat, o.cool, o.age, o.life, o.flame, o.kind, o.flags, o.vx, o.vy, o.vz, o.kx, o.ky, o.kz, o.rise, o.turb, o.grow, o.drag, o.kloss, o.tint, o.mass));
+            }
+        }
         /// <summary>(Whether the root draws a place where the frame says it is: the same place by both reckonings, and how far apart they come out.)</summary>
         public string Handed()
         {
@@ -1479,18 +1885,77 @@ namespace VolumetricExplosions
         /// <summary>Where the patch's frame is just now, in the world (the warm-up finds its own patches by it).</summary>
         public Vector3d FrameOrigin { get { frame.Refresh(); return frame.origin; } }
 
-        /// <summary>Whether a new explosion belongs in this patch of air.</summary>
-        public bool Takes(Plan plan)
+        /// <summary>
+        /// Whether a new explosion belongs in this patch of air: one that goes off inside the box round its smoke, or within some tens
+        /// of metres of it (twenty and one and a half of its own fireball's radius; eight, where the patch is already over 220 m
+        /// wide); and once the patch has a grid, by where its smoke is on the whole, not by the box round every bit of it. (Until 2026-11-16, and still for a small one, for `anyNear`, and with TestTakes 1: anywhere within 160 m of a ball
+        /// round that box. A patch's grid has as many cells whatever it holds: in a crash, where pieces come down and go up for
+        /// seconds over hundreds of metres, every blast joined the first one's patch, whose grid was then 400 m by 250 m by 500 m,
+        /// its cells 6 m by 4 m by 8 m and nothing in it drawn finer than 8.5 m: the wreck's fire and smoke were cotton wool for as
+        /// long as the crash lasted. A blast further off now has a patch of its own, see Air.SiteFor.)
+        /// </summary>
+        public bool Takes(Plan plan, bool anyNear = false)
         {
             if (plan.body != body || plan.space != space || leaving || riding) return false;
             if (nuke != null) return false;      // (a nuclear explosion's patches are its own: see SiteNuke.cs)
             frame.Refresh();
             Vector3 at = frame.ToLocal(plan.world);
-            float mx = (bx0 + bx1) * 0.5f, my = (by0 + by1) * 0.5f, mz = (bz0 + bz1) * 0.5f;
-            float reach = 0.5f * Mathf.Sqrt((bx1 - bx0) * (bx1 - bx0) + (by1 - by0) * (by1 - by0) + (bz1 - bz0) * (bz1 - bz0)) + 160f;
-            float dx = at.x - mx, dy = at.y - my, dz = at.z - mz;
-            return dx * dx + dy * dy + dz * dz < reach * reach && at.sqrMagnitude < 4000f * 4000f;
+            if (at.sqrMagnitude >= 4000f * 4000f) return false;
+            if (anyNear || plan.small || plan.radius < 3f || Settings.TestTakes == 1f)
+            {
+                float mx = (bx0 + bx1) * 0.5f, my = (by0 + by1) * 0.5f, mz = (bz0 + bz1) * 0.5f;
+                float reach = 0.5f * Mathf.Sqrt((bx1 - bx0) * (bx1 - bx0) + (by1 - by0) * (by1 - by0) + (bz1 - bz0) * (bz1 - bz0)) + 160f;
+                float dx = at.x - mx, dy = at.y - my, dz = at.z - mz;
+                return dx * dx + dy * dy + dz * dz < reach * reach;
+            }
+            float m = 20f + 1.5f * plan.radius;
+            // (by where its smoke is on the whole, where a grid has been made of it: within twice its spread each way of its middle
+            // and that margin; the box round every bit of it is stretched by whatever has strayed)
+            if (coreKnown)
+                return Mathf.Abs(at.x - coreAt.x) < 2f * coreSpread.x + m && Mathf.Abs(at.y - coreAt.y) < 2f * coreSpread.y + m && Mathf.Abs(at.z - coreAt.z) < 2f * coreSpread.z + m;
+            if (Mathf.Max(bx1 - bx0, bz1 - bz0) > 220f) m = Mathf.Min(m, 8f);
+            return at.x > bx0 - m && at.x < bx1 + m && at.y > by0 - m && at.y < by1 + m && at.z > bz0 - m && at.z < bz1 + m;
         }
+#if DEV
+        /// <summary>(Development build, 2026-11-16: what stretches a patch's grid. Its bits on the grid counted by how far along the ground they lie
+        /// from its smoke's middle (under 40 m, to 80, to 160, beyond), each count split into flame alone, smoke that still burns, smoke,
+        /// and bits thrown on their own paths; then those drawn by themselves; and the middle and spread.)</summary>
+        internal string Strewn()
+        {
+            var n = new int[4, 4];
+            int loose = 0, farN = 0, nearN = 0, farVent = 0;
+            float farAge = 0f, farLife = 0f, farR = 0f, farY = 0f, farMass = 0f, farSpeed = 0f, nearAge = 0f, nearR = 0f, nearY = 0f, nearMass = 0f;
+            string farWords;
+            for (int i = 0; i < count; i++)
+            {
+                ref P q = ref p[i];
+                if (q.life < 0f) continue;
+                if (q.kind == Loose) { loose++; continue; }
+                float dx = q.x - coreAt.x, dz = q.z - coreAt.z, d = Mathf.Sqrt(dx * dx + dz * dz);
+                int ring = d < 40f ? 0 : d < 80f ? 1 : d < 160f ? 2 : 3;
+                int kind = (q.flags & Ballistic) != 0 ? 3 : q.mass <= 0f ? 0 : q.heat > 0.3f ? 1 : 2;
+                n[ring, kind]++;
+                if (ring >= 2 && kind == 2) { farN++; farAge += q.age; farLife += q.life; farR += q.r; farY += q.y; farMass += q.mass; farSpeed += Mathf.Sqrt((q.vx + q.kx) * (q.vx + q.kx) + (q.vy + q.ky) * (q.vy + q.ky) + (q.vz + q.kz) * (q.vz + q.kz)); if ((q.flags & Exhausted) != 0) farVent++; }
+                if (ring < 2 && kind == 2) { nearN++; nearAge += q.age; nearR += q.r; nearY += q.y; nearMass += q.mass; }
+            }
+            farWords = farN == 0 ? "" : "; the smoke beyond 80 m: age " + (farAge / farN).ToString("F1") + " of " + (farLife / farN).ToString("F1") + " s, radius " + (farR / farN).ToString("F1") + " m, height " + (farY / farN).ToString("F0") + ", mass " + (farMass / farN).ToString("F1") + ", speed " + (farSpeed / farN).ToString("F1") + ", an engine's " + farVent
+                + (nearN == 0 ? "" : "; nearer: age " + (nearAge / nearN).ToString("F1") + ", radius " + (nearR / nearN).ToString("F1") + ", height " + (nearY / nearN).ToString("F0") + ", mass " + (nearMass / nearN).ToString("F1"));
+            string said = count + " bits (" + Role() + "), middle " + coreAt.ToString("F0") + " spread " + coreSpread.ToString("F0") + (coreKnown ? "" : " (not known)") + "; flame/burning smoke/smoke/thrown";
+            string[] rings = { " under 40 m ", "; to 80 m ", "; to 160 m ", "; beyond " };
+            for (int r = 0; r < 4; r++) said += rings[r] + n[r, 0] + "/" + n[r, 1] + "/" + n[r, 2] + "/" + n[r, 3];
+            return said + "; drawn by themselves " + loose + farWords + "; " + fireCount + " fires at " + FiresAt();
+        }
+        string FiresAt()
+        {
+            string s = "";
+            for (int k = 0; k < fireCount; k++) s += (k > 0 ? ", " : "") + Mathf.Sqrt((fires[k].x - coreAt.x) * (fires[k].x - coreAt.x) + (fires[k].z - coreAt.z) * (fires[k].z - coreAt.z)).ToString("F0") + " m (r " + fires[k].r.ToString("F1") + (fires[k].patch ? ", spilt" : "") + ")";
+            return s;
+        }
+#endif
+        // (where the patch's smoke is on the whole, as its last grid had it: its middle and its spread each way, in its own axes;
+        // not for a grid that lies turned, an engine's trail's. See Takes.)
+        Vector3 coreAt, coreSpread;
+        bool coreKnown;
 
         /// <summary>For the development build: of every third smoke particle, how many lie inside something solid (the ground, a building, a part of a ship).</summary>
         public int Inside(out int tested)
@@ -1562,6 +2027,18 @@ namespace VolumetricExplosions
             // (high up, the sun is up for longer: it is reckoned over the patch's own horizon, see SunOverHorizon)
             float lifted = SunOverHorizon(here, sunL.y);
             float day = space ? 1f : Mathf.Clamp01(lifted * 6f + 0.3f);
+            // (Through air, since 2026-11-16, the low sun is as much weaker as the air it has come through makes it: three degrees up
+            // its light has come through fifteen times the air it does from overhead. Until then it was six tenths of noon's there, and
+            // three tenths at the horizon: black smoke with a surface, lit square on by a sun three degrees up, stood pale pink against
+            // the dusk where real smoke is dark with a warm edge. Not all a real sky takes, which is nine tenths and more at three
+            // degrees: the game lights everything else there by a sun hardly dimmed, and smoke lit truly beside it would be black.
+            // TestMass 1: as before.)
+            if (!space && body.atmosphere && Settings.TestMass != 1f)
+            {
+                float degrees = Mathf.Asin(Mathf.Clamp(lifted, 0f, 1f)) * Mathf.Rad2Deg;
+                float airs = 1f / (Mathf.Max(lifted, 0f) + 0.50572f * Mathf.Pow(degrees + 6.07995f, -1.6364f));
+                day = Mathf.Min(day, Mathf.Exp(-0.12f * (airs - 1f)) * Mathf.Clamp01(1f + lifted * 30f));
+            }
             sunUp = day > 0.02f;
             daylight = day;
             if (sunLamp == null && Sun.Instance != null) sunLamp = Sun.Instance.GetComponent<Light>();
@@ -1845,7 +2322,8 @@ namespace VolumetricExplosions
             // Where the smoke is drawn as a volume none of it is drawn as sprites. (They were once left in with no colour:
             // nothing to see, but thousands of them, each metres across, still to be drawn over one another.)
             // (nor while a patch taking two others' smoke has no grid of it yet: they are drawing it meanwhile, see Air.Merging)
-            cloud.SetParticles(draw, box != null && (gridReady || mergedFrom != null) ? 0 : count);
+            // (but for the bits drawn by themselves, while there are any: see Loose)
+            cloud.SetParticles(draw, box != null && (gridReady || mergedFrom != null) && time > looseTill ? 0 : count);
             Air.Lap(3, ref lap);
 
             time += dt;
@@ -2062,7 +2540,7 @@ namespace VolumetricExplosions
                 float gap = (q.x - hx) * nx + (q.y - hy) * ny + (q.z - hz) * nz, room = q.r * 0.45f;
                 float closing = -((q.vx + q.kx) * nx + (q.vy + q.ky) * ny + (q.vz + q.kz) * nz);
                 if (closing <= 0f || gap > room + closing * stepDt * (rayEvery + 3f)) continue;
-                if ((q.flags & DiesOnGround) != 0 && gap < 0.5f) { q.life = -1f; continue; }
+                if ((q.flags & DiesOnGround) != 0 && gap < 0.5f) { ComeDown(ref q); continue; }
                 if (gap < room)
                 {
                     float out_ = Mathf.Min(room - gap, 2f);
@@ -2114,6 +2592,28 @@ namespace VolumetricExplosions
 #if DEV
         public string slumpSaid = "not yet";
 #endif
+
+        /// <summary>
+        /// (Since 2026-11-20.) Water or earth a blast threw up, come down on the sea or the ground: it thins away evenly from as
+        /// thick as it is, over as long as it takes to fall its own height (0.3 to 1.5 s), as young smoke handed on does (see
+        /// the mover), and runs out along the water or the ground meanwhile, widening at LandSpreads metres a second or more, as
+        /// the water of a column falling back runs out in a low white ring along the sea in the Navy's film of the Jackson's
+        /// shock trial (laid down whole, it lay on the water as white pillows while it thinned). Until then it went in the frame
+        /// it touched: a lump of a blast at sea's water thrown out towards the camera, metres across by then and low over the
+        /// water, went in one frame some four seconds in, every time, a pale haze over the near sea gone at once (4 % of the
+        /// picture; the films of that day, sea16 to sea18). Settings.TestLand 1: gone at once, as until then.
+        /// </summary>
+        static void ComeDown(ref P q)
+        {
+            if ((q.flags & HandedOn) != 0) return;
+            if (Settings.TestLand == 1f || q.mass <= 0f) { q.life = -1f; return; }
+            float falls = -(q.vy + q.ky);
+            q.flags |= HandedOn;
+            q.fadeIn = -(q.age + Mathf.Clamp(2f * q.r / Mathf.Max(falls, 5f), 0.3f, 1.5f));
+            if (q.grow < LandSpreads) q.grow = LandSpreads;
+        }
+
+        const float LandSpreads = 4f;
 
         static bool SlumpKind(ref P q) => q.life > 0f && q.age >= 0f && q.heat < 0.05f && q.rise <= 0.1f && (q.flags & (Ballistic | DiesOnGround)) == 0 && q.r > 0.05f;
 
@@ -2590,7 +3090,7 @@ namespace VolumetricExplosions
                     }
                     else if (q.y < floor)
                     {
-                        if ((q.flags & DiesOnGround) != 0 && q.age > 0.15f) { q.life = -1f; continue; }
+                        if ((q.flags & DiesOnGround) != 0 && q.age > 0.15f) { ComeDown(ref q); if (q.life < 0f) continue; }
                         // Up out of the ground: at once if it is only just under, otherwise at a few metres a second.
                         float below = floor - q.y;
                         q.y += below < 0.3f ? below : 4f * dt > 0.3f ? 4f * dt : 0.3f;
@@ -2638,6 +3138,22 @@ namespace VolumetricExplosions
                             q.kx = tx - e * back; q.ky = ty + back; q.kz = tz - n * back;
                         }
                     }
+                    else if (q.mass > 0f && q.rise < 0.3f && q.heat < 0.3f && (q.flags & (JetGas | Ballistic)) == 0 && q.age > 0.5f)
+                    {
+                        // Cool smoke low over the ground, where the ground falls away under it (2026-11-16): it goes down with the
+                        // ground, at up to three metres a second, as the heavy smoke of a blast's surge runs down a bank. Until then
+                        // it kept the height it was laid at: a blast on the launch pad's mound sent its black surge out level over
+                        // the mound's edge, a slab with a straight underside standing in the air over the grass (the films of that
+                        // day, raze3/fuel-by-pad). Within two and a half of its own radii of the ground, the less the higher; not
+                        // what climbs of itself, is still hot, or is being carried up. (Every bit of the puffs' flags is taken:
+                        // this goes by where the puff is, not by whether it has lain on the ground.)
+                        float gap = q.y - floor, reach = 2.5f * q.r;
+                        if (gap > 0f && gap < reach && q.vy + q.ky < 0.6f)
+                        {
+                            float down = 3f * (1f - gap / reach) * dt;
+                            q.y -= gap < down ? gap : down;
+                        }
+                    }
                 }
 
                 float push = (q.kx < 0f ? -q.kx : q.kx) + (q.ky < 0f ? -q.ky : q.ky) + (q.kz < 0f ? -q.kz : q.kz);
@@ -2668,10 +3184,12 @@ namespace VolumetricExplosions
                 // Where the smoke is drawn as a volume, that is all that is drawn of it. (The few particles that stray out of
                 // the grid's box used to be drawn as sprites; but a sprite is a soft ball metres across, and from near by
                 // even a few of them lay over the volume like a blurred copy of it.)
-                if (volumed) { d[i].startColor = new Color32(0, 0, 0, 0); continue; }
+                if (volumed && q.kind != Loose) { d[i].startColor = new Color32(0, 0, 0, 0); d[i].startSize = 0f; continue; }
                 const float mine = 1f;
                 if (turn == 1 || fresh) Shade(ref q, sun);
-                if ((turn & 1) != 0 && !fresh) continue;
+                // (but a bit drawn by itself beside the volume, a burning piece's trail, in every frame: a streak of fire whose colour was
+                // worked out in every other frame would be a part of the picture at half its frame rate)
+                if ((turn & 1) != 0 && !fresh && !volumed) continue;
 
                 // ---- how it looks (worked out every other frame; it changes slowly)
                 float vx = q.x - cx, vy = q.y - cy, vz = q.z - cz;
@@ -2858,7 +3376,73 @@ namespace VolumetricExplosions
         /// (Since 2026-10-25.) Whether fire burns in the open in this patch now: a fireball of the last few seconds, a fire on the
         /// ground, burning wreckage, a burning ship's fire (see TuneFire).
         /// </summary>
-        public bool Burning => !riding && (fireCount > 0 || fragCount > 0 || time - fireballAt < 4f || time - blazeSeen < 1f);
+        public bool Burning => !riding && (fireCount > 0 || fragCount > 0 || time - fireballAt < fireballFor || time - blazeSeen < 1f);
+        /// <summary>
+        /// (Since 2026-11-19.) Whether this patch's smoke is a launch's steam with nothing burning in it, lit by its rocket's flame as
+        /// an engine's own smoke is: see TuneFire. By night as by day: NASA's photograph of a Falcon 9 by night (KSC-20261013-PH-SPX01_0004)
+        /// has its steam amber all over, bright parts 237,192,131 and the middling 201,147,85, its shade brown; lit so, ours is
+        /// 238,202,132 and 199,154,105 (`lift_night_new`). Lit as round a fire by night, as by day until then, its far parts were grey,
+        /// 119,114,111 (`lift_night_fold`). Its shade is still too little: a fifth of the photograph's steam is brown shade, a
+        /// twentieth of ours (the flame's light on an engine's smoke is not stopped by the smoke between, see volume.glsl).
+        /// </summary>
+        bool SteamLit => trenches.Count > 0 && !Burning && Settings.TestPadLamp != 1f;
+        /// <summary>
+        /// How much a launch's steam stops its rocket's flame's light on the way through it, as a share of what so much steam would
+        /// stop along a straight line: half a fire in the open's smoke's (0.04), since steam is water, which sends light on where
+        /// soot takes it in. Nought until 2026-11-20: the flame lit all its steam by its distance alone, and by night the cloud by
+        /// it was one even cream, a tenth of it in shade at 4 s where a quarter of the steam in NASA's photograph of a Falcon 9 by
+        /// night (KSC-20261013-PH-SPX01_0004) is brown shade; now 38 % (`lift20_st0`, `_st0.01`, `_st0.02`, `_st0.04`). The eye
+        /// is dazzled by the flame as near as it is all the same, so steam the light does not reach goes dark, not the grey of the
+        /// floodlights (see volume.glsl). By day nothing to be seen: the daylight on the steam is most of its light
+        /// (`liftday20_st0`, `_st0.02`). Settings.TrySteamStops another. (That photograph's quarter in shade, found later the same
+        /// morning, was mostly the haze round the flame, not steam: the box measured took it in. Steam for steam (`farbillows.py`),
+        /// the stopping alone made the billows further off darker and greyer, 155,113,75 in shade to 115,90,74; with the flame's
+        /// light on the steam stronger by night since then (SteamNight), they are the photograph's brown, and the stopping gives them
+        /// some of their shade.) 0.03 since the evening of 2026-11-20, with the flame's light sent on inside the steam to what the
+        /// straight way does not reach (SteamScatter); 0.05 and 0.07 with it darkened the whole cloud (`steam_tone.sh`).
+        /// </summary>
+        const float SteamStops = 0.03f;
+
+        /// <summary>
+        /// A launch's steam by night: its flame's light on it so many times as strong as by day (SteamNight; other smoke's fires'
+        /// 2.5, see FireGain), so that it reaches further, and at its strongest, by the flame, so much of what it is by day
+        /// (SteamNightLevel); both going over to the day's as the daylight comes. Since 2026-11-20. At 2.5 and 1, as the fires'
+        /// light on other smoke, the billows away from the flame had too little of its light, and the floodlights' blue-white and
+        /// the night sky greyed them: at 4 s 115,90,74 in shade and 141,106,77 lit, where those of NASA's photograph of a Falcon 9
+        /// by night (KSC-20261013-PH-SPX01_0004), steam for steam (`farbillows.py`), are 161 to 165,109 to 113,51 to 60 and 221 to
+        /// 229,174 to 181,111 to 119. Now 149 to 154,100 to 103,46 to 49 and 195 to 201,136 to 142,50 to 52 (three films:
+        /// `lift20_lvl10_0.6`, `lift20_steam10a`, `_steam10b`; `steam_level.sh`, `steam_night.sh`). The steam by the flame at the
+        /// top of the picture is as much of the cloud as before or a little more (`toptone.py`: 11 to 17 % at 4 s, 11 to 13 %
+        /// before; the photograph's 2.5 %), and the photograph's amber now, 252,227 to 230,154 to 163 against its 253,222,160,
+        /// where it was cream, 253,235 to 237,184 to 190. Stronger and less bright still (16 and 0.4) brought that share down to
+        /// the photograph's, but the billows away from the flame went a deep orange. Their lit tops are a deeper gold than the
+        /// photograph's cream as it is: a camera's tone curve takes the colour out of what is bright, and ours only out of what is
+        /// over the top (see Shoulder). By day as before. TryW and Settings.TrySteamLevel others. 20 and 0.5 since the evening of
+        /// 2026-11-20 (10 and 0.6 until then), with the light sent on inside the steam and a camera's tone curve: see SteamScatter.
+        /// </summary>
+        const float SteamNight = 20f, SteamNightLevel = 0.5f;
+
+        /// <summary>
+        /// A launch's steam by night, since the evening of 2026-11-20 (all nought until then): how much of its flame's light it
+        /// sends on inside itself to the parts the straight way does not reach (SteamScatter), as so much of the straight way's
+        /// light, and how far that goes (SteamReach, as a share of the straight way's stopping); how much of the top of the
+        /// picture's range a camera's tone curve bends, colour by colour (SteamKnee); and how much whiter the flame's light the
+        /// straight way is than what comes round through the steam (SteamWhite). All go over to nothing as the daylight comes.
+        /// Before, by NASA's photograph of a Falcon 9 by night (KSC-20261013-PH-SPX01_0004), the steam by the flame was a cream
+        /// burnt out at the top of the picture, 14 % of it at red 250 or more at 4 s against the photograph's 2.5 % (`toptone.py`),
+        /// and the billows away from it a deep gold, 199,140,52 lit and 156,103,45 in shade (`farbillows.py`), where the
+        /// photograph's are 221 to 229,174 to 181,111 to 119 and 161 to 165,109 to 113,51 to 60. A camera bends the top of its
+        /// range colour by colour, so the brightest steam is cream, not burnt out; the steam sends the flame's light on into
+        /// itself, so the far side of a billow is a brown, not black; and the flame's light straight from it is whiter than what
+        /// has come round through the steam, so the lit tops are paler than the shade. Now (with SteamNight 20, SteamNightLevel
+        /// 0.5 and SteamStops 0.03) 1.9 % at the top, the billows away from the flame 195,163,98 lit and 172,125,61 in shade, and
+        /// the cloud by the flame 217,201,160 and 194,175,130 against the photograph's 228 to 229,191 to 199,150 to 174 and 189 to
+        /// 200,143 to 160,97 to 126 (`lift20_tone_0.6_0.25_0.35_0.5_0.03_w0.4_g20`; `steam_tone.sh`; the sheet
+        /// 20-night-steam-cream-tops-brown-shade.jpg). Still short of the photograph: the far billows' lit tops (195 against 225)
+        /// and so the light between them and their shade. Settings.TrySteamScatter, TrySteamReach, TrySteamKnee and TrySteamWhite
+        /// others.
+        /// </summary>
+        const float SteamScatter = 0.6f, SteamReach = 0.25f, SteamKnee = 0.35f, SteamWhite = 0.4f;
         /// <summary>(The last frame this patch's flames were walked whole: see Layers.ForCamera.)</summary>
         public int FlamesWholeAt = -10;
 
@@ -3368,6 +3952,10 @@ namespace VolumetricExplosions
                     Air.Cost[3] += lightTook;
                     float[][] other = carryNow; carryNow = carryNext; carryNext = other;
                     float[] pulled = strainNow; strainNow = strainNext; strainNext = pulled;
+                    // (what the grid now going out of use had, for going over from it to the new one: see FireWas. Until 12:2x on
+                    // 2026-11-16, the day this was begun, ShowVolume took these after they were written over with the new grid's:
+                    // the grid before was carried on as if made when the new one was, and sprang back at every new grid.)
+                    beforeTime = shownTime; beforeDrift = shownDrift; beforeGoneTurned = shownGoneTurned;
                     shownTime = lightTime; shownFastest = nextFastest; shownDrift = nextDrift; shownSlows = nextSlows;
                     shownGone = lightGone; shownGoneTurned = lightGoneTurned; airGoing = nextGoing;
                     turned = lightTurned; turnX = lightX; turnY = lightY; turnZ = lightZ;
@@ -3484,6 +4072,8 @@ namespace VolumetricExplosions
             // (the last grid's work is done with the copy: see above)
             if (seen.Length < count) { Spares.GiveList(seen); seen = Spares.TakeList<P>(p.Length); }
             Array.Copy(p, seen, count);
+            // (the bits drawn by themselves are not on the grid, nor fitted round: see Loose)
+            if (time <= looseTill) { P[] copy = seen; for (int i = 0; i < count; i++) if (copy[i].kind == Loose) copy[i].life = -1f; }
             if (vented)
             {
                 // (An engine's newest smoke is taken to be as old as it will be when this grid is seen, and what is still
@@ -3648,6 +4238,13 @@ namespace VolumetricExplosions
             // the cloud does. (It used to be the faces of the grid's box, which sit on whole cells: a wisp at
             // the edge then lost a part of itself each time the box moved a cell.)
             float typical = (float)(sr / live);
+            if (!tilt)
+            {
+                coreAt = new Vector3((float)(sx / live), (float)(sy / live), (float)(sz / live));
+                coreSpread = new Vector3((float)Math.Sqrt(Math.Max(0.0, sxx / live - (sx / live) * (sx / live))), (float)Math.Sqrt(Math.Max(0.0, syy / live - (sy / live) * (sy / live))), (float)Math.Sqrt(Math.Max(0.0, szz / live - (sz / live) * (sz / live))));
+                coreKnown = true;
+            }
+            else coreKnown = false;
             // (for 0.6 s after a blast, or longer for one that threw earth up out of the ground, see Thrown: as only for 0.6 s, a bomb's
             // jets of earth were cut off at about 18 m, where the bulk of its bits, all low, put the cloud's edge, and its earth
             // stood as a dark ball on a stalk)
@@ -5093,6 +5690,7 @@ namespace VolumetricExplosions
         static float BellAt(float round) => BellList[(int)(round * BellSteps) & (BellSteps - 1)];
 
         readonly Vector3[] restThere = new Vector3[Reckonings];
+        Vector3 restGoing;                                        // (and which way the smoke there is going, and how fast, on the whole: nought where there is none; see Streamed)
         float restTurn, restPace;                                 // (and the point of its round, and its pace, that smoke born there takes over,
         int restOctave;                                           // and which round it is on)
 
@@ -5105,6 +5703,7 @@ namespace VolumetricExplosions
         {
             Vector3[] there = restThere;
             for (int n = 0; n < Reckonings; n++) there[n] = Vector3.zero;
+            restGoing = Vector3.zero;
             // (where there is nothing to go by: all the smoke of a blast at the same point of its round, going round
             // briskly; the air sets its pace for it within a second)
             bool oneRound = Settings.TestTurns >= 1f;
@@ -5122,6 +5721,7 @@ namespace VolumetricExplosions
             float fu = u - i, fv = v - j, fw = w - k;
             float[][] c = carryNow;
             float count0 = 0f, count1 = 0f, count2 = 0f, pull = 0f, any = 0f;
+            Vector3 going = Vector3.zero;
             for (int corner = 0; corner < 8; corner++)
             {
                 int di = corner & 1, dj = (corner >> 1) & 1, dk = corner >> 2, cell = i + di + ((j + dj) + (k + dk) * A) * A;
@@ -5133,7 +5733,10 @@ namespace VolumetricExplosions
                 count0 += share * c[Counts][cell]; count1 += share * c[Counts + 1][cell]; count2 += share * c[Counts + 2][cell];
                 pull += share * strainNow[cell];
                 any += share * c[0][cell];
+                float much = share * c[0][cell];
+                going.x += much * c[1][cell]; going.y += much * c[2][cell]; going.z += much * c[3][cell];
             }
+            if (any > 0f) restGoing = (turned ? FromGrid(going) : going) / any;
             // (the grid has them in its own axes; the smoke keeps them in the site's)
             if (turned) for (int n = 0; n < Reckonings; n++) there[n] = FromGrid(there[n]);
             if (any <= 0f) return;

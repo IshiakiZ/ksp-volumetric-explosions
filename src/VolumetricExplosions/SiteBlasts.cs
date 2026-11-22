@@ -80,6 +80,8 @@ namespace VolumetricExplosions
             p[i].cx = x; p[i].cy = y; p[i].cz = z;
             p[i].dx = x; p[i].dy = y; p[i].dz = z;
             p[i].fx = x; p[i].fy = y; p[i].fz = z;
+            // (its own speed, halved: it slows as soon as it meets the air, and what is ahead of it is not looked up, see above)
+            Streamed(i, new Vector3(p[i].vx + p[i].kx, p[i].vy + p[i].ky, p[i].vz + p[i].kz) * 0.5f + airGoing * 0.5f);
             draw[i] = new ParticleSystem.Particle
             {
                 position = new Vector3(x, y, z),
@@ -90,6 +92,46 @@ namespace VolumetricExplosions
                 startColor = new Color32(0, 0, 0, 0),
             };
         }
+
+        /// <summary>
+        /// (Since 2026-11-16.) Smoke that pours from one place carries its billows away with it. A set of billows begins afresh, for
+        /// all the smoke on one round, at one moment (see Afresh): what was there then goes on showing the billows of where it was.
+        /// But smoke that has left a nozzle or a fire since then was nowhere then. It was given the place of the smoke it was born
+        /// into, which is smoke born a moment before at the same spot: so all that left in one round, tens of metres of a rocket's
+        /// cloud on its pad at the speed it leaves, and the height of a fire's column, showed the billows of one spot, the same
+        /// lump all along the stream and a different one only beside it: a cloud of fibres combed outward from the pad, a column
+        /// like fur brushed upward; "super smooth and kind of soft", the owner. So new smoke from such a source is given the place
+        /// it would have come from had the stream been running since each set began: back along the way the stream is going, by
+        /// its speed times so long (which speed: see Born). Along the stream the billows then lie as far apart as the smoke that carries them, and go with it. (No further
+        /// than StreamsFar: past that the place stays so far behind, and the smoke goes through its billows; at such speeds the
+        /// eye cannot tell.) `going`: which way and how fast, in the site's axes, over the ground.
+        /// </summary>
+        void Streamed(int i, Vector3 going)
+        {
+            ref P q = ref p[i];
+            float share = Streams;
+            if (share <= 0f || q.rate <= 0f) return;
+            // (the places are kept in the air the site's smoke is in, which goes along with it as a whole: see airGoing)
+            float vx = going.x - airGoing.x, vy = going.y - airGoing.y, vz = going.z - airGoing.z, speed2 = vx * vx + vy * vy + vz * vz;
+            if (speed2 < 0.25f) return;
+            float round = share / q.rate, most = StreamsFar / Mathf.Sqrt(speed2);
+            float t = q.turn - Mathf.Floor(q.turn);
+            // (how long ago each set began afresh, by the sixths of the round in Afresh: a at its end, e a third through, b two thirds; c, d and f twice each)
+            float sa = Mathf.Min(t * round, most), se = Mathf.Min(Part(t - 1f / 3f) * round, most), sb = Mathf.Min(Part(t - 2f / 3f) * round, most);
+            float sc = Mathf.Min(0.5f * Part(2f * t) * round, most), sd = Mathf.Min(0.5f * Part(2f * (t - 1f / 3f)) * round, most), sf = Mathf.Min(0.5f * Part(2f * (t - 1f / 6f)) * round, most);
+            float x = q.x, y = q.y, z = q.z;
+            q.ax = x - vx * sa; q.ay = y - vy * sa; q.az = z - vz * sa;
+            q.bx = x - vx * sb; q.by = y - vy * sb; q.bz = z - vz * sb;
+            q.ex = x - vx * se; q.ey = y - vy * se; q.ez = z - vz * se;
+            q.cx = x - vx * sc; q.cy = y - vy * sc; q.cz = z - vz * sc;
+            q.dx = x - vx * sd; q.dy = y - vy * sd; q.dz = z - vz * sd;
+            q.fx = x - vx * sf; q.fy = y - vy * sf; q.fz = z - vz * sf;
+        }
+
+        static float Part(float x) => x - Mathf.Floor(x);
+        internal const float StreamsFar = 60f;
+        /// <summary>(how much of that: 1 all of it; nought as until 2026-11-16, which TestMass 1 has too; TryP another)</summary>
+        static float Streams => Settings.TestMass == 1f ? 0f : Settings.TryP >= 0f ? Settings.TryP : 1f;
 
         /// <summary>(The round new gas takes where nothing has carried it yet: as RestAt has it before it looks into the grid.)</summary>
         void Fresh(out float turn, out float pace, out int octave)
@@ -102,7 +144,7 @@ namespace VolumetricExplosions
         }
 
         /// <summary>Give the particle its place in the list that is drawn. The tile it shows is picked through its "age".</summary>
-        void Born(int i)
+        void Born(int i, bool streams = false)
         {
             p[i].born = p[i].r;
             // It shows the same billows as the smoke it is born into (see Afresh).
@@ -116,6 +158,12 @@ namespace VolumetricExplosions
             p[i].cx = x + there[3].x; p[i].cy = y + there[3].y; p[i].cz = z + there[3].z;
             p[i].dx = x + there[4].x; p[i].dy = y + there[4].y; p[i].dz = z + there[4].z;
             p[i].fx = x + there[5].x; p[i].fy = y + there[5].y; p[i].fz = z + there[5].z;
+            // (Smoke of a stream, see Streamed. An engine's: by its own speed, halved, for it slows as soon as it meets the air; by
+            // the speed of the smoke it is born into, which is mostly smoke that has all but stopped, the pad's cloud was fibres
+            // still (filmed both ways, look6 and look8). A fire's, which leaves at a walk and is carried up by the air: by the
+            // speed of the smoke just above it.)
+            if ((p[i].flags & Exhausted) != 0) Streamed(i, new Vector3(p[i].vx + p[i].kx, p[i].vy + p[i].ky, p[i].vz + p[i].kz) * 0.5f + airGoing * 0.5f);
+            else if (streams && restGoing.sqrMagnitude > 0.25f) Streamed(i, restGoing);
             var d = new ParticleSystem.Particle
             {
                 position = new Vector3(p[i].x, p[i].y, p[i].z),
@@ -169,9 +217,50 @@ namespace VolumetricExplosions
         {
             Vector3 c = pl.at, v0 = pl.going;
             float q = Settings.Quality * Air.Room();
-            float R = pl.radius;
+            float R = pl.radius, own = R;
             lastBlast = time; blasted = true;
-            if (time - fireballAt > 3f || R > fireballR) { fireballR = R; fireballAt = time; fireballC = c; }
+            // ---- one fire of many blasts (since 2026-11-16)
+            // A rocket that falls on the ground does not go up in one blast: its tanks burst one after another as each is crushed, a
+            // dozen blasts and more within a second, all within a few metres of each other. They are one fire: the fuel of all of them
+            // in one fireball, as wide and burning as long as that much fuel does in one. Laid each as a fireball of its own (until this
+            // date), the first few small tanks used up all the bits the patch has, the big tanks that followed laid next to none (a
+            // Kerbal X let fall from 150 m: 67 tonnes in thirteen blasts, and the three largest, 46 tonnes of it, had 400 bits between
+            // them of 29,000), and each blast shoved the fire of those before it outward as if it were old smoke: a second and a half
+            // after the strike there was no fireball, only scraps of flame and smoke in a ring three hundred metres across, where
+            // 67 tonnes of fuel make one ball of fire ninety metres across that burns for some twelve seconds and climbs.
+            // So a fiery blast within a second and a half of the last, and near it, joins that fire: it is laid as a part of the
+            // fireball of all the fuel so far (so wide, burning so long, climbing so fast), with as many bits as that fireball has
+            // more than what is laid already (and never fewer than half its share by fuel); it makes room in what is there as
+            // much as the fireball has grown, and no more; and there is one rising column and one light for the whole.
+            bool massed = false;
+            float grownFrom = 0f;
+            int massBits = -1;
+            bool fiery = own > 3f && !pl.small && pl.detonated < 0.3f && pl.fire > 50f && !vacuum;
+            if (fiery)
+            {
+                float near = 1.5f * massR + own + 10f;
+                if (Settings.TestMass != 1f && time - massAt < 1.5f && (c - massC).sqrMagnitude < near * near)
+                {
+                    massed = true;
+                    grownFrom = massR;
+                    massFire += pl.fire;
+                    massC = Vector3.Lerp(massC, c, pl.fire / massFire);
+                    massR = Mathf.Max(massR, Mathf.Max(own, Plan.FuelRadius(massFire)));
+                    R = massR;
+                    float all = Mathf.Min(95f * Mathf.Pow(R, 1.45f), 14000f) * q;
+                    massBits = (int)Mathf.Max(all - massLaid, 0.5f * all * pl.fire / massFire);
+                    massLaid += massBits;
+                }
+                else
+                {
+                    massFire = pl.fire; massR = own; massC = c; massLampSeed = -1f;
+                    massLaid = q * Mathf.Clamp(95f * Mathf.Pow(own, 1.45f), 260f, 9000f);
+                }
+                massAt = time;
+            }
+            // (it burns as long as Fireball has it burn: its flames are drawn as a fireball's for most of that)
+            if (time - fireballAt > 3f || R > fireballR) { fireballR = R; fireballAt = time; fireballC = massed ? massC : c; fireballFor = massed ? Mathf.Max(4f, 0.6f * (0.8f + 0.3f * R)) : 4f; }
+            else if (massed) fireballAt = time;
             if (R > scale || count < 50)
             {
                 scale = Mathf.Max(2f, Mathf.Max(R, pl.reach * 0.6f));
@@ -179,7 +268,10 @@ namespace VolumetricExplosions
                 // when a cloud starts (or a much bigger blast takes it over) and then left alone.
                 if (count < 50 || scale * 0.55f + 3.5f > detailRepeat * 1.5f)
                 {
-                    detailRepeat = Mathf.Clamp(scale * 0.55f + 3.5f, 4f, 26f);
+                    // (At most 16 m since 2026-11-16, 26 until then (TestMass 1, or TryE for another): the lumps go with the repeat, and a
+                    // big fire's smallest were then twice a small blast's, its smoke that much softer from as near; its large shapes are
+                    // the grid's own, which a big cloud has plenty of.)
+                    detailRepeat = Mathf.Clamp(scale * 0.55f + 3.5f, 4f, Settings.TryE > 0f ? Settings.TryE : Settings.TestMass == 1f ? 26f : 16f);
                     fullLength = Mathf.Clamp(0.13f * scale, 0.8f, 4f);
                     seaBorn = pl.water && (pl.ground || pl.underwater);
                 }
@@ -197,18 +289,21 @@ namespace VolumetricExplosions
 
 #if DEV
             BurstLap(-1);
+            if (BlastLog.Count < 400) BlastLog.Add(time.ToString("F2") + " s: R " + own.ToString("F1") + (massed ? " (joins a fire now " + R.ToString("F1") + " wide, " + massBits + " bits)" : "") + ", fire " + pl.fire.ToString("F0") + " kg, at " + c.x.ToString("F0") + " " + c.y.ToString("F0") + " " + c.z.ToString("F0") + ", " + count + " bits" + " [" + pl.label + "]");
 #endif
-            if (count > 0 && !vacuum) Shove(c, Mathf.Max(R, pl.reach * 0.7f));
+            if (count > 0 && !vacuum && pl.cause != Cause.Collapse) { if (massed) MakeRoom(c, grownFrom, R); else Shove(c, Mathf.Max(R, pl.reach * 0.7f)); }
             StartKnock(pl, c, onGround);
+            Raze(pl, c, onGround);
 #if DEV
             BurstLap(0);
 #endif
-            if (R > 0.3f) Fireball(pl, c, v0, R, q, onGround);
+            if (R > 0.3f) Fireball(pl, c, v0, R, q, onGround, massBits, massed ? pl.fire / massFire : 1f);
 #if DEV
             BurstLap(1);
 #endif
             if (pl.vapour > 0.5f) Vapour(pl, c, v0, q, onGround);
             if (pl.water && (pl.ground || pl.underwater)) { Splash(pl, c, v0, q); SeaBlow(pl, c); }
+            else if (pl.cause == Cause.Collapse) { if (pl.dirt > 0f) Rubble(pl, c, q); }
             else if (pl.dirt > 0f) { Dust(pl, c, v0, q); if (pl.detonated > 0.2f) Thrown(pl, c, q); }
 #if DEV
             BurstLap(2);
@@ -225,12 +320,40 @@ namespace VolumetricExplosions
                 float up = onGround ? R * 0.45f : 0f;
                 // (and its flash is over in a moment: a shell's in a tenth of a second, a tonne's in a second)
                 float lit = Mathf.Lerp(vacuum ? 0.3f + 0.05f * R : 0.9f + 0.32f * R, 0.1f + 0.045f * R, pl.detonated);
-                int lamp = AddLamp(c.x, c.y + up, c.z, R, vacuum ? 3.5f : Mathf.Lerp(5f, 6.5f, pl.detonated), lit, (byte)pl.tint, false, R * 6.5f, lift * 0.8f);
+                // (a blast that joins a fire: that fire's lamp, as wide and lasting as long as the fire now is, and no second flash)
+                int lamp = -1;
+                if (massed)
+                {
+                    for (int n = 0; n < lampCount && lamp < 0; n++) if (lamps[n].seed == massLampSeed && !lamps[n].quiet && !lamps[n].steady) lamp = n;
+                    if (lamp >= 0)
+                    {
+                        ref Lamp l = ref lamps[lamp];
+                        float share = pl.fire / massFire;
+                        l.x += (c.x - l.x) * share; l.z += (c.z - l.z) * share; l.y = Mathf.Max(l.y, c.y + up);
+                        l.r = R; l.age = 0f; l.life = lit; l.flash = 0f; l.climb = Mathf.Max(l.climb, lift * 0.8f);
+                    }
+                }
+                if (lamp < 0) lamp = AddLamp(c.x, c.y + up, c.z, R, vacuum ? 3.5f : Mathf.Lerp(5f, 6.5f, pl.detonated), lit, (byte)pl.tint, false, massed ? 0f : R * 6.5f, lift * 0.8f);
+                if (fiery) massLampSeed = lamps[lamp].seed;
                 // The fire of something that blew up at speed flies on (see Fireball), and its light goes with it: left
                 // where the blast was, it was a glowing ball hanging in the air behind a fire already far away.
                 Vector3 thrown = vacuum ? v0 : v0 * Mathf.Lerp(1f, 0.75f * (0.4f + 0.6f * Mathf.Clamp01(v0.magnitude / 120f)), Mathf.Clamp01(grip));
                 lamps[lamp].vx = thrown.x; lamps[lamp].vy = thrown.y; lamps[lamp].vz = thrown.z;
-                if (lift > 0f) AddThermal(c.x + v0.x * 0.15f, c.y + up, c.z + v0.z * 0.15f, R * 0.72f, lift, c.y + R * Luck(6f, 10f));
+                // (a blast that joins a fire: one rising column for the whole, the fire's own made as wide and as fast as the fire now is)
+                int rising = -1;
+                if (massed && lift > 0f)
+                    for (int n = 0; n < thermalCount; n++)
+                    {
+                        if (thermals[n].led || thermals[n].stem) continue;
+                        float tx = thermals[n].x - massC.x, tz = thermals[n].z - massC.z;
+                        if (tx * tx + tz * tz < R * R && (rising < 0 || thermals[n].w > thermals[rising].w)) rising = n;
+                    }
+                if (rising >= 0)
+                {
+                    ref Thermal h = ref thermals[rising];
+                    h.a = Mathf.Max(h.a, R * 0.72f); h.w = Mathf.Max(h.w, lift); h.top = Mathf.Max(h.top, c.y + R * Luck(6f, 10f));
+                }
+                else if (lift > 0f) AddThermal(c.x + v0.x * 0.15f, c.y + up, c.z + v0.z * 0.15f, R * 0.72f, lift, c.y + R * Luck(6f, 10f));
 #if DEV
                 BurstLap(4);
 #endif
@@ -239,13 +362,13 @@ namespace VolumetricExplosions
                 BurstLap(5);
 #endif
             }
-            if (pl.burn > 0f && onGround) AddFire(pl, c, R, q);
+            if (pl.burn > 0f && onGround) AddFire(pl, c, own, q);
 #if DEV
             BurstLap(6);
 #endif
             // (an explosive's front, from some kilograms up: a shell's is too weak to be seen bending the light)
             bool shocks = pl.detonated > 0.5f ? pl.explosive >= 5f : R > 2f;
-            if (Settings.Shockwave && air > 0.12f && shocks && time - lastRing > 0.5f) Shock(c, R, onGround, pl.fire + 10f * pl.explosive, onGround && !pl.water && !pl.paved ? pl.dirt : 0f, pl.dust);
+            if (Settings.Shockwave && air > 0.12f && shocks && time - lastRing > 0.5f) Shock(c, own, onGround, pl.fire + 10f * pl.explosive, onGround && !pl.water && !pl.paved ? pl.dirt : 0f, pl.dust);
 #if DEV
             BurstLap(7);
             Bursts.Add("    burst R " + R.ToString("F1") + ", q " + q.ToString("F2") + ": shove " + BurstMs[0].ToString("F1") + ", fireball " + BurstMs[1].ToString("F1") + ", vapour/splash/dust " + BurstMs[2].ToString("F1")
@@ -257,6 +380,8 @@ namespace VolumetricExplosions
         // (for the development build: where a burst's time goes, written beside the patch's step in Made)
         static readonly double[] BurstMs = new double[8];
         static long burstLap;
+        /// <summary>(Development build, 2026-11-16: every blast laid since this was last asked for: when by its patch's clock, how wide, how much fuel, where in the patch.)</summary>
+        internal static readonly List<string> BlastLog = new List<string>();
         internal static readonly List<string> Bursts = new List<string>();
         static void BurstLap(int k)
         {
@@ -266,6 +391,36 @@ namespace VolumetricExplosions
             burstLap = now;
         }
 #endif
+
+        /// <summary>
+        /// A blast that joins a fire already burning (see Burst) makes room in it: what is there moves out by half of what the fireball
+        /// has grown by, from the radius it had to the one it has now (half: the new fire fills the middle too, through what is there).
+        /// </summary>
+        void MakeRoom(Vector3 c, float from, float to)
+        {
+            float more = to * to * to - from * from * from, far2 = 9f * to * to;
+            if (more <= 0f) return;
+            // (And what of the fire is burning there burns on as long as the fire it is now a part of: a fireball burns for 0.8 s and
+            // 0.3 s for each metre of its radius (see Fireball), and each bit cools at a pace set by that when it was laid. Left at
+            // the pace of the small fireball it was laid for, the first tanks' fire, shoved to the outside of the ball by those
+            // that followed, was smoke within two seconds: a grey ball with the fire of 67 tonnes hidden inside it.)
+            float longer = (0.8f + 0.3f * to) / (0.8f + 0.3f * from), near2 = 2.25f * to * to;
+            for (int i = 0; i < count; i++)
+            {
+                ref P o = ref p[i];
+                if ((o.flags & Ballistic) != 0 || o.life < 0f) continue;
+                float dx = o.x - c.x, dy = o.y - c.y, dz = o.z - c.z, r2 = dx * dx + dy * dy + dz * dz;
+                if (r2 > far2) continue;
+                if (r2 < near2 && o.age < 3f && o.heat > 0.3f && o.kind != Loose)
+                {
+                    o.cool /= longer;
+                    if (o.mass <= 0f) o.life = o.age + (o.life - o.age) * longer;
+                }
+                float r = Mathf.Sqrt(r2) + 0.05f;
+                float moves = 0.5f * (Mathf.Pow(r * r * r + more, 1f / 3f) - r) * Mathf.Max(1f, o.kloss) / r;
+                o.kx += dx * moves; o.ky += dy * moves * 0.6f; o.kz += dz * moves;
+            }
+        }
 
         /// <summary>A blast shoves aside the smoke that was already hanging there.</summary>
         void Shove(Vector3 c, float R)
@@ -285,14 +440,22 @@ namespace VolumetricExplosions
             }
         }
 
-        void Fireball(Plan pl, Vector3 c, Vector3 v0, float R, float q, bool onGround)
+        void Fireball(Plan pl, Vector3 c, Vector3 v0, float R, float q, bool onGround, int bits = -1, float share = 1f)
         {
             // (a small shell's puff of a few dozen bits: a fight sets off dozens a second, see Warheads)
-            int n = (int)(q * Mathf.Clamp(95f * Mathf.Pow(R, 1.45f), pl.small ? 16f : 260f, 9000f));
+            // (bits: so many, for a blast that joins a fire already burning: see Burst)
+            int n = bits >= 0 ? bits : (int)(q * Mathf.Clamp(95f * Mathf.Pow(R, 1.45f), pl.small ? 16f : 260f, 9000f));
             // (its rind and its dust come to at most about half as many again: see Room)
             Room(n + n / 2);
             // Fewer particles are made bigger, so that the fireball stays filled in.
             float rp = Mathf.Clamp(0.105f * Mathf.Pow(R, 0.75f) + 0.1f, 0.18f, 1.6f) / Mathf.Pow(Mathf.Clamp(q, 0.08f, 3f), 0.33f);
+            // (Its smoke as thick whatever its size, since 2026-11-16. The bits are at most 9,000 and at most 1.6 m, which a fireball
+            // 23 m in radius has and one of 37 m: a wider one had no more bits and no bigger, the same soot in up to eight times
+            // the room, and its smoke was a brown fog the ground showed through, with no billows on it (they are cut where smoke is
+            // thick), where a small blast's is a black body with a surface like a cauliflower's. Each bit now carries the soot of as
+            // many bits as it stands for, and of as wide ones. share: of a blast that joins a fire, its part of that fire's fuel.)
+            float wide = (0.105f * Mathf.Pow(R, 0.75f) + 0.1f) / 1.6f;
+            float thick = pl.small || Settings.TestMass == 1f ? 1f : Mathf.Clamp(q * 95f * Mathf.Pow(R, 1.45f) * share / Mathf.Max(n, 1), 1f, 8f) * Mathf.Max(1f, wide * wide);
             float burns = vacuum ? 0.25f + 0.045f * R : (0.8f + 0.30f * R) * Mathf.Lerp(0.55f, 1f, Mathf.Clamp01(grip));      // seconds; shorter where the air is thin
             float spreads = 0.16f + 0.02f * R;                                               // seconds for the blast to spend itself in air
             // (An explosive's gas comes out faster and is cool before it has spread: the flash is half the width of the smoke it
@@ -331,7 +494,7 @@ namespace VolumetricExplosions
 
             // (from 2026-10-24 a big one is laid over two of the patch's steps: see HalfLaid)
             var f = new HalfLaid { pl = pl, c = c, v0 = v0, up = blastUp, R = R, rp = rp, burns = burns, spreads = spreads, smokeLasts = smokeLasts, mixes = mixes,
-                               smoky = smoky, shade = shade, carried = carried, onGround = onGround, speckled = speckled, lobes = lobes, more = more,
+                               smoky = smoky, shade = shade, carried = carried, thick = thick, onGround = onGround, speckled = speckled, lobes = lobes, more = more,
                                patchWay = patchWay, patchOf = patchOf, n = n, at = time };
             f.rind = smoky > 0f ? (int)(n * (speckled ? 0.3f : 0.42f) * pl.soot) : 0;
             bool split = n >= SplitFrom;
@@ -360,7 +523,7 @@ namespace VolumetricExplosions
         {
             public Plan pl;
             public Vector3 c, v0, up;
-            public float R, rp, burns, spreads, smokeLasts, mixes, smoky, shade, carried, at;
+            public float R, rp, burns, spreads, smokeLasts, mixes, smoky, shade, carried, at, thick = 1f;
             public bool onGround, speckled;
             public Vector3[] lobes, patchWay;
             public float[] more, patchOf;
@@ -466,7 +629,7 @@ namespace VolumetricExplosions
                 if (Luck(0f, 1f) < smoky)
                 {
                     float later = o.r * 2.2f;                                               // about the size it has grown to when the smoke shows
-                    o.mass = Luck(0.6f, 2.2f) * Mathf.Pow(Mathf.Max(0.05f, pl.soot), 0.7f) * later * later;
+                    o.mass = Luck(0.6f, 2.2f) * Mathf.Pow(Mathf.Max(0.05f, pl.soot), 0.7f) * later * later * f.thick;
                     o.life = smokeLasts * Luck(0.45f, 1.15f);
                     if (!speckled)
                     {
@@ -512,7 +675,7 @@ namespace VolumetricExplosions
                 o.grow = mixes;
                 o.turb = 0.5f + 0.1f * speed;
                 o.rise = (Settings.TestFire == 2f || Settings.TestRise == 1f ? 0.3f : 0.8f) * Mathf.Sqrt(R) * (1f - 0.8f * pl.detonated);      // (the rind rises with the fireball it wraps: see above)
-                o.mass = Luck(0.8f, 2.2f) * pl.soot * o.r * o.r * 2.5f;
+                o.mass = Luck(0.8f, 2.2f) * pl.soot * o.r * o.r * 2.5f * f.thick;
                 o.life = smokeLasts * Luck(0.4f, 1.1f);
                 if (speckled) o.fadeIn = burns * Luck(0.45f, 0.9f);
                 else
@@ -611,6 +774,59 @@ namespace VolumetricExplosions
             }
         }
 
+        /// <summary>
+        /// (Since 2026-11-19.) The dust of a building of the space centre coming down (Plan's Cause.Collapse, laid by Razing.Dust):
+        /// it comes up out of what falls over the few seconds of the fall, most of it low and none higher than the building stood;
+        /// the air the fall drives out pushes it out along the ground at up to half the speed at which what falls from that height
+        /// strikes; and it hangs for half a minute and drifts. Grey concrete dust round the foot of what falls, no fire and no
+        /// white cloud, as in NASA's photographs of the Cape's towers brought down (KSC-99pp1239 and 1240, KSC-08pd1056). Laid by
+        /// a blast's dust (Dust), it was a white cloud that rushed out over a hundred metres in a second and swallowed the camera
+        /// (the film raze_quiet3 of that day). pl.reach: how far round its foot this cloud's share of the building lies; pl.tall:
+        /// how high the building stood. Its bits are larger in a larger cloud (up to 8 m), as many as fill it twice over.
+        /// </summary>
+        void Rubble(Plan pl, Vector3 c, float q)
+        {
+            float reach = Mathf.Max(3f, pl.reach), tall = Mathf.Clamp(pl.tall, 1f, 150f);
+            float layer = Mathf.Clamp(0.8f * tall, 3f, 90f);                                 // (how high its dust comes up)
+            float g = Mathf.Max(1f, gravity);
+            float fall = Mathf.Sqrt(2f * tall / g);                                           // (seconds for its top to come down)
+            float strike = Mathf.Sqrt(2f * g * tall);                                         // (how fast it comes down at the last, m/s)
+            float size = Mathf.Clamp(0.1f * layer + 0.04f * reach, 1.5f, 8f);
+            float room = Mathf.PI * reach * reach * layer, each = 4.19f * size * size * size;
+            int n = (int)(q * Mathf.Clamp(2f * room / each, 80f, 2500f));
+            Quaternion lay = Quaternion.FromToRotation(Vector3.up, blastUp);
+            for (int k = 0; k < n; k++)
+            {
+                int i = Add();
+                if (i < 0) break;
+                ref P o = ref p[i];
+                float turn = Luck(0f, Mathf.PI * 2f);
+                Vector3 way = lay * new Vector3(Mathf.Cos(turn), 0f, Mathf.Sin(turn));
+                float from = reach * Mathf.Sqrt(Luck(0f, 1f));
+                o.x = c.x + way.x * from; o.z = c.z + way.z * from;
+                float high = Luck(0f, 1f);
+                high = high * high * layer;                                                   // (most of it low)
+                o.y = GroundAt(o.x, o.z) + 0.5f + high;
+                float tone = Luck(0.7f, 1.05f);
+                o.ar = pl.dust.r * tone; o.ag = pl.dust.g * tone; o.ab = pl.dust.b * tone;
+                float speed = strike * Luck(0.1f, 0.5f) * (1f - 0.7f * high / layer);
+                o.kx = way.x * speed; o.ky = speed * Luck(0f, 0.25f); o.kz = way.z * speed;
+                o.kloss = Luck(0.5f, 1.1f); o.drag = 3f;
+                o.r = size * Luck(0.7f, 1.4f);
+                o.grow = Luck(0.1f, 0.3f);
+                o.turb = 0.5f + 0.1f * speed;
+                o.rise = Luck(-0.25f, 0.35f);                                                 // (fine dust: it hangs, stirred up a little)
+                o.mass = Luck(0.5f, 1.5f) * o.r * o.r * 3f * (1f - 0.5f * high / layer);
+                // (it comes as the building comes down: first at its foot, and higher as it falls into its dust. All at once, it stood
+                // over the hangar's roof before the hangar had begun to fall.)
+                o.fadeIn = Luck(0.3f, 0.8f) * (0.4f + 0.5f * fall) + high / layer * (1f + fall) * Luck(0.8f, 1.25f);
+                o.swell = Swell(way, speed, o.kloss, o.r);
+                o.life = Luck(18f, 40f) * Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.5f, 1f, Mathf.Clamp01(air));
+                o.tile = Luck(0f, 1f) < 0.35f ? Wispy() : Lumpy();
+                Born(i);
+            }
+        }
+
         /// <summary>Dirt thrown out along the ground and up. In air it billows and hangs; with no air it flies in clean arcs and drops.</summary>
         void Dust(Plan pl, Vector3 c, Vector3 v0, float q)
         {
@@ -620,7 +836,9 @@ namespace VolumetricExplosions
             // on sand was a dome of tan dust lit orange by the fire inside it, and hid the fire.)
             // (An explosive's throws all of it, darkened a little by its soot: a shell or a bomb digs, see Thrown.)
             float fiery = Settings.TestFire == 2f ? 0f : Mathf.Clamp01(pl.radius / Mathf.Max(pl.reach, 0.1f)) * (1f - pl.detonated);
-            float sooted = 0.7f * fiery * pl.soot + 0.3f * pl.detonated * pl.soot;
+            // (Since 2026-11-16 a fuel blast's is darker still, 0.9 for 0.7 of the way to its soot, and thrown six tenths as far: grey, and
+            // flung twice the fireball's reach, it stood round the fire's foot as two dozen separate grey balls.)
+            float sooted = (Settings.TestTrail == 1f ? 0.7f : 0.9f) * fiery * pl.soot + 0.3f * pl.detonated * pl.soot;
             int n = (int)(q * pl.dirt * Mathf.Lerp(1f, 0.4f, fiery) * Mathf.Clamp(35f * Mathf.Pow(reach, 1.5f), pl.small ? 8f : 40f, 2500f));
             // "Along the ground" and "up" are as the ground lies under the blast: on a slope the low skirt of dust goes out up the slope and down it.
             Quaternion lay = Quaternion.FromToRotation(Vector3.up, blastUp);
@@ -638,7 +856,7 @@ namespace VolumetricExplosions
                 tilt = tilt * tilt * Mathf.Lerp(1.2f, 0.45f, pl.detonated);
                 Vector3 way = lay * new Vector3(Mathf.Cos(turn) * Mathf.Cos(tilt), Mathf.Sin(tilt), Mathf.Sin(turn) * Mathf.Cos(tilt));
                 way = (way + ahead * (0.7f * thrown)).normalized;                           // an object that came in at a slant throws it on ahead
-                float far = reach * Luck(0.5f, 2.3f);
+                float far = reach * Luck(0.5f, 2.3f) * (Settings.TestTrail == 1f ? 1f : Mathf.Lerp(1f, 0.6f, fiery));
                 o.x = c.x + way.x * 0.3f * reach * Luck(0f, 1f); o.z = c.z + way.z * 0.3f * reach * Luck(0f, 1f);
                 o.y = GroundAt(o.x, o.z) + 0.2f;
                 float tone = Luck(0.75f, 1.15f);
@@ -865,8 +1083,29 @@ namespace VolumetricExplosions
         /// shallow blast's gas comes up through the surface as a dome and bursts through it as a column of spray, tall and
         /// white (Cole, Underwater Explosions; footage of mines and depth charges), with no fire; at the surface the same
         /// column stands over the fireball.</remarks>
+        readonly float[] splashTurn = new float[16], splashTilt = new float[16], splashHigh = new float[16], splashGrey = new float[16];
+        ParticleSystem spray;                   // (the water of a blast at sea, as streaks: see Recipe.Spray)
+        const float SprayMany = 7f;             // (how many streaks of water, so many times 25 a metre of the splash's reach)
+        const float SprayHigher = 1.3f;         // (how high they go, as so much of their jet's height: over the jet's water on the grid, as spray off a jet's tip)
+        const float SprayDrawnOut = 0.32f;      // (how far each is drawn out along its way, metres to each metre a second it goes: 0.2 until 2026-11-20)
+        const float SprayWide = 1.9f;           // (how wide each is, so many times a third of a metre and a twentieth of the splash's reach)
+        const float SprayGrows = 2.2f;          // (how much wider each is at the end of its life than at its start: see Recipe.Spray; 2.2 / 0.6 until 2026-11-20)
+        const float SpraySpread = 2f;           // (how far round its jet each may go, so many times 0.09 of its way round and 0.07 of its tilt: 1 until 2026-11-20)
+        const float SprayDrag = 0.012f;         // (how hard the air holds it back at the sea's air, as it does the jets' water on the grid at the speeds they are thrown: see Splash; 0.004 until 2026-11-20)
+        const float VentShare = 0.8f;           // (how much of the mist of an explosive's blast under the water is its gas, grey with its smoke: see Splash)
+        const float PlumeGrey = 0.7f;           // (how grey the plumes an explosive's gas throws up through the dome are at most, as so much of its gas's grey: see Splash)
+        const float TipSpread = 2f;             // (how much faster the lumps at a jet's head widen, its very front so many times again: see Splash)
+        const float TipThin = 0.5f;             // (how much thinner they are there, as so much of their water)
+        const float GasSettles = 1f;            // (how fast an explosive's gas out of a blast at sea goes down with the water, metres a second more or less: see Splash)
+        const float GasLasts = 0.5f;            // (and how long it lasts, as so much of the 6 to 16 s it lasted until 2026-11-20)
+        const float MistSurge = 1f;             // (how far a blast under the sea's mist runs out low along the water as one widening ring: see Splash)
+        const float VentDark = 0.65f;           // (how grey its gas is, 0 the water's white to 1 the explosive's smoke. Six tenths of the mist, 0.55 grey, puffs a fifth smaller, first tried: the grey hardly seen, 15 to 39 % of the plume grey where the Navy's photographs have 55 to 59 %; now 24 to 72 %)
         void Splash(Plan pl, Vector3 c, Vector3 v0, float q)
         {
+            // (Testing, since 2026-11-20: Settings.TestSeed above nought starts the splash's chance, its own and the game's, from
+            // that number, so that two films of a splash lay the same jets and set one look against another exactly. Nought,
+            // as always: each from its own.)
+            if (Settings.TestSeed > 0f) { luck = (uint)Settings.TestSeed * 2654435761u | 1u; Random.InitState((int)Settings.TestSeed); }
             float level = hasGround ? GroundAt(c.x, c.z) : c.y;
             float depth = Mathf.Max(0f, level - c.y);
             if (depth > 30f) return;                                                        // too deep to break the surface
@@ -876,13 +1115,94 @@ namespace VolumetricExplosions
             float reach = Mathf.Max(Mathf.Max(pl.reach, pl.radius), Mathf.Min(charged, 45f)) * (1f - depth / 40f);
             bool under = pl.underwater || pl.drowned > 0.3f;
             int n = (int)(q * Mathf.Clamp(45f * Mathf.Pow(reach, 1.5f), 60f, 3000f));
+            // (Since 2026-11-20. An explosive's gas under the water comes up through the dome and bursts out of it with its smoke: in
+            // the Navy's photographs of its shock trials, charges of some five tonnes (USS Arkansas, USS Mesa Verde), grey masses
+            // billow up inside the white water between its fingers, and the Mesa Verde's is grey down most of one side. Ours was
+            // white all through. So under the water some of the mist is the explosive's gas instead, as much of it as the explosive
+            // is of what went off (its kilogram as ten of fuel, as in SiteKnocks), going up the middle and billowing there, grey
+            // with its smoke. Fuel under the water is put out (see Plan) and its cloud is white, as before. TestVent 1: none, as
+            // before; TryVent how grey, 0 to 1.)
+            float vented = under && pl.explosive > 0.001f && !vacuum && Settings.TestVent != 1f ? 10f * pl.explosive / (10f * pl.explosive + pl.charge) : 0f;
+            float ventDark = Settings.TryVent >= 0f ? Mathf.Clamp01(Settings.TryVent) : VentDark;
+            // (Since 2026-11-20, later. And the water its gas throws up as it vents is grey with its smoke: the plumes that break
+            // through the dome (the Navy's survey of underwater explosions' hydrodynamics: the dome is the shock's, white; the plumes
+            // the gas's). In the Navy's photographs the grey goes up in the plumes between white ones, and the Mesa Verde's down one
+            // side; with the gas alone each lump of white water high in a jet stood out on the grey as a white ball. So each jet
+            // is a plume of the gas so far, by the game's own chance (not the blast's, so that the rest is laid as without),
+            // anywhere from white to PlumeGrey of the gas's grey. TestVent 2: the gas alone, its plumes white, as first made;
+            // TryPlume how grey at most.)
+            float plume = vented > 0f && Settings.TestVent != 2f ? (Settings.TryPlume >= 0f ? Settings.TryPlume : PlumeGrey) : 0f;
             float g = Mathf.Max(0.5f, gravity);
+            // (Jets, since 2026-11-17. The water a blast throws goes up in jets: the Navy's photographs of its shock trials (USS
+            // Arkansas, USS Mesa Verde) show a dome of spray with a dozen and more fingers of water standing out of it every way, the
+            // tallest up the middle. Thrown each bit its own way, as until then, ours was a smooth white ball. So most of the water
+            // is thrown along one of a few ways, chosen here, each bit as far along its jet as its speed takes it. TestMass 1: none.)
+            int jets = Settings.TestMass == 1f ? 0 : Mathf.Clamp(7 + (int)(0.3f * reach), 7, 16);
+            for (int j = 0; j < jets; j++)
+            {
+                bool middle = j < 1 + jets / 4;
+                splashTurn[j] = Luck(0f, Mathf.PI * 2f);
+                splashTilt[j] = middle ? Luck(1.3f, 1.55f) : Luck(0.75f, 1.25f);
+                splashHigh[j] = middle ? Luck(3f, under ? 5.5f : 4.5f) : Luck(1.2f, 2.8f);
+                splashGrey[j] = plume > 0f ? ventDark * plume * Random.Range(0f, 1f) : 0f;
+            }
+            // (And the jets drawn as streaks of water as well, since 2026-11-19, off the grid: see Recipe.Spray. Each thrown along
+            // one of the jets, as far along it as its speed takes it, its colour the day's light on white water. Settings.TestSpray
+            // 1: none, as until then. By the game's own chance, not the blast's (Luck), so that the rest of the splash is laid as it
+            // would be without them.)
+            if (jets > 0 && !vacuum && Settings.TestSpray != 1f)
+            {
+                if (spray == null) spray = Recipe.Spray(t, g, air);
+                float day = Mathf.Sqrt(Mathf.Max(0f, 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB) + Mathf.Max(0f, 0.2126f * ambR + 0.7152f * ambG + 0.0722f * ambB));
+                // (TryL how many, TryM how high, TryY how thick, TryZ how far drawn out by their speed, TryO how wide: the trial's)
+                float many = Settings.TryL >= 0f ? Settings.TryL : SprayMany, higher = Settings.TryM >= 0f ? Settings.TryM : SprayHigher;
+                float thick = Settings.TryY >= 0f ? Settings.TryY : 1f, wide = Settings.TryO >= 0f ? Settings.TryO : SprayWide;
+                spray.GetComponent<ParticleSystemRenderer>().velocityScale = Settings.TryZ >= 0f ? Settings.TryZ : SprayDrawnOut;
+                // (Finer and further spread since 2026-11-20, set beside the Navy's film of the Jackson's shock trial: each grows to
+                // SprayGrows of its first width, where it grew to 3.7 times and the late falling spray was a few broad soft streaks in
+                // rows; goes SpraySpread as far round its jet, and is drawn out SprayDrawnOut, 1.6 times as long: now many thin ones,
+                // scattered, as the fine streaks in the film. TrySprayGrow, TrySpraySpread and TryZ others.)
+                ParticleSystem.SizeOverLifetimeModule grows = spray.sizeOverLifetime;
+                grows.size = new ParticleSystem.MinMaxCurve(1f, new AnimationCurve(new Keyframe(0f, 0.6f), new Keyframe(1f, 0.6f * (Settings.TrySprayGrow >= 0f ? Settings.TrySprayGrow : SprayGrows))));
+                float spread = Settings.TrySpraySpread >= 0f ? Settings.TrySpraySpread : SpraySpread;
+                // (Since 2026-11-20, later: held back by the air as hard as the jets' water on the grid is at the speeds they are
+                // thrown, SprayDrag. With a third of that the fastest flew on far past the column: from 110 m, 3.5 s after the
+                // blast, they crossed the whole sky to the top of the picture, whitening 48 % of the sky in its outer quarters,
+                // and from 220 m they hung over the column as a crown of loose flakes up to twice its height, where in the Navy's
+                // film of the Jackson the spray stays beside the column and falls there. Now 11 %, none in the top quarter of
+                // the picture, and feathers off the column falling beside it (sea20_drag004, _drag012, _drag012_far, TestSeed
+                // 7). Twice as hard (_drag024), 3 %, and next to no spray to be seen. Settings.TrySprayDrag another, 0.004 as
+                // until then.)
+                ParticleSystem.LimitVelocityOverLifetimeModule held = spray.limitVelocityOverLifetime;
+                held.drag = (Settings.TrySprayDrag >= 0f ? Settings.TrySprayDrag : SprayDrag) * Mathf.Max(0.3f, air);
+                int streaks =Mathf.Min(3800, (int)(many * q * Mathf.Clamp(25f * reach, 120f, 2400f)));
+                for (int k = 0; k < streaks; k++)
+                {
+                    int jet = (int)(Random.Range(0f, 0.999f) * jets);
+                    float turn = splashTurn[jet] + Random.Range(-0.09f, 0.09f) * spread, tilt = splashTilt[jet] + Random.Range(-0.07f, 0.07f) * spread;
+                    float along = Random.Range(0.3f, 1f), high = reach * splashHigh[jet] * along * along * higher;
+                    float speed = Mathf.Sqrt(2f * g * high) / Mathf.Sin(tilt);
+                    Vector3 way = new Vector3(Mathf.Cos(turn) * Mathf.Cos(tilt), Mathf.Sin(tilt), Mathf.Sin(turn) * Mathf.Cos(tilt));
+                    float flight = 2f * speed * Mathf.Sin(tilt) / g, tone = Mathf.Min(1f, Random.Range(0.62f, 0.97f) * day), from = reach * 0.12f * Random.Range(0f, 1f);
+                    tone *= 1f - 0.92f * splashGrey[jet];         // (a plume of an explosive's gas: grey with its smoke, see above)
+                    spray.Emit(new ParticleSystem.EmitParams
+                    {
+                        position = new Vector3(c.x + Mathf.Cos(turn) * from, level + 0.3f, c.z + Mathf.Sin(turn) * from),
+                        velocity = way * speed + new Vector3(v0.x * 0.3f, 0f, v0.z * 0.3f),
+                        startLifetime = Mathf.Clamp(flight * Random.Range(0.55f, 0.95f), 0.8f, 9f),
+                        startSize = (0.35f + 0.045f * reach) * wide * Random.Range(0.6f, 1.5f),
+                        startColor = new Color(tone, tone, tone, Mathf.Min(1f, Random.Range(0.5f, 0.9f) * thick)),
+                    }, 1);
+                }
+            }
             for (int k = 0; k < n; k++)
             {
                 int i = Add();
                 if (i < 0) break;
                 ref P o = ref p[i];
                 float turn = Luck(0f, Mathf.PI * 2f), kind = Luck(0f, 1f);
+                int jet = jets > 0 && kind < 0.68f ? (int)(Luck(0f, 0.999f) * jets) : -1;
+                if (jet >= 0) turn = splashTurn[jet] + Luck(-0.04f, 0.04f);
                 float tone = Luck(0.8f, 0.95f);
                 o.ar = tone; o.ag = tone; o.ab = tone;
                 o.x = c.x + Mathf.Cos(turn) * reach * 0.25f * Luck(0f, 1f); o.z = c.z + Mathf.Sin(turn) * reach * 0.25f * Luck(0f, 1f);
@@ -893,14 +1213,53 @@ namespace VolumetricExplosions
                     bool column = kind < (under ? 0.6f : 0.35f);
                     float tilt = column ? Luck(1.25f, 1.55f) : Luck(0.7f, 1.2f);
                     float high = reach * (column ? Luck(1.5f, under ? 5.5f : 4.5f) : Luck(0.5f, 1.6f));
+                    // (a jet's: its own way, and anywhere along it, more of it low than high)
+                    float tip = 0f;
+                    if (jet >= 0) { tilt = splashTilt[jet] + Luck(-0.03f, 0.03f); float along = Luck(0.05f, 1f); high = reach * splashHigh[jet] * along * along; tip = along * along * along; }
                     float speed = Mathf.Sqrt(2f * g * high) / Mathf.Sin(tilt);
                     o.vx = Mathf.Cos(turn) * Mathf.Cos(tilt) * speed + v0.x * 0.3f; o.vy = Mathf.Sin(tilt) * speed; o.vz = Mathf.Sin(turn) * Mathf.Cos(tilt) * speed + v0.z * 0.3f;
                     o.flags = Ballistic | DiesOnGround;
                     o.r = (0.25f + 0.05f * reach) * Luck(0.6f, 1.4f);
                     o.grow = 0.5f + 0.04f * speed;
-                    o.mass = Luck(0.6f, 1.6f) * o.r * o.r * 5f;
+                    // (a jet's water keeps together: thinner, and widening a third as fast, or the jets are one dome within a second.
+                    // But not at its head, since 2026-11-20: the water out in front, the fastest, breaks up first, and in the Navy's
+                    // photographs each jet ends in feathers of spray. Kept together there too, each jet's leading lumps stood out
+                    // past the cloud as round white balls; now they widen up to TipSpread times as fast again and are up to TipThin
+                    // the thinner, so much as they are of the jet's head. Settings.TryTip how much faster, TryTipThin how much thinner:
+                    // 0, 0 as until then.)
+                    if (jet >= 0)
+                    {
+                        o.r *= 0.7f;
+                        o.grow *= 0.33f * (1f + (Settings.TryTip >= 0f ? Settings.TryTip : TipSpread) * tip);
+                    }
+                    // (a plume of an explosive's gas: grey with its smoke, as its gas is, see above)
+                    if (jet >= 0 && splashGrey[jet] > 0f) { float grey = Mathf.Lerp(tone, 0.07f, splashGrey[jet]); o.ar = grey; o.ag = grey * 0.98f; o.ab = grey * 0.95f; }
+                    o.mass = Luck(0.6f, 1.6f) * o.r * o.r * 5f * (1f - Mathf.Clamp01(Settings.TryTipThin >= 0f ? Settings.TryTipThin : TipThin) * tip);
                     o.life = Luck(2f, 7f);
                     o.tile = Luck(0f, 1f) < 0.6f ? Specks() : Lumpy();
+                }
+                else if (kind > 1f - 0.2f * VentShare * vented)
+                {
+                    // The explosive's gas (so much of the mist, the last fifth of kind), grey with its smoke: up the middle, slowed by the water and the air, and billowing there.
+                    float speed = reach * Luck(2f, 5f), aside = speed * Luck(0.15f, 0.45f);
+                    o.kx = Mathf.Cos(turn) * aside; o.ky = speed; o.kz = Mathf.Sin(turn) * aside;
+                    o.kloss = 2.2f; o.drag = 2.5f;
+                    o.r = (0.55f + 0.11f * reach) * Luck(0.7f, 1.3f);
+                    o.grow = 0.35f;
+                    o.turb = 1f;
+                    // (Since 2026-11-20 it goes down with the water, at GasSettles metres a second more or less, and is gone in 3 to 8 s,
+                    // GasLasts of its time before: in the Navy's film of the Jackson's shock trial the grey of the column pales as the
+                    // column falls back, to a thin white veil over the white water running out round its foot. Climbing as hot gas does
+                    // and lasting 6 to 16 s, as until then, ours stood over the water as a dark grey ball: four fifths of the plume's
+                    // neutral pixels grey at 6 and 7.5 s after the blast, where now 63 % and then 21 %, and paler (the films of that day,
+                    // sea16_new and sea17_gas). Settings.TestVent 3: as until then; TryGasSettle and TryGasLife other amounts.)
+                    bool before = Settings.TestVent == 3f;
+                    o.rise = before ? Luck(0.3f, 0.9f) : -(Settings.TryGasSettle >= 0f ? Settings.TryGasSettle : GasSettles) * Luck(0.5f, 1.5f);
+                    o.mass = Luck(0.6f, 1.2f) * o.r * o.r * 5f;
+                    o.life = Luck(6f, 16f) * Mathf.Max(0.3f, Settings.Smoke) * (before ? 1f : Settings.TryGasLife >= 0f ? Settings.TryGasLife : GasLasts);
+                    float grey = Mathf.Lerp(tone, 0.07f, ventDark * Luck(0.6f, 1.2f));
+                    o.ar = grey; o.ag = grey * 0.98f; o.ab = grey * 0.95f;
+                    o.tile = Lumpy();
                 }
                 else if (!vacuum)
                 {
@@ -915,6 +1274,20 @@ namespace VolumetricExplosions
                     o.mass = Luck(0.3f, 0.8f) * o.r * o.r * 4f;
                     o.life = Luck(5f, 14f) * Mathf.Max(0.3f, Settings.Smoke);
                     o.tile = Wispy();
+                    // (Since 2026-11-20: a blast under the sea's mist low along the water, running out from the column and widening
+                    // fast, as the white ring round the foot of the Jackson's column in the Navy's film. It climbed and lasted, and 9 s
+                    // after the blast a dozen soft white balls hung over the water, up to some 30 m; now a low white skirt round the grey
+                    // column at 5 to 7 s, and a thin veil drifting on the water after, the white at 9 s 130 pixels lower from 110 m
+                    // (its median row 414 against 285; sea20_surge1 and _surge0, TestSeed 7) and 70 lower from 220 m. MistSurge how far,
+                    // Settings.TrySurge another, 0 as until then.)
+                    float surge = Settings.TrySurge >= 0f ? Settings.TrySurge : MistSurge;
+                    if (under && surge > 0f)
+                    {
+                        o.ky *= Mathf.Lerp(1f, 0.15f, surge);
+                        o.kloss = Mathf.Lerp(o.kloss, 1.2f, surge); o.drag = Mathf.Lerp(o.drag, 1.5f, surge);
+                        o.grow = Mathf.Lerp(o.grow, 1.2f, surge);
+                        o.rise = Mathf.Lerp(o.rise, 0.05f, surge);
+                    }
                 }
                 else { o.life = 0.01f; }
                 Born(i);
@@ -928,7 +1301,12 @@ namespace VolumetricExplosions
             {
                 if (sparks == null) sparks = Recipe.Sparks(t, gravity, grip, hasGround);
                 float fast = 9f + 4.5f * Mathf.Sqrt(pl.reach);
-                Color32 colour = pl.tint == 3 ? new Color32(190, 225, 255, 255) : pl.tint == 1 ? new Color32(255, 255, 245, 255) : new Color32(255, 232, 195, 255);
+                // (Since 2026-11-19: metal struck or dragged along the ground throws sparks of its own, ground off it: orange from the
+                // first, low along the ground and on ahead with the wreck, as a grinder's in the Navy's photograph of one and the
+                // sparks under any belly landing. A crash's or a collision's were the cream of a fuel blast's burning bits, thrown
+                // up all round, and from sixty metres at night none could be seen: see the sparks' least size in Recipe.Sparks.)
+                bool ground = onGround && !pl.water && (pl.cause == Cause.Crash || pl.cause == Cause.Collision);
+                Color32 colour = pl.tint == 3 ? new Color32(190, 225, 255, 255) : pl.tint == 1 ? new Color32(255, 255, 245, 255) : ground ? new Color32(255, 196, 120, 255) : new Color32(255, 232, 195, 255);
                 float flung = 70f + 30f * Mathf.Sqrt(pl.reach);
                 for (int k = 0; k < n; k++)
                 {
@@ -936,11 +1314,13 @@ namespace VolumetricExplosions
                     if (onGround) way = OffGround(way, blastUp, 1f);
                     // (an explosive's fragments: white-hot, ten times as fast, and out of sight in a fraction of a second)
                     bool fragment = Luck(0f, 1f) < pl.detonated;
+                    bool ground2 = ground && !fragment && Luck(0f, 1f) < 0.7f;
+                    if (ground2) way = (Vector3.ProjectOnPlane(way, blastUp) + blastUp * Luck(0.02f, 0.3f)).normalized;
                     var e = new ParticleSystem.EmitParams
                     {
                         position = c + way * 0.3f,
-                        velocity = v0 * 0.6f + way * (fragment ? flung * Luck(0.5f, 1.5f) : fast * Luck(0.3f, 2.2f)),
-                        startLifetime = vacuum ? Luck(1.5f, 3.2f) : fragment ? Luck(0.06f, 0.3f) : Luck(0.4f, 1.9f),
+                        velocity = ground2 ? v0 * Luck(0.6f, 1.1f) + way * fast * Luck(0.3f, 1.4f) : v0 * 0.6f + way * (fragment ? flung * Luck(0.5f, 1.5f) : fast * Luck(0.3f, 2.2f)),
+                        startLifetime = vacuum ? Luck(1.5f, 3.2f) : fragment ? Luck(0.06f, 0.3f) : ground2 ? Luck(0.3f, 1.2f) : Luck(0.4f, 1.9f),
                         startSize = Luck(0.05f, 0.13f) * (1f + 0.03f * pl.reach),
                         startColor = colour,
                     };
@@ -1248,7 +1628,12 @@ namespace VolumetricExplosions
                 h.x += windX * w * dt; h.z += windZ * w * dt;
                 h.y += h.w * dt;
                 h.a += 0.2f * h.w * dt;                                                     // it draws air in and widens as it climbs
-                float loss = 0.1f + 0.085f * h.w / h.a + (h.y > h.top ? 1.2f : 0f);
+                // (Since 2026-11-16 it loses a thirtieth of its speed a second of itself, 0.035 for 0.1, beside what it loses to the air it
+                // draws in: a warm cloud goes on climbing, ever slower, until it is as cool as the air round it. Losing a tenth a
+                // second, a 4-tonne fuel blast's smoke climbed 60 m in its first ten seconds and stood there for the rest of a minute,
+                // a black ball on nothing (the film of that day, day-long); now it stands up into a column over a hundred metres
+                // high in half a minute (day-long2). TryD: the trial's.)
+                float loss = (Settings.TryD >= 0f ? Settings.TryD : 0.035f) + 0.085f * h.w / h.a + (h.y > h.top ? 1.2f : 0f);
                 h.w *= 1f / (1f + loss * dt);
                 if (h.w < 0.12f) thermals[n] = thermals[--thermalCount];
             }
@@ -1434,9 +1819,7 @@ namespace VolumetricExplosions
                 // sky, about a third of it under an overcast (see Look). Reckoned by the sun's own alone until 2026-11-10, a fire
                 // in rain by day was as strong as by night, and a burning wreck lit the grass bright yellow for a hundred metres.
                 // Settings.TestFireLight 2: as until then.)
-                float skylight = Settings.TestFireLight == 2f ? 0f : 0.3f * sunHidden * sunClear;
-                float daylight = Mathf.Sqrt(Mathf.Max(0f, 0.2126f * sunR + 0.7152f * sunG + 0.0722f * sunB + skylight));
-                float gain = Settings.TestFireLight == 1f ? 1f : Mathf.Lerp(2.5f, 1f, Mathf.Clamp01(daylight * 1.6f));
+                float gain = FireGain(2.5f);
                 lightFull[slot] = Mathf.Min(8f, lamps[which].power * 1.4f * gain);
                 // (A nuclear fireball's light on the land: for its first seconds many times the sun's, on ground kilometres off.
                 // Glasstone and Dolan's pulse again (Fig. 7.84), here as 2 (t/t_max)^2 / (1 + (t/t_max)^3.5) follows theirs: a
@@ -1703,7 +2086,7 @@ namespace VolumetricExplosions
                         o.life = 2.6f / o.cool;
                     }
                     else o.life = 4.2f / o.cool;
-                    Born(i);
+                    Born(i, true);
                 }
                 // (since 0.10.0) Embers carried up in its gas, a few a second off a small fire and a score off a big one: not off a
                 // gas's clear flame, which has nothing solid in it to glow (see Ember). (At two-fifths of that, filmed by night, a
@@ -1753,11 +2136,18 @@ namespace VolumetricExplosions
                 // trailing a streak as thick as the fire's own lumps: the "octopus" of a big explosion in footage, burning pieces
                 // arcing out with their smoke behind them. Thrown as high as one to three radii, as they first were, at about
                 // twenty-five metres a second, and trailing half a metre, they never left the fireball, and were not seen at all.)
-                float speed = Mathf.Min(120f, R * Luck(3f, 7f) + 6f);
+                // (Since 2026-11-16 no two alike: most go a little way and a few far, the far ones the small ones, and each trail
+                // a third as thick as it was. All of them thrown three to seven radii a second and trailing smoke as thick as the
+                // fire's lumps, a fuel blast from 220 m was a hand of ten dark fingers of one length and one thickness, each a sixth
+                // of the fireball wide (the film of that day, day-base): filmed, a burning piece's trail is a thin line against
+                // the fireball it left, and the pieces come down all over the place, near and far.)
+                float far = Luck(0f, 1f), speed = Mathf.Min(120f, R * (Settings.TestTrail == 1f ? Luck(3f, 7f) : 2.2f + 5.5f * far * far) + 6f);
+                float thick = Settings.TestTrail == 1f ? Mathf.Clamp(0.25f + 0.05f * R, 0.35f, 1.5f) * Luck(0.7f, 1.3f)
+                                                      : Mathf.Clamp(0.16f + 0.018f * R, 0.2f, 0.6f) * Luck(0.6f, 1.5f) * Mathf.Lerp(1.25f, 0.7f, far);
                 frags[fragCount++] = new Frag
                 {
                     x = c.x, y = c.y + 0.3f, z = c.z, vx = v0.x * 0.7f + way.x * speed, vy = v0.y * 0.7f + way.y * speed, vz = v0.z * 0.7f + way.z * speed,
-                    life = Mathf.Clamp(2f * speed / g + 1.5f, 3f, 14f), size = Mathf.Clamp(0.25f + 0.05f * R, 0.35f, 1.5f) * Luck(0.7f, 1.3f),
+                    life = Mathf.Clamp(2f * speed / g + 1.5f, 3f, 14f), size = thick,
                     tint = (byte)pl.tint, white = pl.whiteTrails,
                     // (its trail begun only once it is out of the fireball: laid inside it, the trail's first puffs, cooling to
                     // smoke at once, were dark spots on the fire's face)
@@ -1775,6 +2165,7 @@ namespace VolumetricExplosions
                 ref Frag f = ref frags[n];
                 f.age += dt;
                 if (f.age >= f.life) { frags[n] = frags[--fragCount]; continue; }
+                float x0 = f.x, y0 = f.y, z0 = f.z;
                 if (!f.down)
                 {
                     f.vy -= gravity * dt;
@@ -1802,13 +2193,21 @@ namespace VolumetricExplosions
                 if (!f.down && Settings.TestSoot < 1f)
                 {
                     float speed = Mathf.Sqrt(f.vx * f.vx + f.vy * f.vy + f.vz * f.vz);
-                    laid = 1f / (Mathf.Clamp(speed / (0.55f * f.size), 30f, 55f) * Mathf.Clamp(Settings.Quality * Air.Room(), 0.15f, 1.5f));
+                    // (Since 2026-11-16 as many as it takes to lie edge to edge, up to 240 a second, each where the piece was when
+                    // it fell due: up to 55 a second, all of a step's at the place the piece had got to by its end, a thin trail
+                    // behind a fast piece was a string of beads.)
+                    laid = 1f / (Mathf.Clamp(speed / (0.55f * f.size), 30f, Settings.TestTrail == 1f ? 55f : 240f) * Mathf.Clamp(Settings.Quality * Air.Room(), 0.15f, 1.5f));
                 }
-                while (f.due <= 0f)
+                for (int more = 0; f.due <= 0f; more++)
                 {
+                    float back = Settings.TestTrail == 1f || dt <= 0f ? 0f : Mathf.Clamp01(-f.due / dt);
                     f.due += f.down ? every * (2.5f + 0.6f * (f.age - f.downAt)) : laid;
-                    if (!Trail(f.x, f.y, f.z, f.vx, f.vy, f.vz, f.size, f.tint, f.white, lasts)) break;
+                    if (more >= 12) { f.due = Mathf.Max(f.due, 0f); break; }
+                    if (!Trail(f.x + (x0 - f.x) * back, f.y + (y0 - f.y) * back, f.z + (z0 - f.z) * back, f.vx, f.vy, f.vz, f.size, f.tint, f.white, lasts)) break;
+                    f.lit = true;
                 }
+                // (and the flame at its head, in every frame from its trail's first puff: see Head)
+                if (f.lit && !f.down && Settings.TestSoot < 1f && Settings.TryX != 0f) Head(f.x, f.y, f.z, f.vx, f.vy, f.vz, f.size, f.tint);
             }
             TakeTrails(dt);                 // (and the trails other mods say are in it: see Trails)
         }
@@ -1822,7 +2221,8 @@ namespace VolumetricExplosions
         {
             if (struck < 4f) return;
             int n = Mathf.Clamp((int)(struck * size * 0.25f * Mathf.Clamp(Settings.Quality * Air.Room(), 0.3f, 1.5f)), 1, 8);
-            Color what = groundWet ? new Color(0.86f, 0.88f, 0.9f) : groundBare ? groundDust : new Color(0.5f, 0.49f, 0.47f);
+            // (paving's grit a darker grey since 2026-11-16, 0.36 for 0.5: the space centre's lawns count as paving, and each piece that came down on them threw up a white puff)
+            Color what = groundWet ? new Color(0.86f, 0.88f, 0.9f) : groundBare ? groundDust : Settings.TestTrail == 1f ? new Color(0.5f, 0.49f, 0.47f) : new Color(0.36f, 0.35f, 0.33f);
             for (int k = 0; k < n; k++)
             {
                 int i = Add();
@@ -1855,6 +2255,7 @@ namespace VolumetricExplosions
                     o.life = groundWet ? Luck(1f, 2.2f) : Luck(2f, 5f) * Mathf.Max(0.3f, Settings.Smoke);
                     o.fadeIn = 0.05f;
                     o.tile = groundWet ? Specks() : Luck(0f, 1f) < 0.5f ? Wispy() : Lumpy();
+                    if (Settings.TestTrail != 1f) { o.kind = Loose; looseTill = Mathf.Max(looseTill, time + o.life + 0.5f); }
                 }
                 Born(i);
             }
@@ -1920,8 +2321,51 @@ namespace VolumetricExplosions
                     o.heat = Luck(0.85f, 1f);
                     o.cool = Luck(1.3f, 1.8f);
                     o.mass = Luck(0.6f, 1.3f) * o.r * o.r * 2.2f;
+                    // (Since 2026-11-19 the flame is a few of the piece's own sizes long, by how fast it goes, and the rest of its
+                    // trail smoke: in footage of big explosions and in NASA's photographs of Antares in 2014 a burning piece is a
+                    // small bright head with its smoke behind it, and in NASA's of Challenger in 1986 a line of smoke with fire
+                    // at its end. Fire for some 0.8 s, as until then, a piece falling at thirty metres a second trailed a pale
+                    // streak of flame twenty metres long. (The swarm of round balls of fire over a crash on the runway that was
+                    // first laid to these trails that day was the blasts' fireballs, flung by speeds the game's physics gave
+                    // dying parts: see Records.Pace.) TryX: so many sizes; 0 as until then.)
+                    // (The flame at the head itself is a puff of its own, laid in every frame however few the trail's are: see Head.)
+                    float flameLong = Settings.TryX >= 0f ? Settings.TryX : 3f;
+                    if (flameLong > 0f)
+                    {
+                        float speed = Mathf.Sqrt(vx * vx + vy * vy + vz * vz);
+                        o.cool = Luck(0.9f, 1.2f) * 1.1f / Mathf.Clamp(flameLong * size / Mathf.Max(speed, 1f), 0.04f, 0.4f);
+                    }
                 }
             }
+            // (drawn by itself, off the grid: see Loose. Not where there is no air: there it flies on with the rest.)
+            if (!vacuum && Settings.TestTrail != 1f) { o.kind = Loose; looseTill = Mathf.Max(looseTill, time + o.life + 0.5f); }
+            Born(i);
+            return true;
+        }
+
+        /// <summary>
+        /// (Since 2026-11-19.) The flame at the head of a burning thing that flies: a puff of flame alone where it is, laid in every frame
+        /// and gone in a tenth of a second, carried on a little with it and left behind. Its trail's puffs are laid so many to the metre,
+        /// and fewer where the air is full; with each puff's flame as short as a piece's own is (see Trail), a piece whose trail was
+        /// thinned showed its fire only now and then. Drawn by itself, as its trail is (see Loose).
+        /// </summary>
+        internal bool Head(float x, float y, float z, float vx, float vy, float vz, float size, byte tint)
+        {
+            int i = Add();
+            if (i < 0) return false;
+            ref P o = ref p[i];
+            o.x = x; o.y = y; o.z = z;
+            o.vx = vx; o.vy = vy; o.vz = vz;
+            o.drag = 5f; o.kloss = 4f; o.turb = 0.5f; o.rise = 0.6f;
+            o.r = size * Luck(0.9f, 1.3f);
+            o.heat = Luck(0.8f, 1f);
+            o.cool = 3f;
+            o.flame = 1f;
+            o.tint = tint;
+            o.life = Luck(0.08f, 0.14f);
+            o.tile = Luck(0f, 1f) < 0.5f ? Wispy() : Lumpy();
+            if (vacuum) o.flags = Ballistic;
+            else { o.kind = Loose; looseTill = Mathf.Max(looseTill, time + o.life + 0.5f); }
             Born(i);
             return true;
         }

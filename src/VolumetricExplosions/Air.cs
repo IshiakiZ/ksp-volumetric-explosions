@@ -73,6 +73,8 @@ namespace VolumetricExplosions
 
         void Awake()
         {
+            Razing.Listen();
+            Razing.Quiet();
             Instance = this;
             Camera.onPreCull += BeforeDrawing;
             Camera.onPreRender += ForCamera;
@@ -112,6 +114,9 @@ namespace VolumetricExplosions
             float until = Time.time + 30f;
             while (Time.time < until && (!FlightGlobals.ready || FlightGlobals.ActiveVessel == null || FlightGlobals.ActiveVessel.packed)) yield return new WaitForSeconds(0.5f);
             yield return new WaitForSeconds(0.5f);       // (while the scene is still settling)
+            // (and once more the space centre's painted ground put under the smoke, now that what is about the ship is all there:
+            // the paint of anything that came after the air began, such as the flags painted on the buildings, made for each scene)
+            try { Paint.Move(); } catch (Exception) { }
             Camera cam = FlightCamera.fetch != null ? FlightCamera.fetch.mainCamera : null;
             Vessel v = FlightGlobals.ActiveVessel;
             if (cam == null || v == null || !Settings.Volume || Assets.Volume == null || v.mainBody == null || !v.mainBody.atmosphere) yield break;
@@ -213,6 +218,9 @@ namespace VolumetricExplosions
             // (the launch pads of this scene, for what of an engine's jet goes down a pad's grate: see Pads)
             try { Pads.Look(); }
             catch (Exception ex) { Debug.LogError("[VolumetricExplosions] the launch pads could not be looked at: " + ex); }
+            // (the space centre's painted ground drawn before the smoke, not over it: see Paint)
+            try { Paint.Move(); }
+            catch (Exception ex) { Debug.LogError("[VolumetricExplosions] the painted ground could not be put under the smoke: " + ex); }
         }
 
         static readonly int cameraNote = Shader.PropertyToID("_VolCamera");
@@ -372,6 +380,9 @@ namespace VolumetricExplosions
 
         void OnDestroy()
         {
+            try { Paint.Back(); } catch (Exception) { }
+            Razing.Forget();
+            Razing.Loud();
             sunShadow.Dispose();
             try { Warheads.Forget(); } catch (Exception) { }
             Camera.onPreCull -= BeforeDrawing;
@@ -484,6 +495,8 @@ namespace VolumetricExplosions
                 plan.label = "a nuclear explosion of " + kilotons.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + " kt";
                 LastPlan = plan.label;
                 Site.Nuclear n = Site.Nuclear.Make(plan, kilotons, over);
+                // (its blast, half its yield, told to the buildings of the space centre: 1.8 times as a burst on the ground)
+                Razing.Blast((Vector3)world, n.tnt * Mathf.Lerp(1f, 1.8f, Mathf.Clamp01(n.couple)), body.atmosphere ? (float)(FlightGlobals.getStaticPressure(world, body) * 1000.0) : 0f, 340f);
                 if (Staying() >= Most) LetOneGo(n);
                 var cap = Site.Make(plan);
                 sites.Add(cap);
@@ -583,6 +596,11 @@ namespace VolumetricExplosions
         {
             foreach (Site s in sites)
                 if (s.Takes(plan)) return s;
+            // (with room for only two patches more, a blast goes into any patch near it, as all did until 2026-11-16, see Site.Takes:
+            // a crash's far pieces are not to push a trail or another fire's smoke out of the sky)
+            if (Staying() >= Most - 2)
+                foreach (Site s in sites)
+                    if (s.Takes(plan, true)) return s;
             if (Staying() >= Most) LetOneGo();
             var site = Site.Make(plan);
             sites.Add(site);
@@ -779,7 +797,12 @@ namespace VolumetricExplosions
             {
                 trench = Pads.Into(exhaust, out Pad pad);
                 if (pad != null && trench > 0.01f) pad.Feed(exhaust, trench, Site.SmokeMade(exhaust, (float)exhaust.going.magnitude, SmokeQuality, out _, out _));
-                else trench = 0f;
+                else
+                {
+                    trench = 0f;
+                    // (its flame over the pad lights the pad's cloud all the same, since 2026-11-20: see Pad.Shine)
+                    if (Settings.TestPadShine != 1f && exhaust.flame > 0f && Pads.Over(exhaust, out float reach) is Pad over && reach > 0f) over.Shine(exhaust, reach);
+                }
             }
             bool flame = exhaust.fire > 0.01f && exhaust.rides != null && TakeFlame(exhaust);
             bool smoke = false;
@@ -1202,6 +1225,7 @@ namespace VolumetricExplosions
 
         void LateUpdate()
         {
+            Razing.Step();
             steppedFrame = Time.frameCount;
             float dt = Time.deltaTime;
             if (dt <= 0f) return;
@@ -1398,6 +1422,20 @@ namespace VolumetricExplosions
             long lap = System.Diagnostics.Stopwatch.GetTimestamp();
             foreach (Site s in sites) s.Place();
             foreach (Scorch m in marks) m.Place();
+#if DEV
+            // (2026-11-16: where each patch and the camera stand against the ground at each frame's drawing, for a patch that shifts by what the craft is carried on)
+            if (PlacesOn)
+            {
+                CelestialBody b = FlightGlobals.currentMainBody;
+                if (b != null)
+                {
+                    string line = Time.frameCount + " (" + (Time.time - Time.fixedTime).ToString("F4") + " s past the step): camera " + Height(b, camera.transform.position);
+                    foreach (Site s in sites) line += "; " + s.Role() + (s.Riding ? " riding" : "") + " root " + Height(b, s.RootAt) + " box " + Height(b, s.BoxCentre);
+                    PlacesLog.Add(line);
+                    if (PlacesLog.Count > 40) PlacesLog.RemoveAt(0);
+                }
+            }
+#endif
             Vector3 eyeAt = depthCamera[0] != null ? depthCamera[0].transform.position : camera.transform.position;
             Sight(eyeAt);
             sunShadow.Frame(sites, eyeAt);
@@ -1800,6 +1838,20 @@ namespace VolumetricExplosions
                 say.Append("\n").Append(pad.fx != null ? pad.fx.transform.parent.parent.name : "?").Append(": grate ").Append((2f * pad.halfA).ToString("F1")).Append(" x ").Append((2f * pad.halfB).ToString("F1"))
                    .Append(" m, ").Append(pad.ends.Length).Append(" ends, made ").Append(pad.made.ToString("F1")).Append(", fill ").Append(pad.fill.ToString("F2")).Append(", strongest ").Append(pad.strongest.ToString("F2"))
                    .Append(pad.site != null ? ", into a patch of " + pad.site.Count : "");
+            // (and the flame its light on the cloud is taken from, since 2026-11-19: its length, its mouth's height over the grate, and where
+            // its lamp is, see Site.Ends; and how far each end is from the grate's middle)
+            foreach (Pad pad in Pads.All)
+            {
+                if (!(pad.flameLong > 0f)) continue;
+                Vector3d mid = (Vector3d)pad.middle, upward = (Vector3d)pad.up;
+                say.Append("\n  flame ").Append(pad.flameLong.ToString("F1")).Append(" m long, its mouth ").Append(Vector3d.Dot(pad.flameAt - mid, upward).ToString("F1"))
+                   .Append(" m over the grate and ").Append(Vector3d.Exclude(upward, pad.flameAt - mid).magnitude.ToString("F1")).Append(" m off its middle, going ")
+                   .Append(Vector3d.Dot(pad.flameAlong, upward).ToString("F2")).Append(" up; its lamp ").Append(Vector3d.Dot(Site.FlameLampAt(pad) - mid, upward).ToString("F1")).Append(" m over the grate");
+                for (int n = 0; n < pad.ends.Length; n++)
+                    if (pad.ends[n] != null)
+                        say.Append("; end ").Append(n).Append(" ").Append(Vector3d.Exclude(upward, (Vector3d)pad.ends[n].position - mid).magnitude.ToString("F1")).Append(" m off, ")
+                           .Append(Vector3d.Dot((Vector3d)pad.ends[n].position - mid, upward).ToString("F1")).Append(" m up, ").Append((2f * pad.wide[n]).ToString("F1")).Append(" by ").Append((2f * pad.tall[n]).ToString("F1"));
+            }
             return say.ToString();
         }
 
@@ -1901,6 +1953,32 @@ namespace VolumetricExplosions
             foreach (Site s in Instance.sites) said.Append(s.Heights()).Append(" | ");
             return said.ToString();
         }
+        /// <summary>(Development build, 2026-11-16: for each patch, how far out its bits lie along the ground from where its smoke is on the whole, and of what kind: see Site.Strewn.)</summary>
+        public static string Strewn(string _)
+        {
+            if (Instance == null) return "not running";
+            var said = new System.Text.StringBuilder();
+            foreach (Site s in Instance.sites) said.Append(s.Strewn()).Append(" | ");
+            return said.ToString();
+        }
+        public static bool PlacesOn;
+        static readonly List<string> PlacesLog = new List<string>();
+        static string Height(CelestialBody b, Vector3 world) { Vector3d r = b.GetRelSurfacePosition((Vector3d)world); return (r.magnitude - b.Radius).ToString("F3"); }
+        /// <summary>(Development build, 2026-11-16: "on" begins keeping, for each frame's drawing, how high over the sea the camera and each patch's root and box stand; anything else says the last forty frames kept.)</summary>
+        public static string Places(string how)
+        {
+            if (how == "on") { PlacesOn = true; PlacesLog.Clear(); return "keeping"; }
+            PlacesOn = false;
+            return string.Join(" | ", PlacesLog.ToArray());
+        }
+        /// <summary>(Development build, 2026-11-16: the blasts laid since this was last asked, see Site.BlastLog; they are forgotten then.)</summary>
+        public static string Blasts(string _)
+        {
+            string said = Site.BlastLog.Count + " blasts, " + Records.SpeedsCut + " dying parts' speeds cut (the most " + Records.SpeedCutMost.ToString("F0") + " m/s), " + Plan.Buried + " under the ground | " + string.Join(" | ", Site.BlastLog.ToArray());
+            Site.BlastLog.Clear();
+            Records.SpeedsCut = 0; Records.SpeedCutMost = 0f; Plan.Buried = 0;
+            return said;
+        }
         /// <summary>(Development build: each nuclear explosion's patch and how it stands, and how many of their patches are still to be made: see Site.NukeSaid.)</summary>
         public static string Nukes(string _)
         {
@@ -1977,6 +2055,24 @@ namespace VolumetricExplosions
             foreach (var kv in counts) sb.Append(kv.Value).Append("  ").Append(kv.Key).Append('\n');
             return sb.Length > 0 ? sb.ToString() : "no particles drawing";
         }
+        /// <summary>(Development build, 2026-11-22: "kept" draws the space centre's painted ground over the smoke as until 2026-11-22,
+        /// "moved" before it, as now (see Paint), each at once; and every material of the game's of the painted kind there is, by queue.)</summary>
+        public static string PaintTest(string v)
+        {
+            if (v == "kept") { Paint.Kept = true; Paint.Back(); }
+            else if (v == "moved") { Paint.Kept = false; Paint.Move(); }
+            var say = new System.Text.StringBuilder(Paint.Kept ? "the painted ground drawn over the smoke, as until 2026-11-22" : "the painted ground drawn before the smoke (" + Paint.Count + " materials moved)");
+            var wearing = new Dictionary<Material, int>();
+            foreach (Renderer r in UnityEngine.Object.FindObjectsOfType<Renderer>())
+                if (r != null) foreach (Material m in r.sharedMaterials) if (m != null) wearing[m] = (wearing.TryGetValue(m, out int n) ? n : 0) + 1;
+            foreach (Material m in Resources.FindObjectsOfTypeAll<Material>())
+                if (m != null && m.shader != null && m.shader.name.IndexOf("Decal", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    say.Append('\n').Append(m.name).Append(" / ").Append(m.shader.name).Append(" @").Append(m.renderQueue).Append(", ").Append(wearing.TryGetValue(m, out int n) ? n : 0).Append(" in sight; passes");
+                    for (int k = 0; k < m.passCount; k++) say.Append(' ').Append(m.GetPassName(k));
+                }
+            return say.ToString();
+        }
         public static string FrontView(string v) { Layers.TestFront = v == "on"; return Layers.TestFront ? "each sprite as much of it as shows through the smoke in front: green all, red none" : "the sprites as they are"; }
         public static string SpriteTest(string v)
         {
@@ -2015,6 +2111,14 @@ namespace VolumetricExplosions
             return say.ToString();
         }
 
+        /// <summary>(Young's answer written to the log with the frame's number: for a recording's cue calls, whose answers go nowhere.)</summary>
+        public static string YoungLogged(string _)
+        {
+            string said = Young();
+            Addon.Log("(dev) the patches at frame " + Time.frameCount + ", " + Time.time.ToString("F3") + " s:\n" + said);
+            return said;
+        }
+
         /// <summary>(Every puff of smoke there is, in every patch, against the first running nozzle of the craft being flown and the way it is going: written to a file, see Site.Column.)</summary>
         public static string Column()
         {
@@ -2050,6 +2154,24 @@ namespace VolumetricExplosions
         {
             if (Instance == null || Instance.sites.Count == 0) return "no explosion";
             return Instance.sites[0].Dump(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vfx_particles.txt"));
+        }
+
+        /// <summary>(Development build, 2026-11-19: every bit that burns just now in every patch, with the camera, written to a file named for TAG: see Site.FiresSaid. A TAG that begins "all": every bit, burning or not.)</summary>
+        public static string Fires(string tag)
+        {
+            if (Instance == null || Instance.sites.Count == 0) return "no explosion";
+            var say = new System.Text.StringBuilder();
+            Site first = Instance.sites[0];
+            Camera eye = FlightCamera.fetch != null ? FlightCamera.fetch.mainCamera : Camera.main;
+            if (eye != null)
+            {
+                Vector3 c = first.Local((Vector3d)eye.transform.position), ahead = first.Local((Vector3d)(eye.transform.position + eye.transform.forward)) - c;
+                say.Append(string.Format(System.Globalization.CultureInfo.InvariantCulture, "# camera {0:F1} {1:F1} {2:F1} looking {3:F3} {4:F3} {5:F3} fov {6:F1} sites {7}\n", c.x, c.y, c.z, ahead.x, ahead.y, ahead.z, eye.fieldOfView, Instance.sites.Count));
+            }
+            for (int n = 0; n < Instance.sites.Count; n++) Instance.sites[n].FiresSaid(say, n, first, tag.StartsWith("all"));
+            string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "vfx_fires_" + tag + ".txt");
+            System.IO.File.WriteAllText(path, say.ToString());
+            return path;
         }
 
         /// <summary>For the development build: a grid made both ways for every site there is, and how far apart the two come out (see Site.NativeCheck).</summary>

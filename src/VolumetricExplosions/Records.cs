@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace VolumetricExplosions
 {
-    public enum Cause { Unknown, Crash, Collision, Overheat, Pressure, GForce, Exhaust }
+    public enum Cause { Unknown, Crash, Collision, Overheat, Pressure, GForce, Exhaust, Collapse }     // (Collapse since 2026-11-19: a building of the space centre coming down, see Razing.Dust)
 
     /// <summary>What one destroyed part was, taken down in the moment before it went.</summary>
     public sealed class Death
@@ -15,10 +15,12 @@ namespace VolumetricExplosions
         public Vector3d velocity;               // over the ground, in the scene's axes
         public string name;
         public float dry, size;                 // tonnes without contents; rough radius in metres
+        public float tall;                      // (since 2026-11-19) how high a building that came down stood, metres (see Razing.Dust); nought for a part
         public double fuel, oxidizer, solid, mono, gas, ore, vapour;   // kilograms
         public double charge;                   // units of electric charge
         public double explosive;                // (since 0.10.0) kilograms of TNT a warhead or a shell set off (BD Armory's: see Warheads)
         public bool hydrogen, running, crewed, splashed;
+        public bool flung;                      // (since 2026-11-19) going faster than its ship can have been going when it died: thrown by the physics in its last step (see Records.Pace)
         public float thrust;
         public Cause cause;
         public float impact;                    // metres a second, for a crash or a collision
@@ -83,6 +85,7 @@ namespace VolumetricExplosions
             }
             why.Clear();
             deaths.Clear();
+            paces.Clear();
         }
 
         static void Note(EventReport report, Cause cause, bool withValue)
@@ -98,7 +101,7 @@ namespace VolumetricExplosions
                 if (p == null || p.transform == null) return;
                 var d = new Death { frame = Time.frameCount, world = p.transform.position, name = p.partInfo != null ? p.partInfo.name : p.name };
                 CelestialBody body = p.vessel != null ? p.vessel.mainBody : FlightGlobals.currentMainBody;
-                d.velocity = OverGround(p, body);
+                d.velocity = OverGround(p, body, out float most, out d.flung);
                 d.dry = Mathf.Max(0.005f, p.mass);
                 Vector3 box = p.prefabSize;
                 d.size = Mathf.Clamp(Mathf.Max(box.x, Mathf.Max(box.y, box.z)) * 0.5f, 0.2f, 6f);
@@ -121,6 +124,14 @@ namespace VolumetricExplosions
                     why.Remove(p.flightID);
                 }
                 else if (p.temperature > p.maxTemp * 0.97 || (p.skinMaxTemp > 0 && p.skinTemperature > p.skinMaxTemp * 0.97)) d.cause = Cause.Overheat;
+                // (2026-11-19: the game's speed for a crash or a collision is its physics' as well, and no harder than two ships at
+                // their believed speeds can strike each other. A Kerbal X torn out of its launch clamps by a test that moved it, set
+                // going at twenty-five metres a second, struck the runway at twenty-five to twenty-seven thousand by the game's word.
+                // See Pace.)
+                if (most > 0f && d.impact > 2f * most) d.impact = 2f * most;
+#if DEV
+                if (most < 0f && (d.impact > 500f || d.velocity.magnitude > 500.0)) Addon.Log("dev: no believed speed for " + d.name + " (" + d.cause + " at " + d.impact.ToString("F0") + ", going " + d.velocity.magnitude.ToString("F0") + "): " + PaceSaid(p));
+#endif
                 Add(d);
             }
             catch (Exception ex) { Addon.Log("could not note a part's end: " + ex.Message); }
@@ -146,15 +157,125 @@ namespace VolumetricExplosions
             deaths.Add(d);
         }
 
-        /// <summary>How fast the part was going over the ground, in the scene's axes.</summary>
-        static Vector3d OverGround(Part p, CelestialBody body)
+        /// <summary>How fast the part was going over the ground, in the scene's axes: no faster than its ship can have been going (see Pace).</summary>
+        static Vector3d OverGround(Part p, CelestialBody body) => OverGround(p, body, out _, out _);
+
+        /// <summary>(Since 2026-11-19.) The same, with the most its ship's believed speed allows it (below nought where no ship near it
+        /// has been watched), and whether it was going faster than that: thrown by the physics in its last step.</summary>
+        static Vector3d OverGround(Part p, CelestialBody body, out float most, out bool flung)
         {
+            most = -1f; flung = false;
             Rigidbody rb = p.Rigidbody;
-            if (rb == null || body == null) return p.vessel != null ? p.vessel.srf_velocity : Vector3d.zero;
+            if (rb == null || body == null) return p.vessel != null ? Believed(p, p.vessel.srf_velocity, out most, out flung) : Vector3d.zero;
             Vector3d v = (Vector3d)rb.velocity + Krakensbane.GetFrameVelocity();
             // Low down the scene turns with the planet and that is already speed over the ground; higher up it is not.
             if (!body.inverseRotation) v -= body.getRFrmVel(p.transform.position);
-            return v;
+            return Believed(p, v, out most, out flung);
+        }
+
+        /// <summary>
+        /// (Since 2026-11-19.) How fast each ship in the physics range was going, as far as it can be believed: its speed over the ground,
+        /// followed upward no faster than sixty times Kerbin's pull (a missile's boost is some thirty to fifty), downward at once. The game's
+        /// physics can throw a part at hundreds or thousands of metres a second for the step before it dies (parts pushed into each other or
+        /// into the ground are pushed out at whatever speed undoes it in one step), and through the ground. The blast took that as the
+        /// wreck's speed, and its fireball flew on with it: a Kerbal X thrown along the runway at fifty metres a second laid fireballs going at
+        /// up to two thousand, and a second after it the sky over the crash was strewn with dozens of round balls of fire for hundreds of
+        /// metres, each a fireball's puffs strung out on its way (the films of that day, trail_dump1 to 3, with the development build's
+        /// Air.Fires and Air.Blasts). A dying part's speed is now no more than a quarter again its ship's believed speed and twenty-five
+        /// metres a second: a ship new to the physics range or just come off another (a piece torn off in the crash) starts from the fastest
+        /// believed of those within half a kilometre of it, and failing that of those anywhere in the physics range.
+        /// (Found later that day: those films' Kerbal X stood in its launch clamps, and the test that threw it, moving it with the clamps
+        /// holding it, tore it out of them; every part went flying at up to tens of millions of metres a second in that one step. With the
+        /// clamps let go first it slid along the runway at twenty-five metres a second, as thrown, and no part's speed was cut. So that swarm
+        /// was the test's; this stays as a guard against the physics doing the same to a craft caught in something as it is moved hard.)
+        /// </summary>
+        struct Pace { public float speed, t; public Vector3d at; }
+        static readonly Dictionary<uint, Pace> paces = new Dictionary<uint, Pace>();
+        static readonly List<uint> pacesGone = new List<uint>();
+        const float Speeding = 600f;            // (m/s each second: how fast a believed speed may rise)
+        const float PaceSlack = 25f;             // (m/s a part may go beyond a quarter again its ship's believed speed)
+#if DEV
+        internal static int SpeedsCut; internal static float SpeedCutMost;     // (development build: how many dying parts' speeds were cut, and the most a speed was, see Air.Blasts)
+#endif
+
+        /// <summary>In each physics step: every ship's believed speed (see Pace).</summary>
+        internal static void Watch()
+        {
+            List<Vessel> loaded = FlightGlobals.VesselsLoaded;
+            if (loaded == null) return;
+            float now = Time.fixedTime, step = Mathf.Max(Time.fixedDeltaTime, 1e-3f);
+            for (int n = 0; n < loaded.Count; n++)
+            {
+                Vessel v = loaded[n];
+                if (v == null || v.packed) continue;
+                float speed = (float)v.srf_velocity.magnitude;
+                Vector3d at = v.CoMD;
+                if (paces.TryGetValue(v.persistentId, out Pace was) && now - was.t < 1f)
+                {
+                    if (now <= was.t) continue;                                             // (the same step once more)
+                    speed = Mathf.Min(speed, was.speed + Speeding * (now - was.t));
+                }
+                else
+                {
+                    float near = Nearby(at, now, v.persistentId);
+                    if (near >= 0f) speed = Mathf.Min(speed, near + Speeding * step);
+                }
+                paces[v.persistentId] = new Pace { speed = speed, t = now, at = at };
+            }
+            if (paces.Count > 64)
+            {
+                pacesGone.Clear();
+                foreach (KeyValuePair<uint, Pace> kv in paces) if (now - kv.Value.t > 5f || now < kv.Value.t) pacesGone.Add(kv.Key);
+                for (int n = 0; n < pacesGone.Count; n++) paces.Remove(pacesGone[n]);
+            }
+        }
+
+#if DEV
+        static string PaceSaid(Part p)
+        {
+            float now = Time.fixedTime;
+            string s = "now " + now.ToString("F2") + ", vessel " + (p.vessel == null ? "none" : p.vessel.persistentId + (p.vessel.packed ? " packed" : "") + (p.vessel.loaded ? "" : " unloaded"));
+            if (p.vessel != null && paces.TryGetValue(p.vessel.persistentId, out Pace own)) s += ", its pace " + own.speed.ToString("F0") + " from " + (now - own.t).ToString("F2") + " s ago";
+            else s += ", no pace of its own";
+            float bestFar = float.MaxValue; Pace best = default(Pace);
+            foreach (KeyValuePair<uint, Pace> kv in paces) { float far = (float)(kv.Value.at - (Vector3d)p.transform.position).magnitude; if (far < bestFar) { bestFar = far; best = kv.Value; } }
+            return s + ", " + paces.Count + " paces, the nearest " + (bestFar < float.MaxValue ? bestFar.ToString("F0") + " m off, " + (now - best.t).ToString("F2") + " s ago, " + best.speed.ToString("F0") + " m/s" : "none");
+        }
+#endif
+
+        /// <summary>The fastest believed speed of the ships seen in the last step or two within half a kilometre of here (or so far); below nought if none.</summary>
+        static float Nearby(Vector3d at, float now, uint not, double within = 500.0)
+        {
+            float best = -1f;
+            foreach (KeyValuePair<uint, Pace> kv in paces)
+            {
+                if (kv.Key == not || now - kv.Value.t > 0.1f || now < kv.Value.t) continue;
+                if ((kv.Value.at - at).sqrMagnitude < within * within && kv.Value.speed > best) best = kv.Value.speed;
+            }
+            return best;
+        }
+
+        /// <summary>A dying part's speed, cut to what its ship's believed speed allows (see Pace). As it was where no ship near it has been watched.</summary>
+        static Vector3d Believed(Part p, Vector3d v, out float most, out bool flung)
+        {
+            float now = Time.fixedTime, ship = -1f;
+            most = -1f; flung = false;
+            if (p.vessel != null && paces.TryGetValue(p.vessel.persistentId, out Pace was) && now - was.t < 0.5f && now >= was.t) ship = was.speed;
+            if (ship < 0f) ship = Nearby(p.transform.position, now, 0u);
+            // (2026-11-19: and failing that the fastest anywhere in the physics range. A Kerbal X torn out of its launch clamps by
+            // a test that moved it burst in one step of the physics, every part a piece of its own flung at thirty to sixty
+            // kilometres a second, and each died 550 to 1250 metres from where the craft had been watched, in the sea or the sky,
+            // where none of the ships was within half a kilometre to lend it a speed.)
+            if (ship < 0f) ship = Nearby(p.transform.position, now, 0u, double.MaxValue);
+            if (ship < 0f) return v;
+            most = PaceSlack + 1.25f * ship;
+            double speed = v.magnitude;
+            if (speed <= most) return v;
+            flung = true;
+#if DEV
+            SpeedsCut++; SpeedCutMost = Mathf.Max(SpeedCutMost, (float)speed);
+#endif
+            return v * (most / speed);
         }
 
         static void Sort(Death d, string resource, double kg, double units)
@@ -179,6 +300,22 @@ namespace VolumetricExplosions
             else if (name.Contains("water") || name.Contains("ammonia")) d.vapour += kg;
             else if (name.Contains("ore") || name.Contains("rock") || name.Contains("dirt") || name.Contains("metal") || name.Contains("regolith")) d.ore += kg;
         }
+
+#if DEV
+        /// <summary>(Development build, 2026-11-19: for a blast with no part found for it, the nearest part that died in the last few frames, how far and how many frames ago, and whether it was handed out already.)</summary>
+        internal static string NearestSaid(Vector3d world)
+        {
+            int now = Time.frameCount; double best = double.MaxValue; Death got = null;
+            for (int n = 0; n < deaths.Count; n++)
+            {
+                Death d = deaths[n];
+                if (now - d.frame > 5) continue;
+                double far = (d.world - world).magnitude;
+                if (far < best) { best = far; got = d; }
+            }
+            return got == null ? "no part died in the last five frames" : "the nearest part that died, " + got.name + ", " + best.ToString("F0") + " m off, " + (now - got.frame) + " frames ago" + (got.taken ? ", taken already" : "");
+        }
+#endif
 
         /// <summary>The parts that died at this place just now. Each is handed out once.</summary>
         public static void Take(Vector3d world, List<Death> into)
@@ -231,8 +368,10 @@ namespace VolumetricExplosions
                     case "hydrogen": d.hydrogen = value != 0; break;
                     case "dry": d.dry = (float)value; break;
                     case "size": d.size = (float)value; break;
+                    case "tall": d.tall = (float)value; break;
                     case "thrust": d.thrust = (float)value; d.running = value > 0; break;
                     case "speed": d.impact = (float)value; break;
+                    case "rest": d.velocity = Vector3d.zero; break;            // (still on the ground, not moving as the ship flown does: a building's dust, see Razing.Dust)
                     case "east": d.velocity += east * value; break;
                     case "north": d.velocity += north * value; break;
                     case "up": d.velocity += up * value; break;

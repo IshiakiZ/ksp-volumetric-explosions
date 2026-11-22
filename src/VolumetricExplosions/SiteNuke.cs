@@ -79,7 +79,12 @@ namespace VolumetricExplosions
                 n.vacuum = plan.vacuum;
                 n.space = plan.space;
                 n.tnt = 0.5f * n.kt * 1e6f;
-                n.ground = plan.dust;
+                // The dust it lifts is the ground's finest, dry, high in the sun: as pale as the ground looks, not as dark as the
+                // clods a blast throws (the plan's dust, the square of that). (2026-11-19: with the plan's, a 20-kiloton's stem and
+                // cap over the space centre's grass were 0.25 on the screen by day beside the grass's 0.57, a sooty brown with black
+                // streaks, br-nk-day20; in the Nevada photographs the stem is seven tenths as bright as the desert floor to as bright
+                // as it, Tumbler-Snapper Dog, Small Boy, Plumbbob Priscilla, and the cap paler still.)
+                n.ground = body != null ? Plan.Ground(body, plan.world, plan.paved) : plan.dust;
                 // The ground under it: what the plan sounded (700 m down), else the planet's own ground (or sea) under the place.
                 if (plan.surfaceBelow)
                 {
@@ -210,8 +215,10 @@ namespace VolumetricExplosions
             /// megaton's is widest, 5,700 ft across, at ten seconds); on the ground it is a half-ball as wide as a burst of twice the yield
             /// in the air (G&D 2.127: the ground's reflection doubles the yield in W^0.4, and 2^0.4 = 1.32). It flattens as it
             /// rolls up into a ring (G&D 2.07), to a head near twice as wide as it is tall and of the same volume (until 2026-11-09 by a
-            /// tenth: a ball on a stalk, and in the air a ball, where every photograph has a flattened, rolling head), and when it has stopped rising it levels out over four minutes, wider and flatter, its top
-            /// staying where it got to (G&D 2.15).
+            /// tenth: a ball on a stalk, and in the air a ball, where every photograph has a flattened, rolling head); a small one's head
+            /// then billows up taller again over the next few of its glow's lengths, to some 1.4 times as wide as it is tall, where a
+            /// megaton's stays twice as wide (since 2026-11-19: see below); and when it has stopped rising it levels out over four
+            /// minutes, wider and flatter, its top staying where it got to (G&D 2.15).
             /// </summary>
             void Shape()
             {
@@ -221,7 +228,15 @@ namespace VolumetricExplosions
                 float a = (float)b * grows * onGround;
                 float rolled = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(tt / Mathf.Max(tlum, 0.3f)));
                 float level = stopped ? Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((tt - tStop) / 240f)) : 0f;
-                float flat = 1f - 0.42f * rolled;
+                // (And once rolled up, a small one's head billows up taller again over four of its glow's lengths, to some 1.4 times as wide
+                // as it is tall; a megaton's stays wide. Since 2026-11-19: twice as wide as tall from the roll on, a 20-kiloton's head a
+                // minute on was a flat pancake on its stem, br-nk-day20, where Tumbler-Snapper Dog's, Plumbbob Priscilla's and Small Boy's
+                // are tall cauliflowers 1.2 to 1.4 times as wide as tall then; their heads a few seconds on are the flattened rings this has
+                // until then. Glasstone and Dolan's cloud of some tens of kilotons, stopped, is about as thick as it is wide; a megaton's
+                // twice as wide.)
+                float roundsTo = Settings.TestRound == 0f ? 0.58f : Mathf.Lerp(0.8f, 0.58f, Mathf.InverseLerp(3f, 6.9f, Mathf.Log(Mathf.Max(kt, 1f))));
+                float billowed = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((tt - tlum) / Mathf.Max(4f * tlum, 1f)));
+                float flat = 1f - 0.42f * rolled + (roundsTo - 0.58f) * billowed;
                 ah = a / Mathf.Sqrt(flat) * (1f + 0.15f * level);
                 av = a * flat * (1f - 0.1f * level);
                 lift = 0.1f * a * level;
@@ -282,10 +297,15 @@ namespace VolumetricExplosions
             public float StemWide => Mathf.Max(Mathf.Lerp(0.21f, 0.06f, Mathf.InverseLerp(3f, 6.9f, Mathf.Log(Mathf.Max(kt, 1f)))) * ah, 0.3f * Rmax);
 
             /// <summary>
-            /// How fast the afterwinds go up the column's middle: a little faster than the cap climbs, so that the dust catches its foot;
-            /// dying away with the cap's own rise, which slows to nothing where it stops.
+            /// How fast the afterwinds go up the column's middle: half again as fast as the cap climbs, so that the dust catches its
+            /// foot; dying away with the cap's own rise, which slows to nothing where it stops. (Until 2026-11-19 a little faster than
+            /// the cap, 1.15 times, which on the column's middle alone was enough: the air rises as a bell across it, and the dust laid
+            /// out to one and a half of its widths rose at half the cap's speed on the whole, so that a big one's stem never reached
+            /// its cap. 500 kilotons filmed from 25 km, br-nk-day500: at 60 and 90 s the stem stood a kilometre and a half under the
+            /// cap, where every photograph of a megaton shot a minute on has the two joined, Castle Romeo, Ivy King. A 20-kiloton's
+            /// had caught up by a minute.)
             /// </summary>
-            public float StemSpeed => 1.15f * w + 2f * Mathf.Clamp01(w / 5f);
+            public float StemSpeed => 1.5f * w + 2f * Mathf.Clamp01(w / 5f);
 
 #if DEV
             public string Said() => string.Format(System.Globalization.CultureInfo.InvariantCulture,
@@ -651,14 +671,19 @@ namespace VolumetricExplosions
                 int i = Add();
                 if (i < 0) break;
                 ref P o = ref p[i];
-                float ang = Luck(0f, 2f * Mathf.PI), off = 1.5f * wide * Mathf.Sqrt(Luck(0f, 1f));
+                // (out to 1.1 of the column's widths, over which its air rises at six tenths of its middle's speed on the whole; out to
+                // 1.5 until 2026-11-19, over which it rises at four tenths: see StemSpeed. The stem a quarter narrower with it: Small
+                // Boy's is a third as wide as its cap, ours had been nearly half.)
+                float ang = Luck(0f, 2f * Mathf.PI), off = 1.1f * wide * Mathf.Sqrt(Luck(0f, 1f));
                 o.x = n.foot.x + Mathf.Cos(ang) * off; o.z = n.foot.z + Mathf.Sin(ang) * off;
                 float floor = hasGround ? GroundAt(o.x, o.z) : n.foot.y;
                 o.r = Mathf.Clamp(0.55f * wide * Luck(0.55f, 1.45f), 2f, 600f);
                 o.y = floor + 0.4f * o.r + Luck(0f, 0.3f) * wide;
                 o.vy = up * Luck(0.5f, 1f);
                 o.drag = 4f; o.kloss = 1f; o.grow = 0.02f * o.r; o.turb = 1.5f; o.rise = 0f;
-                o.mass = Luck(0.6f, 1.4f) * Mathf.Max(0.3f, n.dirt) * o.r * o.r;
+                // (three times as thick since 2026-11-16, TryB the trial's: as thin as it was, a 20-kiloton's stem from 2.5 km was a brown
+                // fleece one saw the sky through, where the films have a solid column)
+                o.mass = Luck(0.6f, 1.4f) * Mathf.Max(0.3f, n.dirt) * o.r * o.r * (Settings.TryC >= 0f ? Settings.TryC : 3f);
                 float tone = Luck(0.85f, 1.1f);
                 o.ar = n.ground.r * tone; o.ag = n.ground.g * tone; o.ab = n.ground.b * tone;
                 o.fadeIn = 1.5f;

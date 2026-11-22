@@ -19,7 +19,7 @@ namespace VolumetricExplosions
         public float running;          // 0 to 1: how hard it is burning
         public float amount;           // of smoke: 1 is a solid booster's, 0 none
         public float shade;            // how light the smoke is: 0.03 soot, 0.85 steam
-        public float warm;             // how brown the smoke is: 0 grey, 1 the brown of burnt kerosene (a thermal's, since 0.8.0: above nought, dust lifted by a whirlwind, as much of the ground's colour)
+        public float warm;             // how brown the smoke is: 0 grey, 1 the brown of burnt kerosene (a thermal's, since 0.8.0: above nought, dust lifted by a whirlwind, as much of the ground's colour; a re-entry glow's, since 2026-11-20: how strong its heating is, 0 to 1, the game's own measure, by which its colour goes from pink-violet to gold; nought: as hot as the strongest, as before)
         public float lasts;            // seconds the smoke hangs, in thick still air
         public int tint;               // the flame's colours, as a blast's: 0 fuel, 1 solid propellant, 2 monopropellant, 4 hydrogen; for engines also 5 methane, 6 the fuels that keep, 7 a reactor's, and (Level 5) 9 a jet's afterburner, 10 a kerosene engine's igniter
         public float fire;             // how bright its flame is, drawn as burning gas: 0 none of it (the smoke alone), 1 an engine's of its kind at full thrust (since 0.6.0: before, 1 was a kerosene engine's, whatever the kind)
@@ -401,6 +401,11 @@ namespace VolumetricExplosions
             if (fedCount == 0) { if (Lingering()) Cuts(); return; }
             float fastest = -1f;
             float q = Mathf.Clamp(Settings.Quality * Air.Room(), 0.15f, 1.5f);
+            // (An engine's flame is laid in full until the scene is seven tenths full, and only then in fewer bits, since 2026-11-21.
+            // Laid in fewer once it was four tenths full, its bits went up and down with the smoke round it, a part in thirty or
+            // so, and the flame and its glow by night with them: about once a second, as the owner saw in a launch's film. The
+            // flame's bits are a few thousand at most, and short-lived: they do not fill a scene. TestJetSteady 1: as until then.)
+            float qFlame = Settings.TestJetSteady == 1f ? q : Mathf.Clamp(Settings.Quality * Mathf.Min(1f, 2f * Air.Room()), 0.15f, 1.5f);
             Vector3 allGoing = Vector3.zero, allAlong = Vector3.zero, youngRims = Vector3.zero;
             int flames = 0, youngCount = 0;
             for (int f = 0; f < fedCount; f++)
@@ -474,10 +479,10 @@ namespace VolumetricExplosions
                         {
 #if DEV
                             long flameFrom = System.Diagnostics.Stopwatch.GetTimestamp();
-                            Flame(ref vent, e, rim, along, -going, e.fire, dt, q);
+                            Flame(ref vent, e, rim, along, -going, e.fire, dt, qFlame);
                             Air.FlameTicks += System.Diagnostics.Stopwatch.GetTimestamp() - flameFrom;
 #else
-                            Flame(ref vent, e, rim, along, -going, e.fire, dt, q);
+                            Flame(ref vent, e, rim, along, -going, e.fire, dt, qFlame);
 #endif
                             Regolith(e, rim, along, dt, q);
                             // (the strongest of the ship's flames gives the pattern its place and its size: see TuneJet)
@@ -1303,7 +1308,7 @@ namespace VolumetricExplosions
                 o.grow = 0.08f;
                 o.tint = (byte)Mathf.Clamp(e.tint, 0, FireKinds - 1);
                 o.tile = Lumpy();
-                Born(i);
+                Born(i, true);
             }
         }
 
@@ -1382,8 +1387,14 @@ namespace VolumetricExplosions
             // engine's flame is as quick as a big one's, and shorter because it is over sooner).
             float jet = JetSpeed(length);
             float thin = Thin;                                          // 0 at the ground, 1 in a vacuum
+            // (In thin air the wind of the ship's own speed takes the flame an eighth as fast, since 2026-11-17. The gas is drawn
+            // going an eighth as fast as it goes (above), and the air going past at its true speed: at a kilometre a second, 25 km
+            // up, where the air has a hundredth of its weight at the ground, that wind combed the plume into a thread one and a
+            // half times the rocket's width (`flame1`, `flame2`), where a real plume in air that thin has opened to several times
+            // the rocket's width and its own gas outruns the air. In thick air as it was. TestMass 1: as before.)
+            if (Settings.TestMass != 1f) air *= Mathf.Lerp(1f, 0.125f, thin);
             // (what this kind of flame is like: see Plumes)
-            Plume look = Plumes[Mathf.Clamp(e.tint, 0, FireKinds - 1)];
+            Plume look = PlumeOf(e.tint);
             // (With no air to hold it in, the jet opens out at once. A clear flame, hydrogen's, is spent in half the length, its
             // gas cold as soon as it has spread; a sooty one, kerosene's, or a solid motor's full of burning metal, goes on
             // glowing as it spreads, a broad cone as long as the flame was in thick air and far fainter: as an upper stage's
@@ -1454,7 +1465,12 @@ namespace VolumetricExplosions
             float heatAt = look.hot * (1f - 0.2f * thin), flameAt = 0.22f * dense * fire * (1f - 0.45f * thin) * (1f - 0.4f * spread);
             float coolLo = 0.85f - 0.3f * thin, coolHi = 1.2f + 0.5f * thin, coolSpreading = 2.1f * look.cool / lasts * (1f - 0.1f * thin * thin * thin * thin);
             float lifeSpreading = (1.7f - 0.64f * thin) * lasts, coolInAir = 2.9f * look.cool / reach, reachAt = (1.15f - 0.12f * thin) * reach;
-            wMuchA.Fill(13f, 5, salt, tLo, tHi); wMuchB.Fill(31f, 9, salt + 1u, tLo, tHi); wQuick.Fill(8f, 4, salt + 2u, tLo, tHi); wThrown.Fill(19f, 7, salt + 3u, tLo, tHi);
+            // (How much of it there is, how hot and how fast: gusts that come and go within a few of their own steps, and do not
+            // swell and fade over many, since 2026-11-21; see Gust. Which way the whole jet wavers, and how hard it is thrown out,
+            // as before.)
+            bool quickOnly = Settings.TestJetSteady != 1f;
+            wMuchA.Fill(13f, 5, salt, tLo, tHi, quickOnly); wMuchB.Fill(31f, 9, salt + 1u, tLo, tHi, quickOnly); wQuick.Fill(8f, 4, salt + 2u, tLo, tHi, quickOnly);
+            wThrown.Fill(19f, 7, salt + 3u, tLo, tHi);
             wA1.Fill(4.3f, 1, salt + 4u, tLo, tHi); wA2.Fill(11f, 1, salt + 5u, tLo, tHi); wB1.Fill(4.7f, 1, salt + 6u, tLo, tHi); wB2.Fill(12f, 1, salt + 7u, tLo, tHi);
             for (int k = 0; k < bits; k++)
             {
@@ -1582,16 +1598,29 @@ namespace VolumetricExplosions
             vent.fire -= (int)vent.fire;
             if (bits <= 0) return;
             Vector3 across = Vector3.Cross(along, Mathf.Abs(along.y) < 0.9f ? Vector3.up : Vector3.right).normalized, over = Vector3.Cross(along, across);
-            if (fire >= flameWeight) { flameKind = PlasmaKind; flameWeight = fire; }
+            // (Since 2026-11-20 its colours go with how strong the heating is, as Engine Flames says it in Exhaust.warm: faint, the
+            // pink-violet and magenta of the air's own light, as in the first streaks past Orion's window on its first flight
+            // (NASA, jsc2022e046313 to 323) and Polaris Dawn's crew's account; strong, a flickering orange and gold flame, as later
+            // in the same film. How far it has gone from the one to the other is the patch's (see Site.PlasmaPink), and it is laid
+            // a little cooler while faint. Nought (an older Engine Flames) or TestPlasma 1 or 2: gold, and as hot as the strongest,
+            // as until then.)
+            float strength = Mathf.Clamp01(e.warm);
+            float warmth = Settings.TestPlasma == 0f && strength > 0f ? Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(PlasmaWarms, PlasmaFull, strength)) : 1f;
+            float hotNow = Mathf.Lerp(PlasmaFaint, 1f, warmth);
+            if (fire >= flameWeight) { flameKind = PlasmaKind; flameWeight = fire; plasmaWarmth = warmth; }
             uint salt = (uint)e.id * 2654435761u;
             // What a re-entry is seen by, from a window close by and from hundreds of kilometres alike, is its head: the shock
             // layer, air rammed to thousands of degrees just ahead of the face, far the brightest of it, thin and smooth-edged
             // (Orion's window film: white, yellow, lavender, magenta as it heats; the Shuttle's and Dragon's from the station, a
             // small bright head on a long trail; a meteor's). Behind it the sheath hugs the body and is gone a little past it, and
-            // the wake streams back a long way, cooling. Until 2026-10-21 (TestPlasma 1) the layer was laid thinner than the sheath
-            // and no hotter, and the sheath spread out a body's width and as hot as the layer: round a long craft a pale cloud,
-            // "brightest nowhere in particular", and the owner: "that fire doesnt look like a real re-entry, does it?".
-            bool before = Settings.TestPlasma == 1f;
+            // the wake streams back a long way, cooling. Until 2026-10-21 the layer was laid thinner than the sheath and no hotter,
+            // and the sheath spread out a body's width and as hot as the layer: round a long craft a pale cloud, "brightest nowhere
+            // in particular", and the owner: "that fire doesnt look like a real re-entry, does it?". From then the head above, thin
+            // and bright, with a hugging sheath and a long thin wake (TestPlasma 2). But watching the old one again that night the
+            // owner said "whatever is happening right now looks good", and their eye preferred its flame-like fire wrapped round the
+            // capsule to the new head (research/rendering/experiments/reentry-real.md): so since 2026-11-20 it is laid as before
+            // again, its colour going with how strong the glow is (below; TestPlasma 1: as hot as the strongest, as until then).
+            bool before = Settings.TestPlasma != 2f;
             float layerShare = before ? 0.35f : 0.45f, sheathTo = before ? 0.72f : 0.75f;
             for (int k = 0; k < bits; k++)
             {
@@ -1617,7 +1646,7 @@ namespace VolumetricExplosions
                     float outward = 0.5f * speed;
                     c = rim - along * ((before ? 0.1f : 0.14f) * R * (1f - 0.6f * out_ * out_)) + side * (out_ * R);
                     push = side * (outward * (0.3f + 0.7f * out_)) + along * (0.05f * speed);
-                    o.heat = look.hot * Random.Range(0.95f, 1.08f) * (before ? 1f : Settings.PlasmaHead);
+                    o.heat = look.hot * Random.Range(0.95f, 1.08f) * (before ? 1f : Settings.PlasmaHead) * hotNow;
                     // (the layer is thinner than the patch's cells, half a metre once the wake is long: bits as wide as a cell, or
                     // what was drawn of it was a stack of bars; since 2026-10-21 a little thinner, as the layer is)
                     o.r = (before ? Mathf.Max(0.3f * R, 0.4f) : Mathf.Max(0.22f * R, 0.3f)) * Random.Range(0.8f, 1.2f);
@@ -1634,7 +1663,7 @@ namespace VolumetricExplosions
                     c = rim + side * (out_ * R) + along * (0.05f * R);
                     // (since 2026-10-21 hugging the body, cooler than the layer it comes from and gone a little past the body's end)
                     push = along * back + side * (back * (before ? Random.Range(0.02f, 0.11f) : Random.Range(0.01f, 0.05f)));
-                    o.heat = look.hot * Random.Range(0.9f, 1.05f) * (0.8f + 0.2f * flick) * (before ? 1f : 0.8f);
+                    o.heat = look.hot * Random.Range(0.9f, 1.05f) * (0.8f + 0.2f * flick) * (before ? 1f : 0.8f) * hotNow;
                     o.r = 0.22f * R * Random.Range(0.8f, 1.2f);
                     life = (before ? 2.5f : 1.6f) * neck / back * Random.Range(0.8f, 1.3f);
                     o.flame = (before ? 0.4f : Settings.PlasmaSheath) * look.dense * fire * running * Random.Range(0.8f, 1.2f) * (0.5f + 1f * flick);
@@ -1646,7 +1675,7 @@ namespace VolumetricExplosions
                     float out_ = 0.22f * Mathf.Sqrt((float)(nth * 0.3313 % 1.0));
                     c = rim + along * neck + side * (out_ * R);
                     push = along * (speed * Random.Range(0.7f, 1.05f)) + side * (speed * Random.Range(0f, 0.04f));
-                    o.heat = look.hot * Random.Range(0.6f, 0.82f) * (0.75f + 0.25f * flick) * (before ? 1f : 0.85f);
+                    o.heat = look.hot * Random.Range(0.6f, 0.82f) * (0.75f + 0.25f * flick) * (before ? 1f : 0.85f) * hotNow;
                     o.r = 0.15f * R * Random.Range(0.8f, 1.2f);
                     // (since 2026-10-21 half as long again: a re-entry is seen by a long trail behind its head)
                     life = length / speed * Random.Range(0.4f, 1.3f) * (before ? 1f : 1.5f);
@@ -1669,6 +1698,15 @@ namespace VolumetricExplosions
                 p[i].born = p[i].r;
             }
         }
+
+        /// <summary>How strong a re-entry glow is (the game's own measure, 0 to 1) when its colours begin to go over from the
+        /// pink-violet of the air's own light to orange and gold (see Plasma, Site.PlasmaPink), and when they are all gold; and how
+        /// hot it is laid while faint, as so much of its heat when strong. (The Win Capsule coming down from an 80 by 30 km orbit:
+        /// 0.21 at 47 km, 0.4 at 44, 0.59 at 42, 0.95 at 38. Tried first and left: the colour by its heat alone, which is its
+        /// brightness as well: at a third of its heat, warming to all of it at 0.7, it was salmon-red by 44 km and never
+        /// pink-violet (`re2_day_44`); at a fifth until 0.2, warming to all at 0.85, gone from sight at 44 and 47 km (`re3_day_44`,
+        /// `re3_day_47`).)</summary>
+        internal static float PlasmaWarms = 0.3f, PlasmaFull = 0.8f, PlasmaFaint = 0.8f;
 
         /// <summary>How fast a re-entry glow's gas is seen to stream back (see Plasma): its wake gone through in a third of a second.</summary>
         static float PlasmaPace(float length) => Mathf.Max(40f, length / 0.33f);
@@ -1810,10 +1848,11 @@ namespace VolumetricExplosions
             int t0, rows, ring;
             float k;
             uint salt;
+            bool quickOnly;
 
-            public void Fill(float k, int ring, uint salt, float from, float to)
+            public void Fill(float k, int ring, uint salt, float from, float to, bool quickOnly = false)
             {
-                this.k = k; this.ring = ring; this.salt = salt;
+                this.k = k; this.ring = ring; this.salt = salt; this.quickOnly = quickOnly;
                 float a = from * k, b = to * k;
                 int lo = (int)a, hi = (int)b;
                 if (a < lo) lo--;
@@ -1821,7 +1860,7 @@ namespace VolumetricExplosions
                 t0 = lo;
                 rows = Mathf.Min(hi - lo + 2, Rows);
                 for (int r = 0; r < rows; r++)
-                    for (int j = 0; j < ring; j++) v[r * Ring + j] = Chance(lo + r, j, salt);
+                    for (int j = 0; j < ring; j++) v[r * Ring + j] = quickOnly ? Gust(lo + r, j, salt) : Chance(lo + r, j, salt);
             }
 
             public float At(float left, float round)
@@ -1831,7 +1870,7 @@ namespace VolumetricExplosions
                 if (t < ti) ti--;
                 int r = ti - t0;
                 float a = round * ring;
-                if (r < 0 || r + 1 >= rows || a < 0f || a >= ring) return Wavers(t, a, ring, salt);
+                if (r < 0 || r + 1 >= rows || a < 0f || a >= ring) return Wavers(t, a, ring, salt, quickOnly);
                 float ft = t - ti;
                 int a0 = (int)a;
                 float fa = a - a0;
@@ -1843,7 +1882,7 @@ namespace VolumetricExplosions
         }
         readonly Lattice wMuchA = new Lattice(), wMuchB = new Lattice(), wQuick = new Lattice(), wThrown = new Lattice(), wA1 = new Lattice(), wA2 = new Lattice(), wB1 = new Lattice(), wB2 = new Lattice();
 
-        static float Wavers(float t, float a, int ring, uint salt)
+        static float Wavers(float t, float a, int ring, uint salt, bool quickOnly = false)
         {
             // (floors by casting, a step down for what is below nought: Mathf.Floor is a call out, and this runs seven times for every bit of a flame)
             int t0 = (int)t, a0 = (int)a;
@@ -1853,9 +1892,22 @@ namespace VolumetricExplosions
             ft = ft * ft * (3f - 2f * ft); fa = fa * fa * (3f - 2f * fa);
             a0 = ((a0 % ring) + ring) % ring;
             int a1 = (a0 + 1) % ring;
-            float h00 = Chance(t0, a0, salt), h01 = Chance(t0, a1, salt), h10 = Chance(t0 + 1, a0, salt), h11 = Chance(t0 + 1, a1, salt);
+            float h00, h01, h10, h11;
+            if (quickOnly) { h00 = Gust(t0, a0, salt); h01 = Gust(t0, a1, salt); h10 = Gust(t0 + 1, a0, salt); h11 = Gust(t0 + 1, a1, salt); }
+            else { h00 = Chance(t0, a0, salt); h01 = Chance(t0, a1, salt); h10 = Chance(t0 + 1, a0, salt); h11 = Chance(t0 + 1, a1, salt); }
             return (h00 + (h01 - h00) * fa) * (1f - ft) + (h10 + (h11 - h10) * fa) * ft;
         }
+
+        /// <summary>
+        /// (Since 2026-11-21.) A chance value at a step that has next to nothing slow in it: one chance, less twice the one a step
+        /// before, and the one before that, as wide in its swing as one chance (by its spread; at most 0.82 either side of a half),
+        /// but over a few steps together nought. Chance values one to a step, blended, swing as much slowly, over a second or two,
+        /// as quickly: the gusts of how much of a flame there is did so, and with them the whole flame and its glow swelled and
+        /// faded about once a second (the owner, in a launch's film by night; the motion tool's "steady beat"). Made of these the
+        /// gusts stream down the flame as before, and the flame as a whole stays. (The difference of two alone left a third of
+        /// that swelling.)
+        /// </summary>
+        static float Gust(int x, int y, uint salt) => 0.5f + 0.40824829f * (Chance(x, y, salt) - 2f * Chance(x - 1, y, salt) + Chance(x - 2, y, salt));
 
         static float Chance(int x, int y, uint salt)
         {

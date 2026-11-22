@@ -39,11 +39,30 @@ uniform vec4 _ShadowSkyKeep;   // x: how much of the smoke over a place a few me
 uniform vec4 _VolFlow;         // as the smoke's own (volume.glsl): x twice how far the fastest smoke on the grid has gone since the grid was made, m; z the farthest it is carried on, m
 uniform vec4 _VolSize;         // xyz: the size of the grid's box, m
 uniform sampler3D _Volume;
+uniform sampler3D _VolumeWas;     // (since 2026-11-16) the same of the grid before this one: the shadow goes over from that one's to this one's as the smoke does (volume.glsl)
+uniform vec4 _ShadowWasScale;     // xyz: what takes a place of this grid's box (-0.5 to 0.5) to the same place of that one's, times this; w: how much of that grid is shown just now (nought: none)
+uniform vec4 _ShadowWasShift;     // xyz: and plus this; w: twice how far that grid's fastest smoke has gone since it was made, m
 uniform sampler3D _Flow;       // which way the smoke was going when the grid was made, as a share of the fastest (0.5: not at all)
 uniform sampler2D _CameraDepthTexture;
 in vec3 vs_TEXCOORD0;
 in vec4 vs_TEXCOORD1;
 out vec4 SV_Target0;
+
+// The grid at a place of its box, carried on as the smoke is (q: where the smoke now at `now` was when this grid was made), and
+// gone over from the grid before's: read there where the smoke now here was when that one was made.
+vec4 gridAt(vec3 q, vec3 now, vec4 going)
+{
+    vec4 a = textureLod(_Volume, q + 0.5, 0.0);
+    if (_ShadowWasScale.w > 0.004)
+    {
+        vec3 goneWas = (going.xyz - 0.5) * _ShadowWasShift.w;
+        goneWas *= min(1.0, 3.0 * _VolFlow.z / max(length(goneWas), 1e-4));
+        vec3 w = (now - goneWas / max(_VolSize.xyz, vec3(1e-3))) * _ShadowWasScale.xyz + _ShadowWasShift.xyz;
+        if (all(lessThanEqual(abs(w), vec3(0.5)))) a = mix(a, textureLod(_VolumeWas, w + 0.5, 0.0), _ShadowWasScale.w);
+    }
+    return a;
+}
+
 void main()
 {
     vec3 eye = _WorldSpaceCameraPos;
@@ -78,8 +97,8 @@ void main()
         vec3 gone = (going.xyz - 0.5) * _VolFlow.x;
         gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
         vec3 q = clamp(p - gone / max(_VolSize.xyz, vec3(1e-3)), vec3(-0.5), vec3(0.5));
-        float here = textureLod(_Volume, q + 0.5, 0.0).b;
-        float over = textureLod(_Volume, clamp(q + _ShadowSky.xyz, vec3(-0.5), vec3(0.5)) + 0.5, 0.0).b;
+        float here = gridAt(q, p, going).b;
+        float over = gridAt(clamp(q + _ShadowSky.xyz, vec3(-0.5), vec3(0.5)), p + _ShadowSky.xyz, going).b;
         // (what is over the place counts as near it where the grid can say no more: as much smoke over it as the grid holds,
         // a few metres up as well, is a place deep in thick smoke)
         float near = over > 0.996 ? here : max(here - _ShadowSkyKeep.x * over, 0.0);
@@ -102,8 +121,9 @@ void main()
             vec4 going = textureLod(_Flow, e + 0.5, 0.0);
             vec3 gone = (going.xyz - 0.5) * _VolFlow.x;
             gone *= min(1.0, _VolFlow.z / max(length(gone), 1e-4));
+            vec3 eNow = e;
             e = clamp(e - gone / max(_VolSize.xyz, vec3(1e-3)), vec3(-0.5), vec3(0.5));
-            vec4 air = textureLod(_Volume, e + 0.5, 0.0);
+            vec4 air = gridAt(e, eNow, going);
             float before = (air.r * 0.99611 + air.g * 0.0038911) * 16.0;
             // (as the smoke's own light reckons it: a part of the sunlight finds its way round inside a cloud)
             float through = 0.8 * exp(-before) + 0.2 * exp(-0.25 * before);

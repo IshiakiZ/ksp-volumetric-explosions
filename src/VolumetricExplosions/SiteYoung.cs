@@ -372,13 +372,21 @@ namespace VolumetricExplosions
         public string YoungNow()
         {
             int smoke = 0, flame = 0, handed = 0, hot = 0;
+            float mass = 0f, handedMass = 0f, lowMass = 0f;
             for (int i = 0; i < count; i++)
             {
-                if (p[i].mass > 0f) { smoke++; if (p[i].heat > 0.5f) hot++; } else if (p[i].flame > 0f) flame++;
+                if (p[i].mass > 0f && p[i].life >= 0f)
+                {
+                    smoke++; mass += p[i].mass; if (p[i].heat > 0.5f) hot++;
+                    if ((p[i].flags & HandedOn) != 0) handedMass += p[i].mass;
+                    if (p[i].y - by0 < 12f) lowMass += p[i].mass;
+                }
+                else if (p[i].flame > 0f) flame++;
                 if ((p[i].flags & HandedOn) != 0) handed++;
             }
+            string grid = "; mass " + mass.ToString("F1") + " (handed " + handedMass.ToString("F1") + ", within 12 m of the box's floor " + lowMass.ToString("F1") + "); grid cells " + dX.ToString("F2") + " " + dY.ToString("F2") + " " + dZ.ToString("F2") + ", floor " + ny0.ToString("F1") + ", box floor " + by0.ToString("F1") + "; stride " + boxMaterial.GetVector("_VolGrid").x.ToString("F0") + " fine steps of " + boxMaterial.GetVector("_VolStep").x.ToString("F3") + " m";
             return (riding ? "ship's patch" : vented ? "trail" : "cloud") + ": " + count + " particles, " + smoke + " smoke (" + hot + " still hot, " + handed + " handed on and fading), " + flame + " flame; hands on at " + handFar.ToString("F0") +
-                   " m, one in " + handThin.ToString("F1") + "; box " + (bx1 - bx0).ToString("F0") + " x " + (by1 - by0).ToString("F0") + " x " + (bz1 - bz0).ToString("F0") + ", cells " + cellNow.ToString("F2") + " m; grates " + grateCount + "; trenches " + trenches.Count;
+                   " m, one in " + handThin.ToString("F1") + "; box " + (bx1 - bx0).ToString("F0") + " x " + (by1 - by0).ToString("F0") + " x " + (bz1 - bz0).ToString("F0") + ", cells " + cellNow.ToString("F2") + " m; grates " + grateCount + "; trenches " + trenches.Count + grid;
         }
 #endif
 
@@ -461,6 +469,24 @@ namespace VolumetricExplosions
 
         readonly List<Pad> trenches = new List<Pad>();
 
+        /// <summary>
+        /// (Since 2026-11-19.) Where in the world the light of a rocket's flame on its pad's cloud is, see Ends: at the flame's foot over
+        /// the grate, so much of the way down the flame that is out in the open (FlameFoot), and never less than two metres over the
+        /// grate. Settings.TestPadLamp 1: four tenths of the way down the whole flame, as until then. Air.PadsNow tells it.
+        /// </summary>
+        internal static Vector3d FlameLampAt(Pad pad)
+        {
+            if (Settings.TestPadLamp == 1f) return pad.flameAt + pad.flameAlong * (0.4 * pad.flameLong);
+            Vector3d middle = (Vector3d)pad.middle, upward = (Vector3d)pad.up;
+            double over = Vector3d.Dot(pad.flameAt - middle, upward), down = -Vector3d.Dot(pad.flameAlong, upward);
+            // (how much of the flame is out in the open: from its nozzle's mouth down to the grate, or all of it where it ends over the grate)
+            float seen = down > 0.2 ? Mathf.Clamp((float)(over / down), 0f, pad.flameLong) : pad.flameLong;
+            Vector3d foot = pad.flameAt + pad.flameAlong * ((1.0 - (Settings.TryR >= 0f ? Settings.TryR : FlameFoot)) * seen);
+            double under = 2.0 - Vector3d.Dot(foot - middle, upward);
+            if (under > 0.0) foot += upward * under;
+            return foot;
+        }
+
         /// <summary>This patch holds the smoke that comes out of this pad's trench (see Air.Trenches).</summary>
         public void Trench(Pad pad, float nozzle)
         {
@@ -488,6 +514,11 @@ namespace VolumetricExplosions
         /// little up the ramp each end is, already cooled in the trench and stirred hard, and rolling up and out over the
         /// ground from there. (A trench takes a moment to fill when the engines light, and to empty when they stop: see Pad.fill.)
         /// </summary>
+        internal const float FlameLights = 9f;      // (how strong the light of a rocket's flame on its pad's cloud is, at the flame's foot over the grate: a trench's end's glow is 1.8. Until 2026-11-19 3.5, from 19 m down the trench: see below. At 8 from there, and as wide as eight tenths of the flame's length, both of the pad's clouds were blown out to a glowing peach from 110 m, their lobes gone: `glare1`)
+        internal const float FlameReach = 0.2f;     // (and how far it reaches, as so much of the flame's length: see Ends)
+        internal const float FlameFoot = 0.33f;     // (and how high over the grate it is, as so much of the length of flame out in the open over it)
+        internal const float FlameLine = 1f;        // (and on the smoke, how far up the flame from there its light comes from all along, as so much of the way to the nozzle's mouth: since 2026-11-20)
+        internal const float DeckSteam = 0.35f;     // (and how much steam boils up off the deck round the flame's foot, as so much of what the trench's ends make between them: see Ends)
         void Ends(float dt, float q)
         {
             for (int t = trenches.Count - 1; t >= 0; t--)
@@ -495,12 +526,135 @@ namespace VolumetricExplosions
                 Pad pad = trenches[t];
                 if (pad == null || pad.site != this) { trenches.RemoveAt(t); continue; }
                 float made = pad.made * pad.fill;
-                if (made <= 0f || pad.ends.Length == 0) continue;
+                // (how much its flame lights the cloud: as the trench fills while an engine burns over the pad, its jet down the grate
+                // or not, and less as it climbs away, since 2026-11-20 (see Pad.Shine); TestPadShine 1: with the trench's filling alone)
+                float shines = Settings.TestPadShine == 1f ? (made > 0f ? pad.fill : 0f) : pad.shine;
+#if DEV
+                // (development: say in the log when the flame's lamp on the cloud is kept up and when it is let go, and why)
+                bool keeps = shines > 0f && pad.ends.Length > 0 && pad.flameLong > 0f;
+                if (keeps != pad.lampKeptDev)
+                {
+                    pad.lampKeptDev = keeps;
+                    Debug.Log("[VolumetricExplosions] (dev) a pad's flame lamp " + (keeps ? "kept up" : "let go") + " at " + Time.time.ToString("F2") + " s: made " + pad.made.ToString("F2") + ", fill " + pad.fill.ToString("F2") + ", shine " + pad.shine.ToString("F2") + ", flame " + pad.flameLong.ToString("F1") + " m, strongest " + pad.strongest.ToString("F2") + ", nozzle " + Vector3d.Dot(pad.flameAt - (Vector3d)pad.middle, (Vector3d)pad.up).ToString("F0") + " m over the grate");
+                }
+#endif
+                if ((made <= 0f && shines <= 0f) || pad.ends.Length == 0) continue;
+                // (a patch lit by the flame is grown as often as one fed: see the grids' wait)
                 fedAt = time;
                 float hangs = Mathf.Max(0.3f, Settings.Smoke) * Mathf.Lerp(0.3f, 1f, Mathf.Clamp01(air * 1.4f));
                 float rate = Mathf.Clamp(20f + 16f * Mathf.Sqrt(made), 20f, 80f) * Mathf.Clamp(q, 0.3f, 1.5f);      // puffs a second at each end
                 float each = 1.3f * made / (rate * pad.ends.Length);                                                       // (more of it: the trench's gale raises what lies in it)
                 float speed = (24f + 36f * pad.strongest) * Mathf.Sqrt(pad.fill);
+                // (The flame lights the cloud, since 2026-11-16. A launch's cloud is orange and yellow round the flame for the first
+                // seconds, by day as much as by night: NASA's KSC-20200530-PH-AWG04_0008, KSC-02pp0483. The rocket's flame is far the
+                // brightest thing there, tens of metres of it, and ours lit the ground and not the smoke. A lamp for it in this patch,
+                // at the foot of the flame where it is out in the open, over the grate; it goes up with the rocket, and since 2026-11-20
+                // dims as the flame climbs away (until then it went out over a second when the jet no longer reached the grate: see
+                // Pad.Shine). TestMass 1: none.)
+                // (Until 2026-11-19 the lamp was four tenths of the way down the flame, as wide as half its length: for the Kerbal X's
+                // flame of 49 m going straight down the grate, 19.6 m under it, down in the trench, reaching 24 m. Its light came up
+                // weakly and evenly over the whole of both clouds, out of the trench's ends 11 and 12 m from the grate's middle: no
+                // part of them got much, and the clouds were white with a little warmth (`lift_before`), where in NASA's photograph of
+                // the Falcon 9 of 30 May 2020 (KSC-20200530-PH-AWG03_0010) the billows beside the flame are orange and gold and those
+                // further off white. Now at the flame's foot over the grate, a third of the way up the length of it that is out in the
+                // open (two metres over the grate at the least, where the rocket still stands on it and its flame goes straight down
+                // the trench), reaching a fifth of the flame's length, and stronger; see FlameLampAt. Settings.TestPadLamp 1: as until then;
+                // TryV, TryQ and TryR: the strength, the reach and the height as FlameLights, FlameReach and FlameFoot have them.)
+                if (pad.flameLong > 0f && shines > 0f && Settings.TestMass != 1f)
+                {
+                    Vector3 flameAt = frame.ToLocal(FlameLampAt(pad));
+                    // (And on the smoke its light comes from all along the flame, since 2026-11-20: from its foot up to the nozzle's
+                    // mouth, FlameLine of the way. From its foot alone, the billows high up beside the flame were lit no more than those
+                    // as far from its foot, where in NASA's photographs by night they are cream as high as the flame reaches; and as
+                    // the foot climbed through the steam with the rocket, the light on all of it fell at once for a few frames, the dip
+                    // near 4.5 s into every night launch film (3.5 to 5 levels of 255 then; along the line 1.1 at most, for a frame).
+                    // On the ground, and for which slot it has, the lamp is where it was. Settings.TestLampLine 1: as until then.)
+                    Vector3 flameLine = Settings.TestPadLamp == 1f ? Vector3.zero : (frame.ToLocal(pad.flameAt) - flameAt) * (Settings.TryLampLine >= 0f ? Settings.TryLampLine : FlameLine);
+                    float flameWide, flameStrong;
+                    if (Settings.TestPadLamp == 1f)
+                    {
+                        flameWide = Mathf.Max(6f, 0.5f * pad.flameLong);
+                        flameStrong = (Settings.TryV >= 0f ? Settings.TryV : 3.5f) * pad.strongest * shines;
+                    }
+                    else
+                    {
+                        flameWide = Mathf.Max(4f, (Settings.TryQ >= 0f ? Settings.TryQ : FlameReach) * pad.flameLong);
+                        flameStrong = (Settings.TryV >= 0f ? Settings.TryV : FlameLights) * pad.strongest * shines;
+                    }
+                    int flameOwner = 0x5eed + 31 * t + 29;
+                    int lit = OwnLamp(pad.flameLamp, flameOwner);
+                    if (lit < 0)
+                    {
+                        lit = AddLamp(flameAt.x, flameAt.y, flameAt.z, flameWide, flameStrong, 0.6f, (byte)Mathf.Clamp(pad.tint, 0, FireKinds - 1), true, 0f, 0f);
+                        lamps[lit].quiet = true;
+                        lamps[lit].owner = flameOwner;
+                    }
+                    else
+                    {
+                        ref Lamp lamp = ref lamps[lit];
+                        lamp.x = flameAt.x; lamp.y = flameAt.y; lamp.z = flameAt.z; lamp.r = flameWide; lamp.age = 0f; lamp.peak = flameStrong;
+                    }
+                    lamps[lit].lx = flameLine.x; lamps[lit].ly = flameLine.y; lamps[lit].lz = flameLine.z;
+                    pad.flameLamp = lit;
+                }
+                // (the steam and the trench's glow from here on only while its jet goes down the grate, or the trench is emptying)
+                if (made <= 0f) continue;
+                // (And steam off the deck round the flame's foot, since 2026-11-19. At a real pad water is poured over the deck at
+                // ignition, and steam boils up all round the rocket's base as well as out of the trench's end: in NASA's photographs
+                // of the Falcon 9 of 30 May 2020 (KSC-20200530-PH-AWG03_0010) and of Shuttle launches (KSC-02pp0483) the base stands
+                // in a mass of it, lit orange and gold by the flame, as wide as two or three of the rocket. Ours came out of the
+                // trench's ends alone, 11 and 12 m off, and the flame's light fell on nothing there. Off the edge of the grate, out
+                // and up, DeckSteam as much again as the trench's ends make between them. TestDeck 1: none, as until then; TryS:
+                // so much instead.)
+                float deck = Settings.TestDeck == 1f ? 0f : Settings.TryS >= 0f ? Settings.TryS : DeckSteam;
+                if (deck > 0f && pad.flameLong > 0f && pad.halfA > 1f && pad.halfB > 1f)
+                {
+                    Vector3 mid = frame.ToLocal((Vector3d)pad.middle);
+                    Vector3 sideA = frame.DirToLocal((Vector3d)pad.axisA), sideB = frame.DirToLocal((Vector3d)pad.axisB);
+                    float deckRate = rate * 0.8f, deckEach = deck * 1.3f * made / deckRate;
+                    float deckSpeed = (6f + 10f * pad.strongest) * Mathf.Sqrt(pad.fill);
+                    pad.deckDue += deckRate * dt;
+                    int deckPuffs = Mathf.Min((int)pad.deckDue, 24);
+                    pad.deckDue -= (int)pad.deckDue;
+                    for (int k = 0; k < deckPuffs; k++)
+                    {
+                        int i = Add();
+                        if (i < 0) break;
+                        ref P o = ref p[i];
+                        // (from a place along one of the grate's four edges, going out from its middle)
+                        float along = Random.Range(-1f, 1f);
+                        int edge = Random.Range(0, 4);
+                        Vector3 offset = edge == 0 ? sideA * pad.halfA + sideB * (along * pad.halfB)
+                                       : edge == 1 ? -sideA * pad.halfA + sideB * (along * pad.halfB)
+                                       : edge == 2 ? sideB * pad.halfB + sideA * (along * pad.halfA)
+                                       : -sideB * pad.halfB + sideA * (along * pad.halfA);
+                        Vector3 outward = new Vector3(offset.x, 0f, offset.z);
+                        outward = outward.sqrMagnitude > 1e-4f ? outward.normalized : Vector3.right;
+                        o.r = Random.Range(1.4f, 2.4f);
+                        Vector3 c = mid + offset;
+                        c.y = mid.y + 0.6f * o.r + Random.Range(0f, 1.5f);
+                        float fast = deckSpeed * Random.Range(0.6f, 1.2f);
+                        Vector3 push = (outward + Vector3.up * Random.Range(0.25f, 0.7f)) * fast;
+                        o.x = c.x; o.y = c.y; o.z = c.z;
+                        o.kx = push.x; o.ky = push.y; o.kz = push.z;
+                        o.kloss = 1.6f; o.drag = 3.5f;
+                        o.grow = 0.6f * o.r;
+                        o.swell = 0.12f + Swell(outward, fast, 1.6f, o.r);
+                        o.turb = 6f;
+                        o.rise = Random.Range(1.2f, 3.2f) * (1f + 1.2f * Mathf.Clamp01((pad.shade - 0.6f) / 0.3f));
+                        o.mass = deckEach * Random.Range(0.7f, 1.3f);
+                        o.life = Settings.TrailLingers > 0f ? Lingers(pad.lasts, hangs, 0f) * Random.Range(0.85f, 1.15f) : pad.lasts * hangs * Random.Range(0.6f, 1.3f);
+                        o.fadeIn = 0.15f;
+                        // (boiled water, white: not the engine's smoke that the trench's ends carry out with theirs. With that smoke's
+                        // tone and warmth, what was left round the pad after the rocket had gone was tan, as dust is: `lift_deck`.)
+                        float tone = Mathf.Lerp(pad.shade, 0.88f, 0.75f) * Random.Range(0.92f, 1.06f);
+                        o.ar = tone; o.ag = tone; o.ab = tone;
+                        o.tint = (byte)Mathf.Clamp(pad.tint, 0, FireKinds - 1);
+                        o.flags = Exhausted;
+                        o.tile = Lumpy();
+                        Born(i);
+                    }
+                }
                 for (int n = 0; n < pad.ends.Length; n++)
                 {
                     Transform end = pad.ends[n];
@@ -560,7 +714,9 @@ namespace VolumetricExplosions
                         o.grow = 0.6f * o.r;
                         o.swell = 0.12f + Swell(dir, fast, 1.6f, o.r);
                         o.turb = 6f;
-                        o.rise = Random.Range(1.2f, 3.2f);
+                        // (steam climbs: a launch's cloud is the pad's water boiled, hotter than the air by far, and it lifts off the ground
+                        // and goes up as it spreads, where an engine's own smoke lies. By how pale it is. TestMass 1: as before.)
+                        o.rise = Random.Range(1.2f, 3.2f) * (1f + (Settings.TestMass == 1f ? 0f : 1.2f * Mathf.Clamp01((pad.shade - 0.6f) / 0.3f)));
                         o.mass = each * Random.Range(0.7f, 1.3f);
                         o.life = Settings.TrailLingers > 0f ? Lingers(pad.lasts, hangs, 0f) * Random.Range(0.85f, 1.15f) : pad.lasts * hangs * Random.Range(0.6f, 1.3f);
                         o.fadeIn = 0.12f;

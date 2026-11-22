@@ -132,6 +132,8 @@ namespace VolumetricExplosions
         System.Threading.Tasks.Task<Land> charting;       // making a lattice of soundings that are back
         float soundX0, soundZ0, soundStep, soundTop;       // the lattice being sounded, and the height its soundings are taken from
         float nextSurvey;
+        int fallenSeen;                                    // (Razing.Fallen as this patch last saw it)
+        float soundAgainAt = -1f, soundOnceMoreAt = -1f;   // (after a building has come down near: the ground sounded again soon, and once more)
         const float NoGround = -1e30f;                     // (a sounding that found nothing)
         static readonly RaycastCommand[] soundList = new RaycastCommand[Land.Side * Land.Side];      // (used on the game's own thread only)
         readonly int[] speck = new int[64];
@@ -196,8 +198,13 @@ namespace VolumetricExplosions
                 }
             }
             if (Settings.TestGround >= 1f) { land = null; return; }
+            // (a building has come down: what was sounded as its roof is air now, or will be when it has finished falling)
+            if (fallenSeen != Razing.Fallen) { fallenSeen = Razing.Fallen; soundAgainAt = time + 0.4f; soundOnceMoreAt = time + 2.5f; }
             if (soundOut || charting != null || time < nextSurvey) return;
             nextSurvey = time + (time - lastBlast < 3f ? 0.1f : 0.5f);
+            bool again = false;
+            if (soundAgainAt >= 0f && time >= soundAgainAt) { again = true; soundAgainAt = -1f; }
+            else if (soundOnceMoreAt >= 0f && time >= soundOnceMoreAt) { again = true; soundOnceMoreAt = -1f; }
             if (count == 0 && waiting.Count == 0 && l != null) return;
 
             // The stretch to be covered: everything there is, with room to spread; and in a blast's first moments, as far as it will throw things.
@@ -215,7 +222,7 @@ namespace VolumetricExplosions
                 float edge = 2f + 0.05f * (tx - bx > tz - bz ? tx - bx : tz - bz), far = (Land.Side - 1) * l.step;
                 if (bx - edge >= l.x0 && tx + edge <= l.x0 + far && bz - edge >= l.z0 && tz + edge <= l.z0 + far)
                 {
-                    if (time - l.made < 10f) return;
+                    if (time - l.made < 10f && !again) return;
                     Sound(l.x0, l.z0, l.step);
                     return;
                 }
